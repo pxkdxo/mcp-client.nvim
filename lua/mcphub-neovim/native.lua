@@ -1,0 +1,134 @@
+--- Native, in-process MCP server registration (U3).
+---
+--- A native server is a config table styled after `mcphub.nvim`'s existing
+--- `native_servers` shape: `name` plus `tools`/`resources`/`prompts` tables
+--- of plain Lua functions. `M.register(config)` wraps it in the exact same
+--- client object shape `client.lua` exposes for a remote hub connection
+--- (`id`, `name`, `is_stopped()`, `request`, `notify`) and adds it to the
+--- same registry `get_clients()` reads from (via `client.register_native`),
+--- so adapters built against that shape cannot tell a native server from a
+--- remote one.
+---
+--- No concrete native servers ship here -- this module is only the general
+--- mechanism (R3/F3); see `tests/fixtures/example_native_server.lua` for the
+--- minimal test-only example that proves it.
+---
+--- Request routing: `request(rpc_message, callback)` short-circuits straight
+--- to a direct Lua function call instead of any network round-trip.
+--- Supported MCP methods mirror the three capability tables:
+---   tools/call      params = { name, arguments } -> tools[name](arguments)
+---   resources/read  params = { uri }             -> resources[uri](params)
+---   prompts/get     params = { name, arguments }  -> prompts[name](arguments)
+--- A Lua error raised inside a handler is caught (`pcall`) and reported
+--- through the same `(err, result, response)` callback shape a remote
+--- server's tool-call failure would use -- it never escapes as an uncaught
+--- exception back to the caller of `request()`.
+
+local client = require("mcphub-neovim.client")
+
+local M = {}
+
+--- Look up the handler for an MCP method against a native server's
+--- capability tables, returning the handler function plus the key used to
+--- look it up (for error messages) or nil, err if the method/key is
+--- unsupported or missing.
+local function resolve_handler(entry, method, params)
+	params = params or {}
+	if method == "tools/call" then
+		local name = params.name
+		local fn = entry.tools[name]
+		if not fn then
+			return nil, nil, string.format("native server %q has no tool %q", entry.name, tostring(name))
+		end
+		return fn, params.arguments or {}, nil
+	elseif method == "resources/read" then
+		local uri = params.uri
+		local fn = entry.resources[uri]
+		if not fn then
+			return nil, nil, string.format("native server %q has no resource %q", entry.name, tostring(uri))
+		end
+		return fn, params, nil
+	elseif method == "prompts/get" then
+		local name = params.name
+		local fn = entry.prompts[name]
+		if not fn then
+			return nil, nil, string.format("native server %q has no prompt %q", entry.name, tostring(name))
+		end
+		return fn, params.arguments or {}, nil
+	end
+	return nil, nil, string.format("native server %q does not support method %q", entry.name, tostring(method))
+end
+
+--- Register a native server config and return the client object.
+--- @param config table
+---   name       (string) the server's name, as reported through `get_clients()`
+---   tools      (table|nil) map of tool name -> fun(arguments) -> result
+---   resources  (table|nil) map of resource uri -> fun(params) -> result
+---   prompts    (table|nil) map of prompt name -> fun(arguments) -> result
+--- @return table client object: id, name, is_stopped(), request(), notify()
+function M.register(config)
+	assert(type(config) == "table", "config table is required")
+	assert(type(config.name) == "string" and config.name ~= "", "config.name is required")
+
+	local entry = {
+		name = config.name,
+		tools = config.tools or {},
+		resources = config.resources or {},
+		prompts = config.prompts or {},
+		_stopped = false,
+	}
+
+	local obj = {
+		name = entry.name,
+		config = config,
+	}
+
+	function obj:is_stopped()
+		return entry._stopped
+	end
+
+	--- Short-circuit straight to a direct Lua function call -- no network,
+	--- no transport, no session. `pcall` is the load-bearing piece: it is
+	--- what turns a Lua error raised inside a tool/resource/prompt function
+	--- into an `(err, result, response)` callback invocation instead of an
+	--- uncaught exception unwinding through the caller of `request()`,
+	--- exactly like a remote server's tool-call failure would surface.
+	function obj:request(rpc_message, callback)
+		assert(type(callback) == "function", "callback is required")
+		rpc_message = rpc_message or {}
+
+		if entry._stopped then
+			return callback("native server is stopped", nil, nil)
+		end
+
+		local handler, args, resolve_err = resolve_handler(entry, rpc_message.method, rpc_message.params)
+		if resolve_err then
+			return callback(resolve_err, nil, nil)
+		end
+
+		local ok, result_or_err = pcall(handler, args)
+		if not ok then
+			return callback(result_or_err, nil, nil)
+		end
+		return callback(nil, result_or_err, nil)
+	end
+
+	--- Native servers have nothing to notify (no persistent connection to
+	--- push a server-initiated message down); accept and discard so callers
+	--- generic over the client shape never have to special-case native
+	--- servers.
+	function obj:notify(_rpc_message)
+		return nil
+	end
+
+	--- Mark the native server inert. Idempotent, mirroring the remote
+	--- client's `disconnect()` -- called by `client._reset_registry()` in
+	--- tests via the registry's `intentional_close` hook.
+	function obj:disconnect()
+		entry._stopped = true
+	end
+
+	return client.register_native(obj)
+end
+
+return M

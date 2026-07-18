@@ -424,6 +424,41 @@ function M.connect(config, opts)
 	end)
 end
 
+--- Register a non-remote (e.g. native, in-process) client object into the
+--- exact same registry `get_clients()` reads from, so `M.connect`-built remote
+--- clients and any other registration entry point are indistinguishable to a
+--- caller of `get_clients()`. This is the one small hook a non-remote
+--- registrant (native.lua, U3) needs: the registry itself is module-local and
+--- otherwise only ever written to by `M.connect`.
+---
+--- @param client_object table  a fully-built client object already shaped
+---   like `Client` (`id`, `name`, `is_stopped()`, `request`, `notify`, and
+---   optionally `disconnect()`). If `client_object.id` is nil, a fresh id is
+---   assigned and set on the object.
+--- @return table the same `client_object`, registered.
+function M.register_native(client_object)
+	assert(type(client_object) == "table", "client_object table is required")
+	if client_object.id == nil then
+		client_object.id = new_id()
+	end
+	registry[client_object.id] = {
+		id = client_object.id,
+		name = client_object.name,
+		object = client_object,
+		-- `_reset_registry` calls `entry:intentional_close()` unconditionally
+		-- on every registered entry; a native entry has no transport/job to
+		-- tear down, so route it through the object's own `disconnect()` (a
+		-- no-op-safe method every client object -- native or remote -- must
+		-- expose) instead of assuming remote-only teardown internals.
+		intentional_close = function(self)
+			if client_object.disconnect then
+				client_object:disconnect()
+			end
+		end,
+	}
+	return client_object
+end
+
 --- Return the currently-registered client objects, optionally filtered.
 --- @param filter table|nil  { id = string } and/or { name = string }
 --- @return Client[] list of matching client objects
