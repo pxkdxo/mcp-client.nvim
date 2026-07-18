@@ -60,6 +60,31 @@ local function make_remote_double(name, tools_listing, on_call)
 	})
 end
 
+--- A pathological client double whose `request()` throws synchronously
+--- instead of reporting failure through the `(err, result, response)`
+--- callback -- neither of this codebase's real client implementations
+--- (native, U3; remote, U1/U2) behaves this way today, but the adapter must
+--- still be hardened against a hypothetical future client that does, per
+--- the U4 review finding: a synchronous throw from one client's
+--- `request()` must not abort `M.custom_tools()`'s iteration over any other
+--- registered clients, and must not crash whatever in Avante calls a tool's
+--- `func`.
+local function make_throwing_client(name)
+	local stopped = false
+	local obj = { name = name }
+	function obj:is_stopped()
+		return stopped
+	end
+	function obj:request(_rpc_message, _callback)
+		error("synchronous throw from request(): " .. name)
+	end
+	function obj:notify(_rpc_message) end
+	function obj:disconnect()
+		stopped = true
+	end
+	return client.register_native(obj)
+end
+
 describe("adapters.avante (custom_tools translation)", function()
 	after_each(function()
 		client._reset_registry()
@@ -222,5 +247,83 @@ describe("adapters.avante (custom_tools translation)", function()
 			end
 		end
 		assert.is_false(found_after)
+	end)
+
+	it("resilience: a throwing client's request() does not break custom_tools() for other clients", function()
+		local example = require("tests.fixtures.example_native_server")
+		native.register(example)
+		make_throwing_client("throws-on-request")
+
+		-- refresh_client_tools() calls request() on every registered client,
+		-- including the throwing one -- this must not raise out of
+		-- custom_tools() itself, and the well-behaved native client's tools
+		-- must still be listed.
+		local tools
+		assert.has_no.errors(function()
+			tools = avante.custom_tools()
+		end)
+		assert.is_table(tools)
+
+		local echo_tool
+		for _, t in ipairs(tools) do
+			assert.are_not.equal("throws-on-request", t.name)
+			if t.name == "echo" then
+				echo_tool = t
+			end
+		end
+		assert.is_not_nil(echo_tool)
+	end)
+
+	it("resilience: func() on a throwing client does not crash the caller, and reports via on_complete", function()
+		-- build_tool_spec() is a private local, not exported by the
+		-- adapter, so the realistic way to get a hold of a real tool spec
+		-- built around a client object is the same path M.custom_tools()
+		-- itself uses: register a real (well-behaved) native client so its
+		-- tools/list succeeds and a spec is built, then make that same
+		-- client's request() throw synchronously for the tools/call this
+		-- test actually exercises -- simulating the hypothetical future
+		-- client the review finding is concerned with, without needing a
+		-- separate throwing double wired all the way through tools/list.
+		local example = require("tests.fixtures.example_native_server")
+		local server = native.register(example)
+
+		local tools = avante.custom_tools()
+		local echo_tool
+		for _, t in ipairs(tools) do
+			if t.name == "echo" then
+				echo_tool = t
+			end
+		end
+		assert.is_not_nil(echo_tool)
+
+		-- Monkey-patch this registered client's request() to throw
+		-- synchronously, simulating the hypothetical future client the
+		-- review finding is concerned with, without needing a second
+		-- tools/list round trip.
+		function server:request(_rpc_message, _callback)
+			error("synchronous throw from request(): tools/call")
+		end
+
+		local got_result, got_err
+		local completed = false
+		local result, err
+		assert.has_no.errors(function()
+			result, err = echo_tool.func({ text = "hello" }, {
+				on_complete = function(res, e)
+					completed = true
+					got_result, got_err = res, e
+				end,
+			})
+		end)
+
+		-- func() itself still returns nil, nil synchronously (its contract
+		-- never changes), but the thrown error must be reported through
+		-- on_complete exactly like a callback-reported err would be.
+		assert.is_nil(result)
+		assert.is_nil(err)
+		assert.is_true(completed)
+		assert.is_nil(got_result)
+		assert.is_not_nil(got_err)
+		assert.matches("synchronous throw from request", got_err)
 	end)
 end)

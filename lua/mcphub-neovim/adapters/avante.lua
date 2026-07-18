@@ -88,18 +88,35 @@ local tools_cache = {} ---@type table<string, table[]>
 --- leaves the previous cache entry (or the initial empty list) in place
 --- rather than raising, so one misbehaving client can never take down the
 --- whole tool list.
+---
+--- Both current client implementations (native, U3; remote, U1/U2) only
+--- ever report failures through the `(err, result, response)` callback --
+--- neither throws synchronously out of `request()` itself. This `pcall` is
+--- pure defense-in-depth against a hypothetical future client (registered
+--- via the generic `client.register_native`-style hook) that throws
+--- synchronously: that failure is treated exactly like an `err` callback
+--- argument -- the cache is simply left untouched -- rather than
+--- propagating out of this function and aborting the `for` loop in
+--- `M.custom_tools()` for every other, unrelated client still left to
+--- iterate.
 local function refresh_client_tools(mcp_client)
-	mcp_client:request({
-		jsonrpc = "2.0",
-		id = 1,
-		method = "tools/list",
-		params = {},
-	}, function(err, result, _response)
-		if err or type(result) ~= "table" or type(result.tools) ~= "table" then
-			return
-		end
-		tools_cache[mcp_client.id] = result.tools
+	local ok, err = pcall(function()
+		mcp_client:request({
+			jsonrpc = "2.0",
+			id = 1,
+			method = "tools/list",
+			params = {},
+		}, function(cb_err, result, _response)
+			if cb_err or type(result) ~= "table" or type(result.tools) ~= "table" then
+				return
+			end
+			tools_cache[mcp_client.id] = result.tools
+		end)
 	end)
+	if not ok then
+		-- Same handling as a callback-reported error: leave the cache as-is.
+		return err
+	end
 end
 
 --- MCP's `inputSchema` (JSON Schema-ish: `{ type = "object", properties =
@@ -168,28 +185,41 @@ local function build_tool_spec(mcp_client, tool_info)
 				on_log("calling " .. tool_info.name .. " on " .. mcp_client.name)
 			end
 
-			mcp_client:request({
-				jsonrpc = "2.0",
-				id = 1,
-				method = "tools/call",
-				params = { name = tool_info.name, arguments = input or {} },
-			}, function(err, result, _response)
-				if not on_complete then
-					return
-				end
-				if err then
-					return on_complete(nil, tostring(err))
-				end
-				local result_str
-				if type(result) == "string" then
-					result_str = result
-				elseif result ~= nil then
-					result_str = vim.json.encode(result)
-				else
-					result_str = ""
-				end
-				on_complete(result_str, nil)
+			-- Both current client implementations only ever report
+			-- failures through the callback's `err` argument, never by
+			-- throwing synchronously out of `request()`. This `pcall` is
+			-- pure defense-in-depth against a hypothetical future client
+			-- that does throw synchronously: the caught error is routed
+			-- through `on_complete` exactly the same way a
+			-- callback-reported `err` already is, rather than propagating
+			-- out of `func` and crashing whatever in Avante called it.
+			local ok, call_err = pcall(function()
+				mcp_client:request({
+					jsonrpc = "2.0",
+					id = 1,
+					method = "tools/call",
+					params = { name = tool_info.name, arguments = input or {} },
+				}, function(err, result, _response)
+					if not on_complete then
+						return
+					end
+					if err then
+						return on_complete(nil, tostring(err))
+					end
+					local result_str
+					if type(result) == "string" then
+						result_str = result
+					elseif result ~= nil then
+						result_str = vim.json.encode(result)
+					else
+						result_str = ""
+					end
+					on_complete(result_str, nil)
+				end)
 			end)
+			if not ok and on_complete then
+				on_complete(nil, tostring(call_err))
+			end
 
 			-- Nil, nil signals "asynchronous; wait for on_complete"
 			-- (init.lua:1440-1441) -- correct for both native and remote
