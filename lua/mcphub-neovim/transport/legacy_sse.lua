@@ -22,16 +22,21 @@ local SseParser = {}
 SseParser.__index = SseParser
 
 function SseParser.new(on_event)
-	return setmetatable({ _event_name = nil, _data_lines = {}, _on_event = on_event }, SseParser)
+	return setmetatable({ _event_name = nil, _data_lines = {}, _retry = nil, _on_event = on_event }, SseParser)
 end
 
 function SseParser:feed_line(line)
 	if line == "" then
-		if #self._data_lines > 0 or self._event_name then
-			self._on_event({ event = self._event_name, data = table.concat(self._data_lines, "\n") })
+		if #self._data_lines > 0 or self._event_name or self._retry ~= nil then
+			self._on_event({
+				event = self._event_name,
+				data = table.concat(self._data_lines, "\n"),
+				retry = self._retry,
+			})
 		end
 		self._event_name = nil
 		self._data_lines = {}
+		self._retry = nil
 		return
 	end
 
@@ -40,9 +45,15 @@ function SseParser:feed_line(line)
 		self._event_name = value
 	elseif field == "data" then
 		table.insert(self._data_lines, value)
+	elseif field == "retry" then
+		-- Reconnection hint: the server's requested delay, in ms, for the
+		-- next reconnect attempt (U2). Ignore a malformed non-integer value.
+		local ms = tonumber(value)
+		if ms then
+			self._retry = math.floor(ms)
+		end
 	end
-	-- Other fields (id:, retry:, comments starting with ":") are ignored by
-	-- U1; reconnection hinting via `retry:` is U2's concern.
+	-- Other fields (id:, comments starting with ":") are ignored.
 end
 
 --- @param opts table
@@ -58,14 +69,28 @@ function LegacySse.new(opts)
 		_job = opts.job,
 		_pending = {},
 		_closed = false,
+		_retry_hint = nil,
 	}, LegacySse)
 end
 
+--- Register a handler for hub-originated messages that do not match a
+--- pending request -- i.e. server notifications (a `method`, no id we sent).
+--- The client layer wires this to fire an `MCPNotify` autocmd. Optional; if
+--- unset such messages are simply ignored.
+function LegacySse:set_on_notification(fn)
+	self._on_notification = fn
+end
+
+--- The most recent SSE `retry:` hint (ms) the server has sent on this
+--- stream, or nil if none. The reconnect layer prefers this over its
+--- computed backoff for the next attempt.
+function LegacySse:get_retry_hint()
+	return self._retry_hint
+end
+
 --- Route an incoming SSE event to whichever pending request its JSON-RPC
---- `id` matches (if any) and forward it as an unsolicited message
---- otherwise. Not used directly by U1 (no session/notification routing
---- is implemented yet), but kept small and here so streamable delivery
---- has somewhere to go once U2 needs it.
+--- `id` matches (if any); otherwise, if it carries a `method`, treat it as a
+--- server-originated notification and hand it to the notification handler.
 function LegacySse:_handle_message(decoded)
 	if decoded.id ~= nil and self._pending[decoded.id] then
 		local callback = self._pending[decoded.id]
@@ -73,12 +98,26 @@ function LegacySse:_handle_message(decoded)
 		if decoded.error then
 			callback(decoded.error.message or "hub returned an error", nil, decoded)
 		else
-			callback(nil, decoded.result, decoded)
+			-- Pass the full decoded JSON-RPC object as the result, matching
+			-- streamable_http's `callback(nil, decoded, response)` shape so the
+			-- session/client layer sees one transport-agnostic result form
+			-- (`result.result` is the JSON-RPC `result` field either way).
+			callback(nil, decoded, decoded)
 		end
+		return
+	end
+
+	-- No matching pending request. A message with a `method` is a
+	-- server-originated notification/request; surface it to the client layer.
+	if decoded.method ~= nil and self._on_notification then
+		self._on_notification(decoded)
 	end
 end
 
 function LegacySse:_on_sse_event(event)
+	if event.retry ~= nil then
+		self._retry_hint = event.retry
+	end
 	if event.event == "message" or event.event == nil then
 		local ok, decoded = pcall(vim.json.decode, event.data)
 		if ok and type(decoded) == "table" then
@@ -120,7 +159,9 @@ function LegacySse:request(rpc_message, callback)
 		timeout = 30000,
 		callback = vim.schedule_wrap(function(response)
 			if not response or response.status < 200 or response.status >= 300 then
-				self._pending[rpc_message.id] = nil
+				if rpc_message.id ~= nil then
+					self._pending[rpc_message.id] = nil
+				end
 				return callback(
 					string.format(
 						"hub returned status %d posting to legacy endpoint",
@@ -141,7 +182,9 @@ function LegacySse:request(rpc_message, callback)
 			end
 		end),
 		on_error = vim.schedule_wrap(function(err)
-			self._pending[rpc_message.id] = nil
+			if rpc_message.id ~= nil then
+				self._pending[rpc_message.id] = nil
+			end
 			callback(err.message or "request failed", nil, nil)
 		end),
 	})
@@ -158,6 +201,16 @@ function LegacySse:notify(rpc_message)
 		callback = function() end,
 		on_error = function() end,
 	})
+end
+
+--- Expose the long-lived curl GET Job serving the SSE stream, so the
+--- session/reconnect layer can hook its exit (to detect a dropped stream)
+--- and drive the intentional-close mechanism (set
+--- `job.user_data.intentional_close` before `vim.uv.kill(job:pid(), ...)`).
+--- Returns nil if no job was handed in (e.g. a unit test constructing the
+--- transport without a real stream).
+function LegacySse:get_stream_job()
+	return self._job
 end
 
 function LegacySse:close()

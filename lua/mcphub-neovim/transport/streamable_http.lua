@@ -91,6 +91,22 @@ function StreamableHttp:notify(rpc_message)
 	})
 end
 
+--- The streamable_http transport POSTs per request and holds no long-lived
+--- stream Job (U1 does not open the optional server-push GET stream), so
+--- there is nothing for the session/reconnect layer to hook or kill here.
+--- Returns nil; the reconnect-on-stream-end path only applies to the legacy
+--- transport's persistent GET.
+function StreamableHttp:get_stream_job()
+	return nil
+end
+
+--- Interface parity with the legacy transport's notification hook. U1 does
+--- not open the optional server-push stream, so no unsolicited messages
+--- arrive on this transport; the handler is accepted and simply never fired.
+function StreamableHttp:set_on_notification(_)
+	-- no-op
+end
+
 function StreamableHttp:close()
 	self._closed = true
 end

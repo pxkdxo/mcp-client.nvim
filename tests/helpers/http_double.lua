@@ -29,6 +29,11 @@ end
 ---     -- sse entries are written one at a time, flushed immediately, and the
 ---     -- connection is left open (never closed by the double) so callers can
 ---     -- exercise a long-lived stream; test cleanup happens via double:stop().
+--- An SSE handler may also carry `on_stream = fun(socket)`, invoked with the
+--- live client socket right after the initial `sse` entries are flushed, so a
+--- fixture can push further frames or drop the connection mid-stream on
+--- demand -- the raw-socket equivalent of a server that keeps talking after
+--- the handshake.
 function HttpDouble.new(opts)
 	local self = setmetatable({}, HttpDouble)
 	self._on_request = assert(opts.on_request, "on_request is required")
@@ -87,6 +92,10 @@ function HttpDouble.new(opts)
 					end
 					frame = frame .. "\r\n"
 					client:write(frame)
+				end
+
+				if handler.on_stream then
+					handler.on_stream(client)
 				end
 			-- Connection intentionally left open; double:stop() tears it down.
 			else
