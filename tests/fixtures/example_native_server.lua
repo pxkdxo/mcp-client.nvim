@@ -28,6 +28,15 @@ return {
 			inputSchema = { type = "object", properties = {} },
 		},
 	},
-	resources = {},
+	resources = {
+		["example://greeting"] = function(_params)
+			return { content = { { type = "text", text = "hello from example-native" } } }
+		end,
+	},
+	resource_meta = {
+		["example://greeting"] = {
+			description = "A static greeting resource",
+		},
+	},
 	prompts = {},
 }
