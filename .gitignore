@@ -39,3 +39,8 @@ luac.out
 *.x86_64
 *.hex
 
+# macOS
+.DS_Store
+
+# Local dev/scratch
+.superpowers/
