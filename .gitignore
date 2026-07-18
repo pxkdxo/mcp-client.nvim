@@ -44,3 +44,4 @@ luac.out
 
 # Local dev/scratch
 .superpowers/
+.deps/
