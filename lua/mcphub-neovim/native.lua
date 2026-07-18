@@ -28,10 +28,37 @@ local client = require("mcphub-neovim.client")
 
 local M = {}
 
+--- Build the MCP-shaped listing for one capability table (`tools`,
+--- `resources`, or `prompts`), sorted by name for a deterministic order.
+--- Each entry's `meta` sidecar (`entry.tool_meta`/`resource_meta`/
+--- `prompt_meta`, keyed by the same name) is merged in when present, so a
+--- native server can optionally advertise a `description`/`inputSchema`/etc.
+--- alongside the bare name a caller gets for free from the capability
+--- table's keys alone.
+local function build_listing(capability_table, meta_table, id_field)
+	meta_table = meta_table or {}
+	local names = {}
+	for name in pairs(capability_table) do
+		table.insert(names, name)
+	end
+	table.sort(names)
+
+	local listing = {}
+	for _, name in ipairs(names) do
+		local entry_meta = meta_table[name] or {}
+		local item = vim.tbl_extend("force", {}, entry_meta, { [id_field] = name })
+		table.insert(listing, item)
+	end
+	return listing
+end
+
 --- Look up the handler for an MCP method against a native server's
 --- capability tables, returning the handler function plus the key used to
 --- look it up (for error messages) or nil, err if the method/key is
---- unsupported or missing.
+--- unsupported or missing. The three `*/list` methods have no single
+--- "handler function" to call -- they return the listing table directly
+--- via a synthetic zero-argument handler, so the shared call site in
+--- `request()` doesn't need a separate code path for them.
 local function resolve_handler(entry, method, params)
 	params = params or {}
 	if method == "tools/call" then
@@ -55,16 +82,36 @@ local function resolve_handler(entry, method, params)
 			return nil, nil, string.format("native server %q has no prompt %q", entry.name, tostring(name))
 		end
 		return fn, params.arguments or {}, nil
+	elseif method == "tools/list" then
+		local listing = build_listing(entry.tools, entry.tool_meta, "name")
+		return function()
+			return { tools = listing }
+		end, {}, nil
+	elseif method == "resources/list" then
+		local listing = build_listing(entry.resources, entry.resource_meta, "uri")
+		return function()
+			return { resources = listing }
+		end, {}, nil
+	elseif method == "prompts/list" then
+		local listing = build_listing(entry.prompts, entry.prompt_meta, "name")
+		return function()
+			return { prompts = listing }
+		end, {}, nil
 	end
 	return nil, nil, string.format("native server %q does not support method %q", entry.name, tostring(method))
 end
 
 --- Register a native server config and return the client object.
 --- @param config table
----   name       (string) the server's name, as reported through `get_clients()`
----   tools      (table|nil) map of tool name -> fun(arguments) -> result
----   resources  (table|nil) map of resource uri -> fun(params) -> result
----   prompts    (table|nil) map of prompt name -> fun(arguments) -> result
+---   name          (string) the server's name, as reported through `get_clients()`
+---   tools         (table|nil) map of tool name -> fun(arguments) -> result
+---   resources     (table|nil) map of resource uri -> fun(params) -> result
+---   prompts       (table|nil) map of prompt name -> fun(arguments) -> result
+---   tool_meta     (table|nil) map of tool name -> { description, inputSchema, ... },
+---     merged into that tool's `tools/list` entry (e.g. for an adapter that
+---     needs a description/param schema per tool, not just its name)
+---   resource_meta (table|nil) same shape as `tool_meta`, for `resources/list`
+---   prompt_meta   (table|nil) same shape as `tool_meta`, for `prompts/list`
 --- @return table client object: id, name, is_stopped(), request(), notify()
 function M.register(config)
 	assert(type(config) == "table", "config table is required")
@@ -75,6 +122,9 @@ function M.register(config)
 		tools = config.tools or {},
 		resources = config.resources or {},
 		prompts = config.prompts or {},
+		tool_meta = config.tool_meta or {},
+		resource_meta = config.resource_meta or {},
+		prompt_meta = config.prompt_meta or {},
 		_stopped = false,
 	}
 

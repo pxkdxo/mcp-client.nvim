@@ -15,6 +15,19 @@ return {
 			error("boom: deliberate tool failure")
 		end,
 	},
+	tool_meta = {
+		echo = {
+			description = "Echo the given text back",
+			inputSchema = {
+				type = "object",
+				properties = { text = { type = "string", description = "Text to echo" } },
+			},
+		},
+		boom = {
+			description = "Deliberately fail",
+			inputSchema = { type = "object", properties = {} },
+		},
+	},
 	resources = {},
 	prompts = {},
 }

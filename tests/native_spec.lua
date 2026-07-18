@@ -105,4 +105,48 @@ describe("native (in-process server registration)", function()
 			server:notify({ jsonrpc = "2.0", method = "notifications/initialized", params = {} })
 		end)
 	end)
+
+	it("answers tools/list with the registered tool names, MCP-shaped", function()
+		local example = require("tests.fixtures.example_native_server")
+		local server = native.register(example)
+
+		local got
+		server:request({
+			jsonrpc = "2.0",
+			id = 1,
+			method = "tools/list",
+			params = {},
+		}, function(err, result, response)
+			got = { err = err, result = result, response = response }
+		end)
+
+		assert.is_not_nil(got)
+		assert.is_nil(got.err)
+		assert.is_not_nil(got.result)
+		assert.is_not_nil(got.result.tools)
+
+		local names = {}
+		for _, tool in ipairs(got.result.tools) do
+			names[tool.name] = true
+		end
+		assert.is_true(names.echo)
+		assert.is_true(names.boom)
+	end)
+
+	it("answers tools/list with an empty list for a tool-less native server", function()
+		local server = native.register({ name = "empty-list-native", tools = {}, resources = {}, prompts = {} })
+
+		local got
+		server:request({
+			jsonrpc = "2.0",
+			id = 1,
+			method = "tools/list",
+			params = {},
+		}, function(err, result, response)
+			got = { err = err, result = result, response = response }
+		end)
+
+		assert.is_nil(got.err)
+		assert.are.equal(0, #got.result.tools)
+	end)
 end)
