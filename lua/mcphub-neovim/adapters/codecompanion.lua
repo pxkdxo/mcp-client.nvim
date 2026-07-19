@@ -96,7 +96,21 @@
 --- exist under that name in this installed version -- it was renamed to
 --- `editor_context` (`doc/configuration/upgrading.md:26`: *"`variables`
 --- have been renamed to `editor_context`... `interactions.chat.editor_context`
---- and `interactions.inline.editor_context`"*). It is not broken or
+--- and `interactions.inline.editor_context`"*). **(U13 correction:** the
+--- plugin has moved again since that doc was written and since U5's
+--- original investigation: the real, currently-live path is
+--- `interactions.shared.editor_context`, not `interactions.chat.editor_context`.
+--- `config.setup()` (`config.lua:1376-1381`) migrates a caller's
+--- `args.interactions.chat.editor_context` into
+--- `M.config.interactions.shared.editor_context` and nils out the old
+--- `chat.editor_context` key entirely, and every real reader --
+--- `interactions/chat/keymaps/init.lua:97`, `providers/completion/init.lua:281`,
+--- `interactions/shared/editor_context/init.lua:90` -- reads only
+--- `interactions.shared.editor_context`. Confirmed empirically with a
+--- headless run against the real installed plugin: mutating
+--- `interactions.shared.editor_context` in place after `setup()` is
+--- observed end-to-end by the real `chat_render()` path, exactly the shape
+--- this adapter now targets below.)** It is not broken or
 --- unimplemented: `lua/codecompanion/interactions/shared/editor_context/user.lua`
 --- (the resolver for any config entry with no `path`, i.e. a user/extension-
 --- registered context) is a real, working, synchronous-only mechanism --
@@ -714,7 +728,13 @@ local registered_prompt_slash_command_names = {}
 local function refresh()
 	local mcp = require("codecompanion.mcp")
 	local config = require("codecompanion.config")
-	config.interactions.chat.editor_context = config.interactions.chat.editor_context or {}
+	-- interactions.shared.editor_context, NOT interactions.chat.editor_context
+	-- (U13): confirmed against the real installed plugin that config.setup()
+	-- migrates the latter into the former and nils the old key out entirely
+	-- (config.lua:1376-1381) -- see the design-doc comment at the top of this
+	-- file, "## 3. Resource/variable bridging", for the full citation trail.
+	config.interactions.shared = config.interactions.shared or {}
+	config.interactions.shared.editor_context = config.interactions.shared.editor_context or {}
 	config.interactions.chat.slash_commands = config.interactions.chat.slash_commands or {}
 
 	--- Remove every currently-registered slash-command entry for one client
@@ -730,7 +750,7 @@ local function refresh()
 	local live_ids = {}
 	for _, mcp_client in ipairs(client.get_clients()) do
 		live_ids[mcp_client.id] = true
-		config.interactions.chat.editor_context[NAME_PREFIX .. mcp_client.name] = build_editor_context_entry(mcp_client)
+		config.interactions.shared.editor_context[NAME_PREFIX .. mcp_client.name] = build_editor_context_entry(mcp_client)
 		registered_editor_context_ids[mcp_client.id] = mcp_client.name
 
 		if mcp_client:is_stopped() then
@@ -770,7 +790,7 @@ local function refresh()
 	-- get_clients() at all.
 	for id, name in pairs(registered_editor_context_ids) do
 		if not live_ids[id] then
-			config.interactions.chat.editor_context[NAME_PREFIX .. name] = nil
+			config.interactions.shared.editor_context[NAME_PREFIX .. name] = nil
 			registered_editor_context_ids[id] = nil
 			mcp.unregister_tools(id)
 			tools_cache[id] = nil
@@ -795,7 +815,7 @@ end
 ---
 --- Delegates straight to `refresh()`, which registers one `editor_context`
 --- entry per currently-known client
---- (`config.interactions.chat.editor_context`, mutated in place so
+--- (`config.interactions.shared.editor_context`, mutated in place so
 --- `EditorContext.new` -- which reads that same live config table on every
 --- chat buffer -- picks it up without needing a restart), publishes tools,
 --- and registers one slash-command entry per currently-cached MCP prompt

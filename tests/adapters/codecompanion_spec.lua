@@ -16,13 +16,24 @@ local native = require("mcphub-neovim.native")
 ---     `.unregister_tools(server_name)` / `.get_registered_tools()` --
 ---     `mcp/init.lua:44-56`, a plain module-local registry with no
 ---     dependency on CodeCompanion's own MCP `Client` class.
----   - `codecompanion.config.interactions.chat.editor_context` -- a plain
+---   - `codecompanion.config.interactions.shared.editor_context` -- a plain
 ---     table of `{ description, callback(self) }` entries, resolved
 ---     synchronously by `editor_context/user.lua:18-30`
 ---     (`self.config.callback(self)`, return value used immediately as
 ---     message content -- no async completion path exists in this
 ---     subsystem, confirmed by grepping both `editor_context/init.lua` and
----     `editor_context/user.lua`).
+---     `editor_context/user.lua`). NOTE (U13): this used to be
+---     `interactions.chat.editor_context` (U5's original, since-stale
+---     assumption); the real installed `config.setup()`
+---     (`config.lua:1376-1381`) now migrates a caller's
+---     `args.interactions.chat.editor_context` into
+---     `M.config.interactions.shared.editor_context` and nils out the old
+---     `chat.editor_context` key entirely, and every real reader
+---     (`interactions/chat/keymaps/init.lua:97`,
+---     `providers/completion/init.lua:281`,
+---     `interactions/shared/editor_context/init.lua:90`) reads only the
+---     `shared` path -- confirmed empirically against the real installed
+---     plugin before this fix (see U13's task report).
 ---   - `codecompanion.config.interactions.chat.slash_commands` (U12) -- a
 ---     plain, live module table of `{ description, callback(chat) }`
 ---     entries, read directly by `pairs()` on every completion/action-palette
@@ -77,12 +88,29 @@ local function fresh_codecompanion_config()
 		},
 		interactions = {
 			chat = {
-				editor_context = {},
+				-- Real config no longer carries editor_context here at all --
+				-- config.setup() (config.lua:1376-1381) nils this out after
+				-- migrating any caller-supplied value into
+				-- interactions.shared.editor_context. Deliberately absent (not
+				-- even `{}`) so a regression that writes back to this dead path
+				-- is caught (see the "does not resurrect the dead old path"
+				-- regression test below).
 				slash_commands = {
 					-- Real config always carries this sub-key alongside per-command
 					-- entries (config.lua:539-545); present here so the adapter's
 					-- additions can never accidentally clobber it.
 					opts = { acp = { enabled = true } },
+				},
+			},
+			shared = {
+				-- Real config always carries this sub-key alongside per-context
+				-- entries (config.lua:841-855); present here so the adapter's
+				-- additions can never accidentally clobber it, mirroring
+				-- interactions.chat.slash_commands.opts above.
+				editor_context = {
+					opts = {
+						excluded = { buftypes = {}, fts = {} },
+					},
 				},
 			},
 		},
@@ -279,10 +307,10 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 		local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
 		codecompanion_adapter.setup({})
 
-		local editor_context = fake_config.interactions.chat.editor_context
+		local editor_context = fake_config.interactions.shared.editor_context
 		local entry_key
 		for key in pairs(editor_context) do
-			if key:match("example%-native$") then
+			if key ~= "opts" and key:match("example%-native$") then
 				entry_key = key
 			end
 		end
@@ -333,10 +361,10 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 			local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
 			codecompanion_adapter.setup({})
 
-			local editor_context = fake_config.interactions.chat.editor_context
+			local editor_context = fake_config.interactions.shared.editor_context
 			local entry_key
 			for key in pairs(editor_context) do
-				if key:match("remote%-resources$") then
+				if key ~= "opts" and key:match("remote%-resources$") then
 					entry_key = key
 				end
 			end
@@ -363,11 +391,11 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 			-- background refresh populated.
 			vim.wait(200, function()
 				codecompanion_adapter.exports.refresh()
-				local refreshed = fake_config.interactions.chat.editor_context[entry_key].callback({})
+				local refreshed = fake_config.interactions.shared.editor_context[entry_key].callback({})
 				return refreshed:match("remote://thing") ~= nil
 			end)
 
-			local refreshed_content = fake_config.interactions.chat.editor_context[entry_key].callback({})
+			local refreshed_content = fake_config.interactions.shared.editor_context[entry_key].callback({})
 			assert.matches("remote://thing", refreshed_content)
 		end
 	)
@@ -379,6 +407,14 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 		end)
 		local all_tools = fake_mcp.get_registered_tools()
 		assert.are.equal(0, vim.tbl_count(all_tools))
+
+		local editor_context_count = 0
+		for key in pairs(fake_config.interactions.shared.editor_context) do
+			if key ~= "opts" then
+				editor_context_count = editor_context_count + 1
+			end
+		end
+		assert.are.equal(0, editor_context_count)
 	end)
 
 	it("integration: a client transitioning to disconnected is reflected on next refresh, not stale", function()
@@ -421,10 +457,10 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 		local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
 		codecompanion_adapter.setup({})
 
-		local editor_context = fake_config.interactions.chat.editor_context
+		local editor_context = fake_config.interactions.shared.editor_context
 		local entry_key
 		for key in pairs(editor_context) do
-			if key:match("example%-native$") then
+			if key ~= "opts" and key:match("example%-native$") then
 				entry_key = key
 			end
 		end
@@ -439,10 +475,43 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 
 		codecompanion_adapter.exports.refresh()
 		assert.is_nil(
-			fake_config.interactions.chat.editor_context[entry_key],
+			fake_config.interactions.shared.editor_context[entry_key],
 			"a fully-removed client's editor_context entry must be pruned, not left as a dangling closure"
 		)
 	end)
+
+	it(
+		"regression (U13): editor_context entries land under interactions.shared.editor_context, "
+			.. "never resurrecting the dead interactions.chat.editor_context path",
+		function()
+			local example = require("tests.fixtures.example_native_server")
+			native.register(example)
+
+			local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+			codecompanion_adapter.setup({})
+
+			-- The real, live path (confirmed against the installed
+			-- codecompanion.nvim: config.lua:1376-1381 migrates and nils out
+			-- the old key on setup()) must receive the entry.
+			local entry_key
+			for key in pairs(fake_config.interactions.shared.editor_context) do
+				if key ~= "opts" and key:match("example%-native$") then
+					entry_key = key
+				end
+			end
+			assert.is_not_nil(entry_key, "expected the entry under the real, live interactions.shared.editor_context path")
+
+			-- The old path must stay exactly as the real config leaves it
+			-- after setup() (nil / absent) -- this is the fake's initial
+			-- state (see fresh_codecompanion_config), and the adapter must
+			-- never (re-)create interactions.chat.editor_context. This is
+			-- the assertion that would have caught U5's original bug.
+			assert.is_nil(
+				fake_config.interactions.chat.editor_context,
+				"the adapter must never write to the dead interactions.chat.editor_context path"
+			)
+		end
+	)
 
 	it("resilience: a throwing client's request() does not break refresh() for other clients", function()
 		local example = require("tests.fixtures.example_native_server")
