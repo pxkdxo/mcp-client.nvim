@@ -190,7 +190,9 @@ Both of the dotfiles repo's AI-chat surfaces (Avante and CodeCompanion) switch t
 | U7 | Token management & fail-closed transport security | `lua/mcphub-neovim/auth/*.lua`, `lua/mcphub-neovim/transport/tls.lua` | U6 |
 | U8 | Configuration, documentation, health check | `lua/mcphub-neovim/config.lua`, `lua/mcphub-neovim/health.lua`, `README.md` | U1-U7 |
 | U9 | Hub-agnosticism & parity validation | `tests/integration/*.lua` | U1-U8 |
-| U10 | Cutover (dotfiles repo) | `nvim/lua/plugins/ai.lua` (dotfiles repo) | U1-U9 (all Definition of Done, not just U9's own unit) |
+| U11 | Avante prompt/slash-command bridging | `lua/mcphub-neovim/adapters/avante.lua` | U3, U4 |
+| U12 | CodeCompanion prompt/slash-command bridging | `lua/mcphub-neovim/adapters/codecompanion.lua` | U3, U5 |
+| U10 | Cutover (dotfiles repo) | `nvim/lua/plugins/ai.lua` (dotfiles repo) | U1-U9, U11, U12 (all Definition of Done, not just U9's own unit) |
 
 U6 and U7 both touch `lua/mcphub-neovim/auth/`, on disjoint files: U6 owns `discovery.lua`/`dcr.lua`/`pkce.lua`/`redirect_listener.lua`; U7 owns `token_store.lua`/`refresh.lua`.
 
@@ -336,6 +338,34 @@ U6 and U7 both touch `lua/mcphub-neovim/auth/`, on disjoint files: U6 owns `disc
 | `extensions.codecompanion` (tools/vars/slash-commands) | U5 CodeCompanion adapter (`make_vars` gap documented, not silently worked around) | Covered by U5 |
 | `:MCPHub` interactive dashboard | Explicitly excluded (Key Decisions); replaced by `:checkhealth mcphub-neovim` | Covered by U8 |
 | Avante's `disabled_tools` (built-in file/bash ops deferred to MCP) | Host-plugin (Avante) config, not this plugin's responsibility | Out of scope (unaffected) |
+
+### U11. Avante prompt/slash-command bridging
+
+- **Goal:** close the gap R4's own Goal/Approach text already called for but U4 did not build — expose MCP prompts to Avante as slash commands, completing R4's "tools, resources (vars), and prompts (slash commands)" scope.
+- **Requirements:** R4, R6
+- **Dependencies:** U3 (native `prompts/list`/`prompts/get`, already built and working), U4 (the existing adapter file and its established patterns: `unwrap_result`, the sync/async `request()` hazard, `pcall` defense-in-depth)
+- **Files:** `lua/mcphub-neovim/adapters/avante.lua`, `tests/adapters/avante_spec.lua`
+- **Approach:** verify Avante's real slash-command/prompt registration mechanism against the locally-installed `avante.nvim` source (the same discipline U4 already applied to `custom_tools` — do not assume the mechanism's shape from memory or from mcphub.nvim's old behavior). U4's implementer never investigated or attempted prompt bridging at all; this is a fresh investigation, not a resumption of partial work. Route prompt discovery/invocation only through the core's public API (`get_clients()`, `request()` for `prompts/list`/`prompts/get`), following R6's "no direct hub/native access" rule and the same cache/refresh pattern U4 already established for tools.
+- **Test scenarios:**
+  - Happy path: an MCP prompt registered on a native server is invocable as an Avante slash command and its rendered content matches the prompt's `prompts/get` result.
+  - Happy path: same, for a prompt exposed by a remote (enveloped) client.
+  - Edge case: zero connected clients — no slash commands registered, no error.
+  - Integration: a client transitioning to `disconnected` is reflected in the slash-command list on next access, matching U4's existing tool-list staleness handling.
+- **Verification:** an Avante chat session can invoke a registered MCP prompt as a slash command and see its rendered content, exercised against both a native server and a remote test-double hub.
+
+### U12. CodeCompanion prompt/slash-command bridging
+
+- **Goal:** close the gap R5's own Goal/Approach text already called for but U5 explicitly scoped out — expose MCP prompts to CodeCompanion via its real prompt-adjacent mechanism, completing R5's "tool/resource/prompt bridging" scope.
+- **Requirements:** R5, R6
+- **Dependencies:** U3 (native `prompts/list`/`prompts/get`), U5 (the existing adapter file and its established patterns: the `tools_cache`/`resources_cache` model, single-flight refresh, `pcall` defense-in-depth)
+- **Files:** `lua/mcphub-neovim/adapters/codecompanion.lua`, `tests/adapters/codecompanion_spec.lua`
+- **Approach:** U5's implementer already investigated and documented CodeCompanion's real prompt-adjacent mechanism against the installed source: a class-based `SlashCommand.new/execute/output` registration point, materially larger and structurally distinct from both the `tools` registry and `editor_context` — explicitly scoped out of U5 as "a much larger, separate integration surface" rather than guessed at. This unit is that investigation's follow-through: verify the `SlashCommand` API's exact current shape against the installed `codecompanion.nvim` source (it may have changed since U5), then build the bridging. Route prompt discovery/invocation only through the core's public API, following R6, and reuse U5's existing refresh/cache/pruning pattern rather than inventing a parallel one.
+- **Test scenarios:**
+  - Happy path: an MCP prompt registered on a native server is invocable as a CodeCompanion slash command and its rendered content matches the prompt's `prompts/get` result.
+  - Happy path: same, for a prompt exposed by a remote (enveloped) client.
+  - Edge case: zero connected clients — no slash commands registered, no error.
+  - Integration: a client transitioning to `disconnected` is reflected in the slash-command list on next access, matching U5's existing tool/resource-list staleness and pruning handling.
+- **Verification:** a CodeCompanion chat session can invoke a registered MCP prompt as a slash command and see its rendered content, exercised against both a native server and a remote test-double hub.
 
 ### U10. Cutover: switch `ai.lua` to `mcphub-neovim`
 
