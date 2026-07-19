@@ -123,6 +123,101 @@
 --- content) rather than inventing a parallel, unsanctioned async injection
 --- mechanism -- the gap for remote clients is CodeCompanion's `editor_context`
 --- design, not a shortcut taken here.
+---
+--- ## 4. Prompt/slash-command bridging (U12)
+---
+--- U5's investigation flagged a class-based `SlashCommand.new/execute/output`
+--- mechanism and scoped it out as "a much larger, separate integration
+--- surface" without verifying its exact shape. Re-verified against the
+--- CURRENT installed source (the plugin has evolved further since U5): that
+--- class only matters for a slash command that needs its own custom
+--- completion-menu *provider* (a picker UI, e.g. `mcp.lua`'s
+--- `vim.ui.select`-based server toggle,
+--- `interactions/chat/slash_commands/builtin/mcp.lua:105-142`). It is NOT
+--- the only, or even the primary, registration point.
+---
+--- The generic, third-party-reachable path -- structurally identical to
+--- `editor_context` above, not the `SlashCommand` class -- is
+--- `config.interactions.chat.slash_commands`
+--- (`lua/codecompanion/config.lua:372-538`): a plain module table of
+--- `{ description, callback(chat) }` (or `{ description, path, opts }`)
+--- entries, read live by `pairs()` on every resolution pass, not resolved
+--- once and cached: `providers/completion/init.lua:98-101`
+--- (`completion.slash_commands()`, the completion-menu source),
+--- `interactions/chat/action_palette.lua:95-99` (the `<C-a>` actions-menu
+--- source), and `interactions/chat/keymaps.lua:6` (per-command keymap
+--- wiring) all iterate `config.interactions.chat.slash_commands` directly
+--- via `pairs()`, so a mutation to that table is visible on the very next
+--- keystroke/menu-open with no separate registration call needed -- the
+--- exact same "plain, live table" shape `editor_context` already has.
+---
+--- `SlashCommands:execute` (`interactions/chat/slash_commands/init.lua:80-108`)
+--- special-cases exactly this: "If the user has provided a callback
+--- function, use that" (line 84-87) -- `item.config.callback(chat)` is
+--- called directly and its return value discarded, with NO class
+--- instantiation at all. This is a first-class, intentional extension path,
+--- not an undocumented internal shortcut: every content-bearing builtin slash
+--- command (`fetch`, `file`, `symbols`, `help`,
+--- `interactions/shared/slash_commands/*.lua`,
+--- `interactions/chat/slash_commands/builtin/*.lua`) still goes through the
+--- class shape internally, but a `callback`-only entry is explicitly
+--- supported for exactly this "external code wants to add a slash command"
+--- case and is the simplest sufficient shape here (no custom picker UI is
+--- needed: a prompt either takes no arguments, or a small number of
+--- declared ones collected via `vim.ui.input`, one prompt at a time).
+---
+--- This was verified to actually work, end-to-end, against the real,
+--- installed plugin (not just read) -- the same rigor U11's reviewer
+--- applied when Avante's mutate-in-place assumption turned out to be false:
+--- a headless Neovim run that (1) calls the real `codecompanion.setup({})`,
+--- (2) mutates `require("codecompanion.config").interactions.chat.slash_commands`
+--- in place afterward, and (3) confirms the real
+--- `completion.slash_commands()` read path *and* a real chat buffer's
+--- `SlashCommands.run(item, chat)` both observe the mutation and invoke the
+--- injected `callback(chat)`, landing content via `chat:add_message`.
+--- Unlike Avante's `setup()`/`override()` (which deep-copies via
+--- `vim.tbl_deep_extend("force", ...)` on every call, discarding reference
+--- identity), CodeCompanion's `config.setup(opts)` (`config.lua:1357-1424`)
+--- reassigns the *module's* `M.config` sub-table wholesale on each call, but
+--- `require("codecompanion.config")` itself always returns the same,
+--- stable module object `M` (`config.lua:1437-1441`), and extensions are
+--- loaded strictly after `config.setup(opts)` finishes inside
+--- `CodeCompanion.setup` (`init.lua:480-520`: `config.setup(opts)` at line
+--- 484, extensions loaded at line 517-520) -- so by the time this adapter's
+--- own `M.setup` (the extension callback) runs, `config.interactions.chat.slash_commands`
+--- is already the final, live table, and mutating it in place afterward is
+--- exactly the right mechanism, with no reference-identity pitfall to guard
+--- against (there is only one `M.config` in play by the time any extension
+--- code runs).
+---
+--- `Chat:add_buf_message` (used by `editor_context` above and the trivial
+--- `now` slash command) explicitly does NOT enter the LLM-visible message
+--- stack (`interactions/chat/init.lua:1811-1812`: "This will NOT form part
+--- of the message stack that is sent to the LLM"). A prompt's entire
+--- purpose is to seed real conversational context, so this bridging uses
+--- `Chat:add_message({ role = config.constants.USER_ROLE, content = ... })`
+--- instead -- the same call every content-bearing builtin slash command
+--- (`fetch.lua:75-78`, `file.lua`, `symbols.lua`, `help.lua`) already uses.
+---
+--- Argument mapping: MCP's `prompts/get` params are `{ name, arguments }`
+--- (`native.lua`'s `prompts/get` handling, `native.lua:78-84`), where
+--- `arguments` is a flat string-keyed table the prompt function receives
+--- verbatim. A `SlashCommand`/`callback(chat)` invocation carries no
+--- free-text "typed after the slash command" argument capture at all --
+--- confirmed by reading every completion-provider `execute` path
+--- (`providers/completion/blink/init.lua:162-215`,
+--- `providers/completion/cmp/slash_commands.lua:41-53`): selecting a slash
+--- command from the completion menu clears the trigger text entirely
+--- (`nvim_set_current_line("")` / a text-edit removing the whole match) and
+--- immediately calls `SlashCommands.run(item, chat)` -- there is no parsing
+--- step anywhere that would hand a `callback` free text typed after
+--- `/name`. Any argument collection is the slash command's own
+--- responsibility (the `mcp.lua` builtin uses `vim.ui.select` for its own
+--- picker); this adapter mirrors that by using `vim.ui.input` once per
+--- declared `prompt_meta.<name>.arguments` entry (name/description/required,
+--- the same `PromptArgument` shape `native.lua`'s `example_native_server`
+--- fixture already demonstrates), building up the flat `arguments` table
+--- `prompts/get` expects before issuing the request.
 
 local client = require("mcphub-neovim.client")
 
@@ -146,6 +241,7 @@ local NAME_PREFIX = "mcp_"
 --- client's stale cache entry is never served past that check.
 local tools_cache = {}
 local resources_cache = {}
+local prompts_cache = {}
 
 --- Normalize a client `request()` result to the bare MCP payload, regardless of
 --- which kind of client produced it (mirrors U4's avante adapter). Native
@@ -189,6 +285,28 @@ local function refresh_client_tools(mcp_client)
 				return
 			end
 			tools_cache[mcp_client.id] = payload.tools
+		end)
+	end)
+end
+
+--- Ask one client for its current prompt listing via the standard MCP
+--- `prompts/list` method. Same shape and same defense-in-depth rationale as
+--- `refresh_client_tools` above.
+local function refresh_client_prompts(mcp_client)
+	pcall(function()
+		mcp_client:request({
+			jsonrpc = "2.0",
+			id = 1,
+			method = "prompts/list",
+			-- vim.empty_dict(), not {}: see refresh_client_tools -- empty `{}`
+			-- serializes as JSON `[]`, which a strict real hub rejects.
+			params = vim.empty_dict(),
+		}, function(err, result, _response)
+			local payload = unwrap_result(result)
+			if err or type(payload) ~= "table" or type(payload.prompts) ~= "table" then
+				return
+			end
+			prompts_cache[mcp_client.id] = payload.prompts
 		end)
 	end)
 end
@@ -431,6 +549,105 @@ local function build_editor_context_entry(mcp_client)
 	}
 end
 
+--- Build one slash-command config entry (the `{ description, callback(chat) }`
+--- shape `SlashCommands:execute` calls `item.config.callback(chat)` on
+--- directly, `interactions/chat/slash_commands/init.lua:84-87`) for a
+--- single MCP prompt exposed by `mcp_client`, keyed by the same
+--- `NAME_PREFIX .. client name .. "_" .. prompt name` convention
+--- `build_tool_spec` already uses.
+---
+--- Argument collection: for each declared `prompt_info.arguments` entry
+--- (the MCP `PromptArgument` shape -- `name`/`description`/`required`,
+--- confirmed against `native.lua`'s `example_native_server` fixture),
+--- `vim.ui.input` is used once to collect that argument's value before
+--- issuing `prompts/get`, building up the flat `arguments` table
+--- `native.lua`'s `prompts/get` handling (and the MCP spec generally)
+--- expects. A cancelled (`nil`) input for a required argument aborts the
+--- prompt invocation rather than sending an incomplete request.
+---
+--- The `prompts/get` result's `messages` (MCP's `GetPromptResult` shape --
+--- a list of `{ role, content }`, confirmed against
+--- `example_native_server.lua`'s `greet` prompt) are each rendered via
+--- `render_result` (the same content-shape renderer tool/resource bridging
+--- already use) and added to the chat via `Chat:add_message`, NOT
+--- `add_buf_message` -- the latter explicitly does not enter the
+--- LLM-visible message stack (`interactions/chat/init.lua:1811-1812`),
+--- which would defeat a prompt's entire purpose of seeding real
+--- conversational context. This is the same call every content-bearing
+--- builtin slash command uses (`fetch.lua:75-78` et al).
+local function build_prompt_slash_command_entry(mcp_client, prompt_info)
+	local prefixed_name = NAME_PREFIX .. mcp_client.name .. "_" .. prompt_info.name
+
+	return prefixed_name,
+		{
+			description = prompt_info.description or ("MCP prompt " .. prompt_info.name),
+			callback = function(chat)
+				local arguments = {}
+				for _, arg_info in ipairs(prompt_info.arguments or {}) do
+					local value
+					local cancelled = false
+					vim.ui.input({
+						prompt = string.format(
+							"%s%s: ",
+							arg_info.name,
+							arg_info.description and (" (" .. arg_info.description .. ")") or ""
+						),
+					}, function(input)
+						if input == nil then
+							cancelled = true
+						else
+							value = input
+						end
+					end)
+					if cancelled and arg_info.required then
+						return
+					end
+					if value ~= nil then
+						arguments[arg_info.name] = value
+					end
+				end
+
+				pcall(function()
+					mcp_client:request({
+						jsonrpc = "2.0",
+						id = 1,
+						method = "prompts/get",
+						params = { name = prompt_info.name, arguments = arguments },
+					}, function(err, result, _response)
+						if err then
+							return
+						end
+						local payload = unwrap_result(result)
+						if type(payload) ~= "table" or type(payload.messages) ~= "table" then
+							return
+						end
+						for _, message in ipairs(payload.messages) do
+							chat:add_message({
+								role = message.role or "user",
+								content = render_result(message.content),
+							})
+						end
+					end)
+				end)
+			end,
+		}
+end
+
+--- Build the slash-command config entries (name -> config) for every
+--- currently-cached prompt exposed by `mcp_client`. Mirrors
+--- `build_client_registration`'s tool-config-building loop, but returns a
+--- flat map ready to be merged straight into
+--- `config.interactions.chat.slash_commands` -- there is no group concept
+--- for slash commands the way there is for tools.
+local function build_prompt_slash_commands(mcp_client)
+	local entries = {}
+	for _, prompt_info in ipairs(prompts_cache[mcp_client.id] or {}) do
+		local name, entry = build_prompt_slash_command_entry(mcp_client, prompt_info)
+		entries[name] = entry
+	end
+	return entries
+end
+
 --- Track which client ids currently have a registered `editor_context`
 --- entry, so a client that disappears from `get_clients()` entirely
 --- (fully torn down, e.g. via `client._reset_registry()` in tests, or any
@@ -443,6 +660,14 @@ end
 --- state is what `is_stopped()`/`refresh()`'s tool-unregistration already
 --- handles per call.
 local registered_editor_context_ids = {}
+
+--- Track which slash-command names are currently registered per client id,
+--- same rationale as `registered_editor_context_ids` above but a set
+--- rather than a single name: a client can expose any number of prompts
+--- (zero or more), each becoming its own slash-command entry, so pruning
+--- needs the full set of names that were registered for that client, not
+--- just one.
+local registered_prompt_slash_command_names = {}
 
 --- Re-query the live client registry and (re-)publish each connected
 --- client's tools into `codecompanion.mcp`'s tool registry
@@ -467,6 +692,17 @@ local function refresh()
 	local mcp = require("codecompanion.mcp")
 	local config = require("codecompanion.config")
 	config.interactions.chat.editor_context = config.interactions.chat.editor_context or {}
+	config.interactions.chat.slash_commands = config.interactions.chat.slash_commands or {}
+
+	--- Remove every currently-registered slash-command entry for one client
+	--- id (used both when a client is stopped and when pruning a
+	--- fully-removed one), then clear the tracking set.
+	local function unregister_prompt_slash_commands(id)
+		for name in pairs(registered_prompt_slash_command_names[id] or {}) do
+			config.interactions.chat.slash_commands[name] = nil
+		end
+		registered_prompt_slash_command_names[id] = nil
+	end
 
 	local live_ids = {}
 	for _, mcp_client in ipairs(client.get_clients()) do
@@ -478,20 +714,37 @@ local function refresh()
 			mcp.unregister_tools(mcp_client.id)
 			tools_cache[mcp_client.id] = nil
 			resources_cache[mcp_client.id] = nil
+			prompts_cache[mcp_client.id] = nil
+			unregister_prompt_slash_commands(mcp_client.id)
 		else
 			refresh_client_tools(mcp_client)
 			refresh_client_resources(mcp_client)
+			refresh_client_prompts(mcp_client)
 			local tool_configs, group = build_client_registration(mcp_client)
 			if group then
 				mcp.register_tools(mcp_client.id, tool_configs, group)
 			else
 				mcp.unregister_tools(mcp_client.id)
 			end
+
+			-- Re-publish this client's prompt slash commands from whatever is
+			-- currently cached (same "re-query and re-publish" pattern as
+			-- tools above): drop the previous registration first so a prompt
+			-- that disappeared between refreshes doesn't linger.
+			unregister_prompt_slash_commands(mcp_client.id)
+			local prompt_entries = build_prompt_slash_commands(mcp_client)
+			local names = {}
+			for name, entry in pairs(prompt_entries) do
+				config.interactions.chat.slash_commands[name] = entry
+				names[name] = true
+			end
+			registered_prompt_slash_command_names[mcp_client.id] = names
 		end
 	end
 
-	-- Prune editor_context entries for any client id that used to be
-	-- registered but is no longer present in get_clients() at all.
+	-- Prune editor_context entries and prompt slash commands for any client
+	-- id that used to be registered but is no longer present in
+	-- get_clients() at all.
 	for id, name in pairs(registered_editor_context_ids) do
 		if not live_ids[id] then
 			config.interactions.chat.editor_context[NAME_PREFIX .. name] = nil
@@ -499,6 +752,12 @@ local function refresh()
 			mcp.unregister_tools(id)
 			tools_cache[id] = nil
 			resources_cache[id] = nil
+		end
+	end
+	for id in pairs(registered_prompt_slash_command_names) do
+		if not live_ids[id] then
+			prompts_cache[id] = nil
+			unregister_prompt_slash_commands(id)
 		end
 	end
 end
@@ -515,8 +774,11 @@ end
 --- entry per currently-known client
 --- (`config.interactions.chat.editor_context`, mutated in place so
 --- `EditorContext.new` -- which reads that same live config table on every
---- chat buffer -- picks it up without needing a restart) and publishes
---- tools, so a chat buffer opened after `setup()` already sees whatever is
+--- chat buffer -- picks it up without needing a restart), publishes tools,
+--- and registers one slash-command entry per currently-cached MCP prompt
+--- (`config.interactions.chat.slash_commands`, mutated in place the same
+--- way -- see "## 4. Prompt/slash-command bridging (U12)" above), so a
+--- chat buffer opened after `setup()` already sees whatever is
 --- synchronously available (native clients) without requiring a manual
 --- first refresh. `opts` is accepted per the extension contract but this
 --- adapter needs no configuration of its own.
@@ -527,7 +789,7 @@ end
 --- Functions exposed via `require("codecompanion").extensions["mcphub-neovim"]`
 --- (`CodeCompanion.Extension.exports`).
 M.exports = {
-	--- Re-query `client.get_clients()` and re-publish tool/editor-context
+	--- Re-query `client.get_clients()` and re-publish tool/editor-context/prompt
 	--- registrations for the current client roster. Safe to call at any
 	--- time (e.g. from an `MCPAttach`/`MCPDetach` `User` autocmd handler) --
 	--- idempotent and does not require the extension to be re-`setup()`.

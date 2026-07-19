@@ -23,6 +23,22 @@ local native = require("mcphub-neovim.native")
 ---     message content -- no async completion path exists in this
 ---     subsystem, confirmed by grepping both `editor_context/init.lua` and
 ---     `editor_context/user.lua`).
+---   - `codecompanion.config.interactions.chat.slash_commands` (U12) -- a
+---     plain, live module table of `{ description, callback(chat) }`
+---     entries, read directly by `pairs()` on every completion/action-palette
+---     resolution pass (`providers/completion/init.lua:98-101`,
+---     `interactions/chat/action_palette.lua:95-99`, `keymaps.lua:6`) and
+---     invoked via `SlashCommands:execute`
+---     (`interactions/chat/slash_commands/init.lua:80-108`), which calls
+---     `item.config.callback(chat)` directly when present (line 85-87) rather
+---     than requiring a full `SlashCommand.new/execute/output` class -- the
+---     exact same "plain table read live by pairs()" shape `editor_context`
+---     already has, empirically verified against the real installed plugin
+---     (mutating this table after `codecompanion.setup()` runs is picked up
+---     by the real `completion.slash_commands()` and a real chat buffer's
+---     `SlashCommands.run`, both exercised headlessly against
+---     `~/.local/share/nvim/lazy/codecompanion.nvim` before writing this
+---     adapter code).
 --- This keeps the fake honest to the real API shape (each field asserted
 --- against was independently confirmed against the installed source, not
 --- invented for the test) while keeping the test suite self-contained.
@@ -54,9 +70,20 @@ end
 
 local function fresh_codecompanion_config()
 	return {
+		constants = {
+			USER_ROLE = "user",
+			SYSTEM_ROLE = "system",
+			LLM_ROLE = "llm",
+		},
 		interactions = {
 			chat = {
 				editor_context = {},
+				slash_commands = {
+					-- Real config always carries this sub-key alongside per-command
+					-- entries (config.lua:539-545); present here so the adapter's
+					-- additions can never accidentally clobber it.
+					opts = { acp = { enabled = true } },
+				},
 			},
 		},
 	}
@@ -445,5 +472,240 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 			end
 		end
 		assert.is_true(found_echo)
+	end)
+
+	describe("prompt/slash-command bridging (U12)", function()
+		--- A minimal chat double: just enough of `CodeCompanion.Chat` for a
+		--- slash command's `callback(chat)` to add a real message via
+		--- `chat:add_message({role, content}, opts)` -- the real
+		--- content-bearing call `fetch.lua`/`file.lua`/`symbols.lua`/`help.lua`
+		--- all use (verified: `add_buf_message` explicitly does NOT enter the
+		--- LLM message stack, per its own doc comment in
+		--- `interactions/chat/init.lua:1811-1812`, so a prompt's whole point --
+		--- seeding real conversational context -- requires `add_message`, not
+		--- `add_buf_message`).
+		local function fake_chat()
+			local messages = {}
+			return {
+				messages = messages,
+				add_message = function(_self, data, opts)
+					table.insert(messages, { data = data, opts = opts })
+				end,
+			}
+		end
+
+		it(
+			"happy path: an MCP prompt on a native server is invocable as a slash command matching prompts/get",
+			function()
+				local example = require("tests.fixtures.example_native_server")
+				native.register(example)
+
+				local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+				codecompanion_adapter.setup({})
+
+				local slash_commands = fake_config.interactions.chat.slash_commands
+				local entry_key
+				for key in pairs(slash_commands) do
+					if key:match("greet$") and key:match("example%-native") then
+						entry_key = key
+					end
+				end
+				assert.is_not_nil(entry_key, "expected a slash command entry for the example-native `greet` prompt")
+
+				local entry = slash_commands[entry_key]
+				assert.is_string(entry.description)
+				assert.is_function(entry.callback)
+
+				-- The declared prompt argument (`prompt_meta.greet.arguments = {
+				-- {name="who", required=false}}`) is collected via vim.ui.input;
+				-- stub it to answer deterministically instead of driving real UI.
+				local original_input = vim.ui.input
+				vim.ui.input = function(_opts, on_confirm)
+					on_confirm("Ada")
+				end
+
+				local chat = fake_chat()
+				entry.callback(chat)
+
+				vim.ui.input = original_input
+
+				assert.are.equal(1, #chat.messages)
+				local msg = chat.messages[1]
+				assert.are.equal("user", msg.data.role)
+				-- Matches prompts/get's actual result for prompts.greet({who="Ada"}):
+				-- { messages = { { role = "user", content = { type = "text", text =
+				-- "Hello, Ada!" } } } } -- the rendered content must reflect that
+				-- exact result, not an invented shape.
+				assert.matches("Hello, Ada!", msg.data.content)
+			end
+		)
+
+		it(
+			"happy path: an MCP prompt exposed by a remote (enveloped) client is invocable as a slash command",
+			function()
+				local stopped = false
+				local obj = { name = "remote-prompts" }
+				function obj:is_stopped()
+					return stopped
+				end
+				function obj:request(rpc_message, callback)
+					if stopped then
+						return callback("client is disconnected", nil, nil)
+					end
+					vim.schedule(function()
+						if rpc_message.method == "prompts/list" then
+							return callback(nil, {
+								result = {
+									prompts = {
+										{
+											name = "summarize",
+											description = "Summarize the given text",
+											arguments = {
+												{ name = "text", description = "Text to summarize", required = true },
+											},
+										},
+									},
+								},
+							}, nil)
+						elseif rpc_message.method == "prompts/get" then
+							return callback(nil, {
+								result = {
+									messages = {
+										{
+											role = "user",
+											content = {
+												type = "text",
+												text = "Summary of: " .. rpc_message.params.arguments.text,
+											},
+										},
+									},
+								},
+							}, nil)
+						end
+						return callback("unsupported method: " .. tostring(rpc_message.method), nil, nil)
+					end)
+				end
+				function obj:notify(_rpc_message) end
+				function obj:disconnect()
+					stopped = true
+				end
+				client.register_native(obj)
+
+				local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+				codecompanion_adapter.setup({})
+
+				-- Remote double replies via vim.schedule, exactly like a real async
+				-- transport -- refresh() must be called again once it lands.
+				local entry_key
+				vim.wait(200, function()
+					codecompanion_adapter.exports.refresh()
+					local slash_commands = fake_config.interactions.chat.slash_commands
+					for key in pairs(slash_commands) do
+						if key:match("summarize$") and key:match("remote%-prompts") then
+							entry_key = key
+						end
+					end
+					return entry_key ~= nil
+				end)
+				assert.is_not_nil(
+					entry_key,
+					"expected a slash command entry for the remote client's `summarize` prompt"
+				)
+
+				local entry = fake_config.interactions.chat.slash_commands[entry_key]
+
+				local original_input = vim.ui.input
+				vim.ui.input = function(_opts, on_confirm)
+					on_confirm("remote payload")
+				end
+
+				local chat = fake_chat()
+				entry.callback(chat)
+
+				vim.ui.input = original_input
+
+				-- The prompts/get round trip is itself async (remote client), so the
+				-- message lands only after the scheduled callback fires.
+				vim.wait(200, function()
+					return #chat.messages > 0
+				end)
+
+				assert.are.equal(1, #chat.messages)
+				assert.matches("Summary of: remote payload", chat.messages[1].data.content)
+			end
+		)
+
+		it("edge case: zero connected clients means no slash-command entries, not an error", function()
+			local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+			assert.has_no.errors(function()
+				codecompanion_adapter.setup({})
+			end)
+
+			local slash_commands = fake_config.interactions.chat.slash_commands
+			local count = 0
+			for key in pairs(slash_commands) do
+				if key ~= "opts" then
+					count = count + 1
+				end
+			end
+			assert.are.equal(0, count)
+		end)
+
+		it(
+			"integration: a client transitioning to disconnected has its prompt slash commands pruned on next refresh",
+			function()
+				local example = require("tests.fixtures.example_native_server")
+				local server = native.register(example)
+
+				local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+				codecompanion_adapter.setup({})
+
+				local slash_commands = fake_config.interactions.chat.slash_commands
+				local found_before = false
+				for key in pairs(slash_commands) do
+					if key:match("greet$") and key:match("example%-native") then
+						found_before = true
+					end
+				end
+				assert.is_true(found_before)
+
+				server:disconnect()
+				assert.is_true(server:is_stopped())
+
+				codecompanion_adapter.exports.refresh()
+
+				local found_after = false
+				for key in pairs(fake_config.interactions.chat.slash_commands) do
+					if key:match("greet$") and key:match("example%-native") then
+						found_after = true
+					end
+				end
+				assert.is_false(found_after, "a disconnected client's prompt slash commands must not remain registered")
+			end
+		)
+
+		it("integration: a client fully removed from the registry has its prompt slash commands pruned", function()
+			local example = require("tests.fixtures.example_native_server")
+			native.register(example)
+
+			local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+			codecompanion_adapter.setup({})
+
+			local entry_key
+			for key in pairs(fake_config.interactions.chat.slash_commands) do
+				if key:match("greet$") and key:match("example%-native") then
+					entry_key = key
+				end
+			end
+			assert.is_not_nil(entry_key)
+
+			client._reset_registry()
+			codecompanion_adapter.exports.refresh()
+
+			assert.is_nil(
+				fake_config.interactions.chat.slash_commands[entry_key],
+				"a fully-removed client's prompt slash command must be pruned, not left as a dangling closure"
+			)
+		end)
 	end)
 end)
