@@ -537,29 +537,166 @@ describe("adapters.avante (prompt/slash-command translation, U11)", function()
 			assert.is_false(found_after)
 		end
 	)
+end)
 
-	it("M.slash_commands is the same live table handed to avante.setup(), mutated in place on refresh", function()
-		-- Config.slash_commands (a plain AvanteSlashCommand[] array, not a
-		-- function like custom_tools) is read fresh on every
-		-- avante.utils.get_commands() call but never re-invoked -- so the
-		-- adapter must hand callers a stable table reference and mutate its
-		-- *contents* in place, exactly like avante/llm.lua's own ACP
-		-- integration does to Config.slash_commands at runtime.
-		local example = require("tests.fixtures.example_native_server")
-		native.register(example)
+--- Avante adapter specs (fix: real Avante config wiring). The Critical
+--- finding from the U11 review: handing `require("avante").setup({
+--- slash_commands = M.slash_commands })` a table reference and mutating its
+--- *contents* afterward does NOT work against the real, installed
+--- avante.nvim -- `M.setup`/`M.override` (`avante/config.lua:1231,1347`)
+--- merge the caller's `opts` via `vim.tbl_deep_extend("force", ...)`, which
+--- (unlike the shallow `vim.tbl_extend`) deep-*copies* nested table values
+--- rather than preserving reference identity. So `Config.slash_commands`
+--- becomes a different table object than `M.slash_commands` the instant
+--- `setup()` runs; mutating `M.slash_commands` afterward is a no-op as far
+--- as Avante is concerned. Reproduced independently by the reviewer against
+--- a real headless `nvim 0.12.4` session with the installed avante.nvim.
+---
+--- The real, working precedent (verified in the installed source):
+--- `avante/llm.lua:1188-1213` (`available_commands_update`, the ACP session
+--- handler) does `table.insert(Config.slash_commands, {...})` where `Config
+--- = require("avante.config")` -- mutating the *live, already-merged*
+--- config module's own array, obtained via `require()` AFTER `setup()` has
+--- already run, not a separately-created table handed into `setup()`'s
+--- `opts` and hoped to survive the merge by reference. This adapter now
+--- does the same thing.
+---
+--- Since avante.nvim is not a vendored dependency of this repo (only
+--- locally installed for reference, same situation `codecompanion_spec.lua`
+--- documents for codecompanion.nvim), this fakes the one real module the
+--- adapter now actually `require()`s (`avante.config`) via `package.loaded`,
+--- built to the real, verified shape (`slash_commands = {}`,
+--- `config.lua:1111`) -- exactly `codecompanion_spec.lua`'s
+--- `fresh_codecompanion_config()` convention, applied to Avante. This is the
+--- test that would have caught the original bug: it asserts on the STUBBED
+--- CONFIG MODULE'S OWN `slash_commands` table, not the adapter's internal
+--- cache/bookkeeping -- i.e. it verifies data actually lands in the thing
+--- Avante reads (`Utils.get_commands()`, `avante/utils/init.lua:1559-1579`
+--- iterates `Config.slash_commands` directly), not just in some adapter-side
+--- table that merely *claims* to be kept in sync.
+describe("adapters.avante (fix: real Avante config wiring)", function()
+	local fake_avante_config
 
-		local handle = avante.slash_commands
-		assert.is_table(handle)
+	local function fresh_avante_config()
+		return { slash_commands = {} }
+	end
 
-		avante.custom_slash_commands()
-		assert.is_true(handle == avante.slash_commands)
-
-		local found = false
-		for _, cmd in ipairs(handle) do
-			if cmd.name:match("greet$") then
-				found = true
-			end
-		end
-		assert.is_true(found)
+	before_each(function()
+		fake_avante_config = fresh_avante_config()
+		package.loaded["avante.config"] = fake_avante_config
+		-- Force a clean reload of the adapter module itself so module-level
+		-- caches (prompts_cache etc.) never leak between specs, same
+		-- discipline codecompanion_spec.lua applies to its own adapter.
+		package.loaded["mcphub-neovim.adapters.avante"] = nil
 	end)
+
+	after_each(function()
+		client._reset_registry()
+		package.loaded["avante.config"] = nil
+		package.loaded["mcphub-neovim.adapters.avante"] = nil
+	end)
+
+	it(
+		"custom_slash_commands() writes MCP-derived commands directly into require('avante.config').slash_commands",
+		function()
+			local example = require("tests.fixtures.example_native_server")
+			native.register(example)
+
+			local fresh_avante = require("mcphub-neovim.adapters.avante")
+			fresh_avante.custom_slash_commands()
+
+			-- The load-bearing assertion: the STUBBED avante.config MODULE's
+			-- own slash_commands array (not fresh_avante's return value, not
+			-- any adapter-internal cache) must contain the MCP-derived
+			-- command. Mutating a table the adapter merely hands to
+			-- setup()'s opts would never reach here, since this is the
+			-- module require("avante.config") resolves to independently of
+			-- whatever was passed into any setup()/opts table.
+			local found = false
+			for _, cmd in ipairs(fake_avante_config.slash_commands) do
+				if cmd.name:match("greet$") then
+					found = true
+				end
+			end
+			assert.is_true(found, "expected the greet prompt to land in require('avante.config').slash_commands")
+		end
+	)
+
+	it(
+		"refresh clears stale mcp:-prefixed entries from require('avante.config').slash_commands on disconnect",
+		function()
+			local example = require("tests.fixtures.example_native_server")
+			local server = native.register(example)
+
+			local fresh_avante = require("mcphub-neovim.adapters.avante")
+			fresh_avante.custom_slash_commands()
+
+			local found_before = false
+			for _, cmd in ipairs(fake_avante_config.slash_commands) do
+				if cmd.name:match("greet$") then
+					found_before = true
+				end
+			end
+			assert.is_true(found_before)
+
+			server:disconnect()
+			fresh_avante.custom_slash_commands()
+
+			local found_after = false
+			for _, cmd in ipairs(fake_avante_config.slash_commands) do
+				if cmd.name:match("greet$") then
+					found_after = true
+				end
+			end
+			assert.is_false(found_after)
+		end
+	)
+
+	it(
+		"never destroys a user's own manually-configured slash commands in require('avante.config').slash_commands",
+		function()
+			local example = require("tests.fixtures.example_native_server")
+			native.register(example)
+
+			-- Simulate a user who configured their own slash command directly,
+			-- e.g. `require("avante").setup({ slash_commands = { { name =
+			-- "my-command", ... } } })` -- which, after a real setup() merge,
+			-- would live right here in Config.slash_commands alongside whatever
+			-- this adapter owns.
+			table.insert(fake_avante_config.slash_commands, {
+				name = "my-command",
+				description = "A user-defined command, not owned by this adapter",
+				details = "A user-defined command, not owned by this adapter",
+				callback = function() end,
+			})
+
+			local fresh_avante = require("mcphub-neovim.adapters.avante")
+			fresh_avante.custom_slash_commands()
+
+			local found_user_command = false
+			local found_mcp_command = false
+			for _, cmd in ipairs(fake_avante_config.slash_commands) do
+				if cmd.name == "my-command" then
+					found_user_command = true
+				end
+				if cmd.name:match("greet$") then
+					found_mcp_command = true
+				end
+			end
+			assert.is_true(found_user_command, "a user's own manually-configured slash command must survive a refresh")
+			assert.is_true(found_mcp_command, "the MCP-derived command must still be present")
+
+			-- Refresh again (simulating a second LLM turn / cmp completion) --
+			-- the user's own command must still be untouched, not duplicated or
+			-- dropped.
+			fresh_avante.custom_slash_commands()
+			local user_command_count = 0
+			for _, cmd in ipairs(fake_avante_config.slash_commands) do
+				if cmd.name == "my-command" then
+					user_command_count = user_command_count + 1
+				end
+			end
+			assert.are.equal(1, user_command_count)
+		end
+	)
 end)

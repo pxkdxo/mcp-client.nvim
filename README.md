@@ -215,7 +215,17 @@ into your AI plugins separately (each plugin owns its own integration point).
 ```lua
 require("avante").setup({
   custom_tools = require("mcphub-neovim.adapters.avante").custom_tools,
+  -- Your own manually-configured slash commands go here, if any -- MCP-derived
+  -- ones are wired separately below, not through this opt.
 })
+
+-- MCP-derived slash commands: call this once after setup(), and again from an
+-- MCPAttach/MCPDetach autocmd to keep the list current as clients
+-- connect/disconnect. (A table handed through setup()'s `slash_commands` opt
+-- does NOT stay in sync automatically -- avante.nvim deep-copies opts during
+-- setup(), so this adapter instead writes directly into the live
+-- `require("avante.config").slash_commands` array on every refresh.)
+require("mcphub-neovim.adapters.avante").refresh()
 ```
 
 ### CodeCompanion

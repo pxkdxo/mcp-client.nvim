@@ -1,8 +1,10 @@
---- Avante adapter (U4, extended by U11): translate this plugin's
---- client/tool/prompt surface -- `require("mcphub-neovim.client").get_clients(filter)`
---- plus each client object's `request(rpc_message, callback)` -- into
---- Avante's real `custom_tools` and `slash_commands` integration points,
---- replacing `mcphub.extensions.avante`.
+--- Avante adapter (U4, extended by U11, prompt wiring corrected in a
+--- follow-up fix -- see the doc comment above `M.custom_slash_commands()`
+--- below for the full story): translate this plugin's client/tool/prompt
+--- surface -- `require("mcphub-neovim.client").get_clients(filter)` plus
+--- each client object's `request(rpc_message, callback)` -- into Avante's
+--- real `custom_tools` config option and `avante.config`'s live
+--- `slash_commands` array, replacing `mcphub.extensions.avante`.
 ---
 --- This is a thin adapter (R6): it holds no direct hub or transport logic
 --- of its own. Every tool call it exposes to Avante is, underneath, a
@@ -292,13 +294,17 @@ function M.custom_tools()
 	return tools
 end
 
---- Prompt/slash-command bridging (U11). Avante's real `slash_commands`
---- integration point (verified against the actual `yetone/avante.nvim`
---- source, not guessed):
+--- Prompt/slash-command bridging (U11, rewired per the Critical review
+--- finding on the original U11 wiring -- see below). Avante's real
+--- `slash_commands` mechanism (verified against the actual, installed
+--- `yetone/avante.nvim` source):
 ---
 ---   require("avante").setup({
----     slash_commands = require("mcphub-neovim.adapters.avante").slash_commands,
+---     -- your own manually-configured slash commands, if any, e.g.:
+---     -- slash_commands = { { name = "my-command", ... } },
 ---   })
+---   -- MCP-derived commands are wired separately -- see M.refresh() below,
+---   -- not through setup()'s `opts`.
 ---
 --- Unlike `custom_tools` (`config.lua:1110`, typed `AvanteLLMToolPublic[] |
 --- fun(): AvanteLLMToolPublic[]` -- either a table or a function Avante
@@ -310,21 +316,50 @@ end
 --- `/`-triggered completion (`cmp_avante/commands.lua:33,56`) -- but
 --- `Config.slash_commands` itself is never re-invoked. So there is no
 --- "recompute and return a fresh table on every access" option here the way
---- `custom_tools()` uses; the only way to keep Avante's live view current is
---- to hand it one stable table reference up front and mutate that same
---- table's *contents* afterward.
+--- `custom_tools()` uses; the live view must instead be kept current by
+--- mutating a table's *contents* in place.
 ---
---- That mutate-in-place contract is not an invented workaround: Avante's own
---- ACP integration does exactly this at runtime, unprompted by any adapter --
---- `llm.lua:1188-1211` (`available_commands_update`) does
---- `table.insert(Config.slash_commands, {...})` to register agent-defined
---- commands after `setup()` has already run. `M.slash_commands` below is
---- that same kind of table: created once, handed to `setup()` once, and
---- refreshed by clearing and refilling its contents in place on every
---- `M.custom_slash_commands()` call (which also returns the freshly-built
---- list directly, for callers -- tests included -- that just want the
---- current listing without relying on table-identity mutation).
-M.slash_commands = {}
+--- CRITICAL: the original U11 implementation mutated a table
+--- (`M.slash_commands`) created by *this adapter* and handed through
+--- `setup()`'s `opts = { slash_commands = M.slash_commands }`, assuming
+--- Avante's internal `Config.slash_commands` would go on referencing that
+--- same table afterward. That assumption is false. `M.setup`/`M.override`
+--- (`config.lua:1231`: `opts = vim.tbl_deep_extend("force", global_opts,
+--- opts or {})`; `config.lua:1347`: `vim.tbl_deep_extend("force",
+--- M._defaults, opts, {...})`) merge the caller's `opts` via
+--- `vim.tbl_deep_extend`, which -- unlike the shallow `vim.tbl_extend` --
+--- *deep-copies* nested table values rather than preserving reference
+--- identity. So `Config.slash_commands` becomes a different table object
+--- than whatever was handed into `opts` the moment `setup()` runs; mutating
+--- the original table afterward has zero effect on what Avante actually
+--- reads. Reproduced independently against a real headless nvim session
+--- with the installed avante.nvim.
+---
+--- The real, working mechanism -- confirmed in the installed source,
+--- already used by Avante itself, not invented here -- is `llm.lua:1188-
+--- 1213` (`available_commands_update`, the ACP session handler), which does
+--- `table.insert(Config.slash_commands, {...})` where `Config =
+--- require("avante.config")` (`llm.lua:10`): mutating the *live,
+--- already-merged* config module's own array, obtained via `require()`
+--- *after* `setup()` has already run -- never a table threaded through
+--- `setup()`'s `opts` and hoped to survive the merge by reference. This
+--- adapter now does the same thing: `M.custom_slash_commands()` (also
+--- callable as `M.refresh()`, any time -- e.g. from an
+--- `MCPAttach`/`MCPDetach` autocmd) requires `avante.config` fresh each time
+--- -- mirroring how
+--- `adapters/codecompanion.lua`'s `refresh()` lazily requires
+--- `codecompanion.mcp`/`codecompanion.config` inside the function that needs
+--- them, rather than at module load time, so this file keeps loading fine
+--- even when avante.nvim is not installed -- and clears+refills only the
+--- `mcp:`-prefixed entries it owns, leaving any entry a user configured
+--- directly (via `setup()`'s own `slash_commands` opt, or any other means)
+--- untouched.
+---
+--- `M.slash_commands` (the old exported field from the original, broken
+--- design) has been removed: nothing in this repo outside this file's own
+--- tests ever referenced it, and keeping it around as a "deprecated no-op"
+--- would just invite a caller to reintroduce the exact broken
+--- setup()-by-reference wiring this fix eliminates.
 
 --- Cache of prompt *metadata* per client id, refreshed on every
 --- `M.custom_slash_commands()` call -- the exact same shape and staleness
@@ -474,20 +509,60 @@ local function build_prompt_command(mcp_client, prompt_info)
 	}
 end
 
---- Avante's `slash_commands` integration point. Unlike `custom_tools()`,
---- this both returns the freshly-built list AND refreshes `M.slash_commands`
---- in place (clear, then refill by index) so the one stable table Avante
---- was handed at `setup()` time reflects the current client/prompt registry
---- on `Config.slash_commands`'s very next read, exactly mirroring
---- `custom_tools()`'s "always re-evaluated against the current client
---- registry, never a snapshot frozen at require() time" guarantee -- a
---- client that disconnects between two accesses must drop its slash
---- commands by the very next call, not linger.
+--- Names this adapter mints for its own MCP-derived slash commands all start
+--- with this prefix (`build_prompt_command` above: `"mcp:" ..
+--- mcp_client.name .. ":" .. prompt_info.name`). Used below to recognize and
+--- prune only the entries this adapter owns out of the live
+--- `Config.slash_commands` array, without touching any entry a user
+--- configured directly (via `setup()`'s own `slash_commands` opt, Avante's
+--- own ACP integration, or any other producer sharing that same array).
+local MCP_PREFIX = "mcp:"
+
+--- Lazily require Avante's real config module. Required only inside the
+--- function that needs it (never at file load time) so this file keeps
+--- loading fine even when avante.nvim is not installed -- the same
+--- discipline `adapters/codecompanion.lua`'s `refresh()` already applies to
+--- `require("codecompanion.mcp")`/`require("codecompanion.config")`. Returns
+--- `nil` (rather than raising) if avante.nvim -- or specifically its
+--- `avante.config` module -- is not on the runtimepath, so a caller with no
+--- Avante installed at all can still safely call `M.custom_slash_commands()`
+--- (e.g. from a generic startup path that refreshes every adapter
+--- unconditionally) without erroring.
+local function avante_config()
+	local ok, config = pcall(require, "avante.config")
+	if ok then
+		return config
+	end
+	return nil
+end
+
+--- Avante's `slash_commands` integration point (the fixed mechanism -- see
+--- the Critical review finding recorded in the doc comment above
+--- `MCP_PREFIX`/this section). Rather than handing a table into `setup()`'s
+--- `opts` and hoping it survives `vim.tbl_deep_extend`'s merge by reference
+--- (it does not), this directly mutates `require("avante.config")`'s own,
+--- already-live `slash_commands` array -- exactly how Avante's own ACP
+--- integration (`llm.lua:1188-1213`) registers commands post-setup.
 ---
---- Usage:
----   require("avante").setup({
----     slash_commands = require("mcphub-neovim.adapters.avante").slash_commands,
----   })
+--- Only `mcp:`-prefixed entries (this adapter's own naming convention) are
+--- cleared and refilled; any other entry already present in
+--- `Config.slash_commands` -- e.g. one a user configured directly via
+--- `setup()`'s own `slash_commands` opt -- is left untouched. A client that
+--- disconnects between two calls has its commands dropped by the very next
+--- call, mirroring `custom_tools()`'s "always re-evaluated against the
+--- current client registry, never a snapshot frozen at require() time"
+--- guarantee.
+---
+--- Also returns the freshly-built list directly, for callers (tests
+--- included) that just want the current listing without needing a real or
+--- fake `avante.config` module in `package.loaded`.
+---
+--- Usage: call this (or `M.refresh()`) once after `require("avante").setup()`
+--- and again from an `MCPAttach`/`MCPDetach` autocmd to keep the live
+--- `Config.slash_commands` array current as clients connect and disconnect.
+--- No `opts` wiring is needed or possible for the MCP-derived commands
+--- themselves; `setup()`'s own `slash_commands` opt remains exactly where a
+--- user puts their own, unrelated custom commands.
 function M.custom_slash_commands()
 	local commands = {}
 	for _, mcp_client in ipairs(client.get_clients()) do
@@ -505,14 +580,38 @@ function M.custom_slash_commands()
 		end
 	end
 
-	for i = #M.slash_commands, 1, -1 do
-		M.slash_commands[i] = nil
-	end
-	for _, command in ipairs(commands) do
-		table.insert(M.slash_commands, command)
+	local config = avante_config()
+	if config and type(config.slash_commands) == "table" then
+		-- Remove only the entries this adapter owns (mcp:-prefixed),
+		-- iterating backwards so removal-by-index doesn't skip elements --
+		-- any other entry (built-in, user-defined, or from another
+		-- producer like Avante's own ACP integration) is left in place.
+		for i = #config.slash_commands, 1, -1 do
+			local entry = config.slash_commands[i]
+			if
+				type(entry) == "table"
+				and type(entry.name) == "string"
+				and entry.name:sub(1, #MCP_PREFIX) == MCP_PREFIX
+			then
+				table.remove(config.slash_commands, i)
+			end
+		end
+		for _, command in ipairs(commands) do
+			table.insert(config.slash_commands, command)
+		end
 	end
 
 	return commands
+end
+
+--- Convenience alias for `M.custom_slash_commands()`, named to match the
+--- `refresh()`/`M.exports.refresh` convention `adapters/codecompanion.lua`
+--- already established for "re-query the live client registry and
+--- re-publish everything downstream" -- callable from an
+--- `MCPAttach`/`MCPDetach` autocmd exactly like that sibling adapter's own
+--- `refresh()`.
+function M.refresh()
+	return M.custom_slash_commands()
 end
 
 return M
