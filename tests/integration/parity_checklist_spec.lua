@@ -81,10 +81,8 @@ describe("U9 parity checklist (against ai.lua's mcphub.nvim config)", function()
 		local cc = require("mcphub-neovim.adapters.codecompanion")
 		assert.is_table(cc)
 
-		local repo_root = vim.fn.fnamemodify(
-			vim.api.nvim_get_runtime_file("lua/mcphub-neovim/init.lua", false)[1],
-			":h:h:h"
-		)
+		local repo_root =
+			vim.fn.fnamemodify(vim.api.nvim_get_runtime_file("lua/mcphub-neovim/init.lua", false)[1], ":h:h:h")
 		local findings = repo_root .. "/.superpowers/sdd/minor-findings.md"
 		assert.are.equal(1, vim.fn.filereadable(findings), "minor-findings.md must exist to record the gap")
 		local text = table.concat(vim.fn.readfile(findings), "\n")

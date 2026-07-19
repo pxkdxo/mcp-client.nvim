@@ -86,14 +86,17 @@ describe("U9 hub-agnosticism: adapters are agnostic to the result envelope (R9)"
 
 		-- First call kicks off the async tools/list; the listing lands on a later call.
 		avante.custom_tools()
-		assert.is_true(wait_for(function()
-			for _, t in ipairs(avante.custom_tools()) do
-				if t.name == "enveloped_tool" then
-					return true
+		assert.is_true(
+			wait_for(function()
+				for _, t in ipairs(avante.custom_tools()) do
+					if t.name == "enveloped_tool" then
+						return true
+					end
 				end
-			end
-			return false
-		end, 2000), "Avante adapter must surface a tool from an enveloped remote client")
+				return false
+			end, 2000),
+			"Avante adapter must surface a tool from an enveloped remote client"
+		)
 	end)
 
 	it("CodeCompanion adapter reads tools from a remote (enveloped) client", function()
@@ -131,16 +134,19 @@ describe("U9 hub-agnosticism: adapters are agnostic to the result envelope (R9)"
 			return false
 		end)
 		cc.exports.refresh()
-		assert.is_true(wait_for(function()
-			-- registered is keyed by client id -> { [prefixed_tool_name] = spec }.
-			local tools = registered[double.id] or {}
-			for name in pairs(tools) do
-				if tostring(name):find("cc_enveloped_tool", 1, true) then
-					return true
+		assert.is_true(
+			wait_for(function()
+				-- registered is keyed by client id -> { [prefixed_tool_name] = spec }.
+				local tools = registered[double.id] or {}
+				for name in pairs(tools) do
+					if tostring(name):find("cc_enveloped_tool", 1, true) then
+						return true
+					end
 				end
-			end
-			return false
-		end, 2000), "CodeCompanion adapter must publish a tool from an enveloped remote client")
+				return false
+			end, 2000),
+			"CodeCompanion adapter must publish a tool from an enveloped remote client"
+		)
 
 		package.loaded["codecompanion.mcp"] = nil
 		package.loaded["codecompanion.config"] = nil
@@ -168,9 +174,12 @@ describe("U9 hub-agnosticism: live protocol parity (R9) [skips if hub unreachabl
 				got = { c = c, e = e }
 			end,
 		})
-		assert.is_true(wait_for(function()
-			return got ~= nil
-		end, 12000), "connect to :40032 did not settle")
+		assert.is_true(
+			wait_for(function()
+				return got ~= nil
+			end, 12000),
+			"connect to :40032 did not settle"
+		)
 		assert.is_nil(got.e, "connect error: " .. tostring(got.e))
 		-- This hub speaks the legacy two-endpoint SSE transport (confirmed in U9).
 		assert.are.equal("legacy_sse", got.c.transport)
@@ -184,9 +193,12 @@ describe("U9 hub-agnosticism: live protocol parity (R9) [skips if hub unreachabl
 				reply = { err = err, result = result }
 			end
 		)
-		assert.is_true(wait_for(function()
-			return reply ~= nil
-		end, 12000), "tools/list did not settle")
+		assert.is_true(
+			wait_for(function()
+				return reply ~= nil
+			end, 12000),
+			"tools/list did not settle"
+		)
 		assert.is_nil(reply.err, "tools/list error: " .. tostring(reply.err))
 		-- Remote clients deliver the full JSON-RPC envelope: payload under result.result.
 		local tools = reply.result and reply.result.result and reply.result.result.tools
@@ -194,9 +206,12 @@ describe("U9 hub-agnosticism: live protocol parity (R9) [skips if hub unreachabl
 		assert.is_true(#tools > 0, "expected a non-empty tool listing from the real hub")
 
 		got.c:disconnect()
-		assert.is_true(wait_for(function()
-			return got.c:is_stopped()
-		end, 3000), "client did not report stopped after disconnect")
+		assert.is_true(
+			wait_for(function()
+				return got.c:is_stopped()
+			end, 3000),
+			"client did not report stopped after disconnect"
+		)
 	end)
 
 	it("samanhappy/mcphub (:3000): identical connect+list behavior through the same code path", function()
@@ -230,9 +245,12 @@ describe("U9 hub-agnosticism: live protocol parity (R9) [skips if hub unreachabl
 				got = { c = c, e = e }
 			end,
 		})
-		assert.is_true(wait_for(function()
-			return got ~= nil
-		end, 12000), "connect to samanhappy MCP endpoint did not settle")
+		assert.is_true(
+			wait_for(function()
+				return got ~= nil
+			end, 12000),
+			"connect to samanhappy MCP endpoint did not settle"
+		)
 		assert.is_nil(got.e, "connect error: " .. tostring(got.e))
 		assert.is_not_nil(got.c)
 
@@ -298,17 +316,23 @@ describe("U9 resilience: connection loss is a visible failure, never a hang (R11
 		-- An explicit disconnect is the caller-visible failure path: it must resolve
 		-- to a terminal stopped state promptly, not hang.
 		got.c:disconnect()
-		assert.is_true(wait_for(function()
-			return got.c:is_stopped()
-		end, 3000), "client must reach a terminal stopped state, not hang")
+		assert.is_true(
+			wait_for(function()
+				return got.c:is_stopped()
+			end, 3000),
+			"client must reach a terminal stopped state, not hang"
+		)
 		-- A request after disconnect fails fast rather than hanging forever.
 		local reply
 		got.c:request({ jsonrpc = "2.0", id = 9, method = "ping", params = vim.empty_dict() }, function(err, result)
 			reply = { err = err, result = result }
 		end)
-		assert.is_true(wait_for(function()
-			return reply ~= nil
-		end, 2000), "a request on a stopped client must fail fast, not hang")
+		assert.is_true(
+			wait_for(function()
+				return reply ~= nil
+			end, 2000),
+			"a request on a stopped client must fail fast, not hang"
+		)
 		assert.is_not_nil(reply.err)
 		double:stop()
 	end)
@@ -329,9 +353,12 @@ describe("U9 resilience: connection loss is a visible failure, never a hang (R11
 		end, 12000))
 		assert.is_nil(got.e)
 		got.c:disconnect()
-		assert.is_true(wait_for(function()
-			return got.c:is_stopped()
-		end, 3000), "clean disconnect from the real hub must complete, not hang")
+		assert.is_true(
+			wait_for(function()
+				return got.c:is_stopped()
+			end, 3000),
+			"clean disconnect from the real hub must complete, not hang"
+		)
 	end)
 end)
 
@@ -415,7 +442,11 @@ describe("U9 auth/TLS for non-localhost hubs (R12)", function()
 
 		it("successful-auth: https + configured bearer connects and the bearer is on the wire", function()
 			if not double.available then
-				pending("non-localhost TLS double unavailable (" .. tostring(double.reason) .. "); skipping live R12 auth path")
+				pending(
+					"non-localhost TLS double unavailable ("
+						.. tostring(double.reason)
+						.. "); skipping live R12 auth path"
+				)
 				return
 			end
 
@@ -429,9 +460,12 @@ describe("U9 auth/TLS for non-localhost hubs (R12)", function()
 					got = { c = c, e = e }
 				end,
 			})
-			assert.is_true(wait_for(function()
-				return got ~= nil
-			end, 8000), "connect to the non-localhost TLS double did not settle")
+			assert.is_true(
+				wait_for(function()
+					return got ~= nil
+				end, 8000),
+				"connect to the non-localhost TLS double did not settle"
+			)
 			assert.is_nil(got.e, "successful-auth connect error: " .. tostring(got.e))
 			assert.is_not_nil(got.c)
 

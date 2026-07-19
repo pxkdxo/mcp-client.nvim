@@ -172,9 +172,14 @@ server.listen(port, host, () => fs.writeFileSync(capture + '.ready', '1'));
 ---   stop      (fun())     tear down the server and remove temp files
 function M.start()
 	local unavailable = function(reason)
-		return { available = false, reason = reason, requests = function()
-			return {}
-		end, stop = function() end }
+		return {
+			available = false,
+			reason = reason,
+			requests = function()
+				return {}
+			end,
+			stop = function() end,
+		}
 	end
 
 	local host = pick_bindable_host()
@@ -209,10 +214,7 @@ function M.start()
 
 	local port = reserve_port(host)
 
-	local proc = vim.system(
-		{ "node", server_js, host, tostring(port), cert, key, capture },
-		{ text = true }
-	)
+	local proc = vim.system({ "node", server_js, host, tostring(port), cert, key, capture }, { text = true })
 
 	-- Wait for the server to signal readiness (writes capture .ready).
 	local ready_flag = capture .. ".ready"

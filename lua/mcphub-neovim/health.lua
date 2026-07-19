@@ -59,7 +59,7 @@ local function report_auth(reporter, name, record)
 			string.format(
 				"hub %q: no stored authentication token (backend: %s). "
 					.. "Authenticate once, then re-run setup() or restart Neovim -- see the README's "
-					.. "\"Authenticating a hub\" section.",
+					.. '"Authenticating a hub" section.',
 				name,
 				status.backend
 			)
