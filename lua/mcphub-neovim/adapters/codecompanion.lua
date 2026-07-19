@@ -147,6 +147,22 @@ local NAME_PREFIX = "mcp_"
 local tools_cache = {}
 local resources_cache = {}
 
+--- Normalize a client `request()` result to the bare MCP payload, regardless of
+--- which kind of client produced it (mirrors U4's avante adapter). Native
+--- clients (U3) deliver the handler's return value directly (e.g.
+--- `{ tools = {...} }`); remote clients (U1/U2) deliver the full JSON-RPC
+--- envelope (`{ jsonrpc, id, result = { tools = {...} } }`). Local test doubles
+--- historically mimic the native/unwrapped shape, so the divergence only bites
+--- against a real remote hub -- surfaced by U9. A remote envelope is
+--- unambiguous (it carries a nested `result` table; native payloads for these
+--- methods never do), so unwrap one level of `.result` when present.
+local function unwrap_result(result)
+	if type(result) == "table" and type(result.result) == "table" then
+		return result.result
+	end
+	return result
+end
+
 --- Ask one client for its current tool listing via the standard MCP
 --- `tools/list` method. Mirrors U4's `refresh_client_tools` exactly: a
 --- `pcall` around `request()` is pure defense-in-depth against a
@@ -162,12 +178,17 @@ local function refresh_client_tools(mcp_client)
 			jsonrpc = "2.0",
 			id = 1,
 			method = "tools/list",
-			params = {},
+			-- vim.empty_dict(), not {}: an empty Lua table serializes to a JSON
+			-- array `[]`, which a strict real hub rejects (HTTP 400) -- MCP
+			-- requires `params` to be an object. (Surfaced by U9's real-hub
+			-- validation; local doubles echo regardless of shape.)
+			params = vim.empty_dict(),
 		}, function(err, result, _response)
-			if err or type(result) ~= "table" or type(result.tools) ~= "table" then
+			local payload = unwrap_result(result)
+			if err or type(payload) ~= "table" or type(payload.tools) ~= "table" then
 				return
 			end
-			tools_cache[mcp_client.id] = result.tools
+			tools_cache[mcp_client.id] = payload.tools
 		end)
 	end)
 end
@@ -181,12 +202,15 @@ local function refresh_client_resources(mcp_client)
 			jsonrpc = "2.0",
 			id = 1,
 			method = "resources/list",
-			params = {},
+			-- vim.empty_dict(), not {}: see refresh_client_tools -- empty `{}`
+			-- serializes as JSON `[]`, which a strict real hub rejects.
+			params = vim.empty_dict(),
 		}, function(err, result, _response)
-			if err or type(result) ~= "table" or type(result.resources) ~= "table" then
+			local payload = unwrap_result(result)
+			if err or type(payload) ~= "table" or type(payload.resources) ~= "table" then
 				return
 			end
-			resources_cache[mcp_client.id] = result.resources
+			resources_cache[mcp_client.id] = payload.resources
 		end)
 	end)
 end
@@ -263,7 +287,10 @@ local function build_tool_spec(mcp_client, tool_info)
 						jsonrpc = "2.0",
 						id = 1,
 						method = "tools/call",
-						params = { name = tool_info.name, arguments = args or {} },
+						-- arguments defaults to vim.empty_dict() (not {}) so a
+						-- zero-argument tool call serializes `arguments` as a JSON
+						-- object `{}`, not an array `[]` a strict hub would reject.
+						params = { name = tool_info.name, arguments = args or vim.empty_dict() },
 					}, function(err, result, _response)
 						if not output_cb then
 							return
@@ -271,10 +298,14 @@ local function build_tool_spec(mcp_client, tool_info)
 						if err then
 							return output_cb({ status = "error", data = tostring(err) })
 						end
-						if type(result) == "table" and result.isError then
-							return output_cb({ status = "error", data = render_result(result) })
+						-- Unwrap the JSON-RPC envelope for a remote client so the
+						-- tool's own CallToolResult (content/isError) is read, not
+						-- the wrapper (a native client returns it directly).
+						local payload = unwrap_result(result)
+						if type(payload) == "table" and payload.isError then
+							return output_cb({ status = "error", data = render_result(payload) })
 						end
-						output_cb({ status = "success", data = render_result(result) })
+						output_cb({ status = "success", data = render_result(payload) })
 					end)
 				end)
 				if not ok and output_cb then
@@ -378,7 +409,9 @@ local function build_editor_context_entry(mcp_client)
 						params = { uri = resource_info.uri },
 					}, function(err, result, _response)
 						if not err then
-							content = render_result(result)
+							-- Unwrap the JSON-RPC envelope for a remote client so
+							-- the resource's own ReadResourceResult is rendered.
+							content = render_result(unwrap_result(result))
 						end
 					end)
 				end)

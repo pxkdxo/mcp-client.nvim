@@ -47,7 +47,13 @@ local function build_initialize_request(config)
 		method = "initialize",
 		params = {
 			protocolVersion = PROTOCOL_VERSION,
-			capabilities = config.capabilities or {},
+			-- MCP requires `capabilities` to be a JSON *object*. An empty Lua
+			-- table `{}` serializes to a JSON *array* `[]` via vim.json.encode,
+			-- which a strict real hub (e.g. ravitemer/mcp-hub) rejects with HTTP
+			-- 400 "Invalid message". Use vim.empty_dict() so the empty case
+			-- serializes as `{}`. (Local test doubles echo regardless of shape,
+			-- so this only bites against a real hub -- surfaced by U9.)
+			capabilities = config.capabilities or vim.empty_dict(),
 			clientInfo = {
 				name = config.name or "mcphub-neovim",
 				version = config.client_version or "0.1.0",

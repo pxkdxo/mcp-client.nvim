@@ -59,6 +59,24 @@ local client = require("mcphub-neovim.client")
 
 local M = {}
 
+--- Normalize a client `request()` result to the bare MCP payload, regardless of
+--- which kind of client produced it. This adapter is deliberately client-kind
+--- agnostic (native, U3, vs remote, U1/U2), but the two client kinds deliver the
+--- result at different nesting:
+---   * native  -> the handler's return value directly, e.g. `{ tools = {...} }`;
+---   * remote  -> the full JSON-RPC envelope, e.g. `{ jsonrpc, id, result = { tools = {...} } }`.
+--- (Local test doubles historically mimic the native/unwrapped shape, so this
+--- divergence only bites against a real remote hub -- surfaced by U9.) A remote
+--- envelope is unambiguous: it carries a nested `result` table (native payloads
+--- for these methods -- tools/list, resources/list, tools/call -- never do). So
+--- unwrap one level of `.result` when present; otherwise use the value as-is.
+local function unwrap_result(result)
+	if type(result) == "table" and type(result.result) == "table" then
+		return result.result
+	end
+	return result
+end
+
 --- Avante's `custom_tools` contract is itself synchronous: `Config.custom_tools`
 --- is called with no callback and its return value used immediately
 --- (`llm_tools/init.lua:683-684,702-705`: `if type(custom_tools) == "function"
@@ -105,12 +123,17 @@ local function refresh_client_tools(mcp_client)
 			jsonrpc = "2.0",
 			id = 1,
 			method = "tools/list",
-			params = {},
+			-- vim.empty_dict(), not {}: an empty Lua table serializes to a JSON
+			-- array `[]`, which a strict real hub rejects (HTTP 400 "Invalid
+			-- message") -- MCP requires `params` to be an object. (Surfaced by
+			-- U9's real-hub validation; local doubles echo regardless of shape.)
+			params = vim.empty_dict(),
 		}, function(cb_err, result, _response)
-			if cb_err or type(result) ~= "table" or type(result.tools) ~= "table" then
+			local payload = unwrap_result(result)
+			if cb_err or type(payload) ~= "table" or type(payload.tools) ~= "table" then
 				return
 			end
-			tools_cache[mcp_client.id] = result.tools
+			tools_cache[mcp_client.id] = payload.tools
 		end)
 	end)
 	if not ok then
@@ -198,7 +221,10 @@ local function build_tool_spec(mcp_client, tool_info)
 					jsonrpc = "2.0",
 					id = 1,
 					method = "tools/call",
-					params = { name = tool_info.name, arguments = input or {} },
+					-- arguments defaults to vim.empty_dict() (not {}) so a
+					-- zero-argument tool call serializes `arguments` as a JSON
+					-- object `{}`, not an array `[]` a strict hub would reject.
+					params = { name = tool_info.name, arguments = input or vim.empty_dict() },
 				}, function(err, result, _response)
 					if not on_complete then
 						return
@@ -206,11 +232,15 @@ local function build_tool_spec(mcp_client, tool_info)
 					if err then
 						return on_complete(nil, tostring(err))
 					end
+					-- Unwrap the JSON-RPC envelope for a remote client so the
+					-- tool's own output is surfaced, not the wrapper (a native
+					-- client already returns the bare payload).
+					local payload = unwrap_result(result)
 					local result_str
-					if type(result) == "string" then
-						result_str = result
-					elseif result ~= nil then
-						result_str = vim.json.encode(result)
+					if type(payload) == "string" then
+						result_str = payload
+					elseif payload ~= nil then
+						result_str = vim.json.encode(payload)
 					else
 						result_str = ""
 					end
