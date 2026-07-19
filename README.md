@@ -1,0 +1,296 @@
+# mcphub-neovim
+
+A from-scratch [Model Context Protocol (MCP)][mcp] client for Neovim, with an
+LSP-inspired core and thin adapters for [Avante][avante] and
+[CodeCompanion][codecompanion]. It connects to standards-compliant MCP hubs over
+Streamable HTTP (with a legacy HTTP+SSE fallback), hosts native in-process
+servers, and exposes their tools/resources/prompts to your AI plugins — all
+through the standard MCP endpoint, with no hub-proprietary management API.
+
+- **Module name:** `require("mcphub-neovim")` (deliberately *not* `require("mcphub")`).
+- **Requirements:** Neovim 0.10+ and [`curl`][curl] on `PATH` (the transports and
+  the OAuth flow shell out to `curl` rather than hand-rolling TLS).
+
+> **Security note up front:** native servers run **in-process, with full
+> Neovim/Lua privilege — there is no sandboxing.** Only register native servers
+> you trust as first-party code. See [Native servers and the trust model](#native-servers-and-the-trust-model).
+
+---
+
+## Installation
+
+With [lazy.nvim][lazy]:
+
+```lua
+{
+  "your-org/mcphub-neovim", -- replace with the actual repository
+  opts = {
+    -- see Configuration below
+  },
+  -- lazy.nvim calls require("mcphub-neovim").setup(opts) for you.
+}
+```
+
+Or configure it manually from anywhere in your config:
+
+```lua
+require("mcphub-neovim").setup({
+  -- see Configuration below
+})
+```
+
+`setup()` is idempotent: calling it again re-reads your configuration and
+re-registers everything. It never triggers an interactive login (see
+[Authenticating a hub](#authenticating-a-hub)).
+
+---
+
+## Configuration
+
+All configuration is supplied by you at `setup()` — the plugin ships **no**
+hardcoded URLs, ports, paths, or credentials. Every value below is a
+placeholder; substitute your own.
+
+```lua
+require("mcphub-neovim").setup({
+  -- A single hub (shorthand). Its name defaults to "default".
+  hub = { url = "http://localhost:PORT" },
+
+  -- Or one or more named hubs (a name -> hub-config map). R7's "server list".
+  -- Use `hubs` instead of `hub` when you connect to more than one.
+  hubs = {
+    local_hub  = { url = "http://localhost:PORT" },
+    remote_hub = { url = "https://your-hub.example.com/mcp" },
+  },
+
+  -- Native, in-process servers (a name -> server-config map). Each server is a
+  -- plain table of Lua functions; see "Native servers" below. The map key is
+  -- used as the server name unless the config sets its own `name`.
+  native_servers = {
+    my_server = require("my.native.server"),
+  },
+
+  -- Defaults for auto-constructed OAuth token stores (non-localhost hubs only).
+  token_store = {
+    backend   = nil, -- "keychain" | "file" | nil (auto-detect: keychain on
+                     -- macOS if `security` is available, else a 0600 file)
+    data_home = nil, -- override $XDG_DATA_HOME for the file backend (rarely needed)
+  },
+})
+```
+
+### Hub config fields
+
+Each hub config is passed through to the client's `connect()`; the fields it
+understands:
+
+| Field       | Type     | Description                                                                 |
+| ----------- | -------- | --------------------------------------------------------------------------- |
+| `url`       | string   | **Required.** The hub's MCP endpoint URL.                                   |
+| `name`      | string   | Optional. Defaults to the map key (or `"default"` for the `hub` shorthand). |
+| `headers`   | table    | Optional. Extra headers merged into every request.                          |
+| `reconnect` | table    | Optional. Backoff tuning: `initial_delay`, `max_delay`, `growth_factor`, `max_attempts`. |
+| `auth`      | table    | Optional. `{ token_store = <TokenStore> }` to supply your own store (see below). |
+
+---
+
+## Native servers and the trust model
+
+A native server is an **in-process** MCP server: a plain Lua table with
+`tools` / `resources` / `prompts` sub-tables of Lua functions. It answers
+`tools/call`, `resources/read`, and `prompts/get` by calling those functions
+directly — no subprocess, no network.
+
+```lua
+-- my/native/server.lua
+return {
+  name = "my_server",
+  tools = {
+    add = function(args) return { total = args.a + args.b } end,
+  },
+  tool_meta = {
+    add = {
+      description = "Add two numbers",
+      inputSchema = {
+        type = "object",
+        properties = { a = { type = "number" }, b = { type = "number" } },
+        required = { "a", "b" },
+      },
+    },
+  },
+  resources = {},
+  prompts = {},
+}
+```
+
+> **Trust model (read this):** a native server's functions run **in your Neovim
+> process, with full Neovim/Lua privilege** — the same access your own config
+> has. **There is no sandboxing, no capability restriction, and no
+> confirmation prompt** around what a native server's code can do (filesystem,
+> shell, network, editor state). Treat a native server exactly as you would any
+> other Lua module you `require` into your config: **only register native
+> servers whose source you trust as first-party code.** An LLM can *invoke* a
+> native tool, but the tool's *code* is yours — the LLM never supplies it.
+
+Native servers and remote hubs are indistinguishable to the adapters: both
+appear in `get_clients()` wearing the same client-object shape, so your AI
+plugin sees their tools uniformly.
+
+---
+
+## Hub authentication
+
+`mcphub-neovim` enforces a **fail-closed transport-security policy** (R12):
+
+- A **localhost** hub (`localhost`, `127.0.0.1`, `::1`, `0.0.0.0`) may be plain
+  `http://` with no credential.
+- A **non-localhost** hub must use **`https://` AND have a bearer token
+  configured.** A non-localhost hub that is missing TLS or a token is
+  **refused outright** — the client will not send an unauthenticated request
+  over an insecure or unauthenticated non-localhost connection.
+
+For a non-localhost hub, `setup()` automatically constructs a persistent
+`TokenStore` (keyed by the hub name) and threads it into the connection, so a
+stored token is reused across Neovim sessions and refreshed transparently when
+it expires. Tokens are stored in the OS keychain where available (macOS
+`security`), otherwise in a `0600`-permissioned JSON file under
+`$XDG_DATA_HOME/mcphub-neovim/` — never world-readable, never inside the plugin
+or your repo.
+
+You can supply your own store instead:
+
+```lua
+local TokenStore = require("mcphub-neovim.auth.token_store")
+require("mcphub-neovim").setup({
+  hubs = {
+    remote_hub = {
+      url  = "https://your-hub.example.com/mcp",
+      auth = { token_store = TokenStore.new({ key = "remote_hub" }) },
+    },
+  },
+})
+```
+
+### Authenticating a hub
+
+The plugin **does not** auto-open a browser login flow on startup — that would
+prompt on every launch and is an undesigned UX surface for v1. When a
+non-localhost hub has no stored token yet, the connection fails closed with a
+clear message, and you authenticate **once, manually**, using the OAuth 2.1
+Dynamic-Client-Registration flow (RFC 7591 + PKCE), then re-run `setup()` (or
+restart Neovim):
+
+```lua
+local dcr   = require("mcphub-neovim.auth.dcr")
+local store = require("mcphub-neovim.auth.token_store")
+
+dcr.run_flow({ hub_url = "https://your-hub.example.com/mcp" }, function(token, err)
+  if err then
+    vim.notify("MCP auth failed: " .. tostring(err), vim.log.levels.ERROR)
+    return
+  end
+  -- Key must match the hub name you use in setup() so the stored token is found.
+  store.new({ key = "remote_hub" }):save(token)
+  vim.notify("MCP hub authenticated; re-run setup() or restart Neovim.")
+end)
+```
+
+`run_flow` discovers the hub's authorization server, registers a client,
+opens your browser to authorize, and completes on a loopback redirect.
+
+> **Known gap (flagged for a future unit):** there is no `:MCPAuth`-style
+> command wrapping the snippet above yet — authentication is manual for now.
+> The fail-closed error message and this section point you at the working
+> mechanism in the meantime.
+
+---
+
+## Wiring the adapters
+
+`setup()` connects hubs and registers native servers; the adapters are wired
+into your AI plugins separately (each plugin owns its own integration point).
+
+### Avante
+
+```lua
+require("avante").setup({
+  custom_tools = require("mcphub-neovim.adapters.avante").custom_tools,
+})
+```
+
+### CodeCompanion
+
+```lua
+require("codecompanion").setup({
+  extensions = {
+    ["mcphub-neovim"] = {
+      callback = require("mcphub-neovim.adapters.codecompanion"),
+    },
+  },
+})
+-- Call require("codecompanion").extensions["mcphub-neovim"].refresh() from an
+-- MCPAttach/MCPDetach autocmd to keep the tool list current as hubs connect and
+-- disconnect.
+```
+
+Both adapters read tool/resource listings from the live client registry, so a
+hub that connects or disconnects after startup is reflected on the next tool
+resolution.
+
+---
+
+## Health check
+
+Run `:checkhealth mcphub-neovim` to see, per configured hub:
+
+- **connection status** — connected / disconnected / never-connected;
+- **auth status** — authenticated / token expired / no token — reported from
+  redacted status fields only (the token itself is **never** printed);
+- **registered native servers**, with the trust-model reminder alongside.
+
+A disconnected hub or a missing/expired token is reported as a `warning` or
+`error` — the check never crashes on an unhealthy configuration.
+
+---
+
+## Events
+
+The client fires `User` autocmds you can hook:
+
+| Pattern      | When                                              | `data`                    |
+| ------------ | ------------------------------------------------- | ------------------------- |
+| `MCPAttach`  | a client connects (initial connect or reconnect). | `{ client_id = <string> }` |
+| `MCPDetach`  | a client disconnects (reconnect exhausted).       | `{ client_id = <string> }` |
+| `MCPNotify`  | the server sends a notification.                  | `{ client_id = <string> }` |
+
+```lua
+vim.api.nvim_create_autocmd("User", {
+  pattern = { "MCPAttach", "MCPDetach" },
+  callback = function()
+    pcall(function()
+      require("codecompanion").extensions["mcphub-neovim"].refresh()
+    end)
+  end,
+})
+```
+
+---
+
+## Programmatic API
+
+| Call                                                         | Purpose                                          |
+| ------------------------------------------------------------ | ------------------------------------------------ |
+| `require("mcphub-neovim").setup(opts)`                       | The entrypoint (validates config, connects hubs, registers native servers). |
+| `require("mcphub-neovim.client").get_clients(filter?)`       | Live client objects (`filter` = `{ id?, name? }`). |
+| `require("mcphub-neovim.native").register(config)`           | Register one native server directly.             |
+| `require("mcphub-neovim.auth.token_store").new(opts)`        | Construct a `TokenStore`.                         |
+| `require("mcphub-neovim.auth.dcr").run_flow(opts, cb)`       | Run the interactive OAuth flow (manual auth).    |
+
+Each client object exposes `id`, `name`, `config`, `is_stopped()`,
+`request(rpc, cb)`, `notify(rpc)`, and `disconnect()`.
+
+[mcp]: https://modelcontextprotocol.io/
+[avante]: https://github.com/yetone/avante.nvim
+[codecompanion]: https://github.com/olimorris/codecompanion.nvim
+[lazy]: https://github.com/folke/lazy.nvim
+[curl]: https://curl.se/

@@ -1,0 +1,188 @@
+--- `:checkhealth mcphub-neovim` (U8) -- the status view that replaces the
+--- rejected dashboard UI.
+---
+--- This module is purely a reporting layer. It duplicates none of `config.lua`'s
+--- wiring: it reads what setup recorded (`config.state()`) and correlates it
+--- with the live client roster (`client.get_clients()` / `is_stopped()`) and,
+--- for any hub with a TokenStore, that store's redacted `:status()`. It never
+--- opens a connection, constructs a store, or touches a transport.
+---
+--- Neovim's health framework calls `require("mcphub-neovim.health").check()`
+--- for `:checkhealth mcphub-neovim` (the function is discovered by name; see
+--- `:help health-dev`). `check()` accepts an optional reporter so specs can
+--- capture every start/ok/warn/error/info call without a real checkhealth
+--- buffer -- it defaults to `vim.health`.
+---
+--- Absolute no-secrets invariant (held as strictly as U6/U7): auth status is
+--- surfaced ONLY through `TokenStore:status()`, whose fields are presence/expiry
+--- booleans and a non-secret absolute expiry time -- never the access token,
+--- the refresh token, or any header value.
+
+local mcp_client = require("mcphub-neovim.client")
+local config = require("mcphub-neovim.config")
+local tls = require("mcphub-neovim.transport.tls")
+
+local M = {}
+
+--- Find the live client object for a hub by name, or nil if none is registered
+--- (i.e. it never connected, or was fully torn down).
+local function live_client(name)
+	local matches = mcp_client.get_clients({ name = name })
+	return matches[1]
+end
+
+--- Human-readable absolute time for a unix timestamp, for the expiry line.
+local function fmt_time(ts)
+	if type(ts) ~= "number" then
+		return "unknown"
+	end
+	return os.date("%Y-%m-%d %H:%M:%S", ts)
+end
+
+--- Report auth status for one hub, reading ONLY the redacted status table.
+--- Returns true if auth is healthy (or not required), false if it warrants a
+--- warning -- so the caller can factor it into the hub's overall verdict.
+local function report_auth(reporter, name, record)
+	local store = record.token_store
+	if not store then
+		-- A localhost hub, or one the user connects without auth: nothing to
+		-- report. The R12 gate (tls.lua) exempts localhost, so this is expected.
+		if tls.is_localhost(record.url) then
+			reporter.info(string.format("hub %q: localhost, no authentication required", name))
+		end
+		return true
+	end
+
+	local status = store:status()
+	if not status.has_token then
+		reporter.warn(
+			string.format(
+				"hub %q: no stored authentication token (backend: %s). "
+					.. "Authenticate once, then re-run setup() or restart Neovim -- see the README's "
+					.. "\"Authenticating a hub\" section.",
+				name,
+				status.backend
+			)
+		)
+		return false
+	end
+
+	if status.expired then
+		reporter.warn(
+			string.format(
+				"hub %q: stored token is expired (expired at %s). "
+					.. "It will be refreshed automatically on the next request if a refresh "
+					.. "token is present%s.",
+				name,
+				fmt_time(status.expires_at),
+				status.has_refresh_token and "" or " -- but none is stored, so re-authentication is required"
+			)
+		)
+		return false
+	end
+
+	reporter.ok(
+		string.format(
+			"hub %q: authenticated (backend: %s, token valid until %s%s)",
+			name,
+			status.backend,
+			fmt_time(status.expires_at),
+			status.has_refresh_token and ", refreshable" or ""
+		)
+	)
+	return true
+end
+
+--- Report connection + auth status for one configured hub.
+local function report_hub(reporter, name, record)
+	local obj = live_client(name)
+
+	if not obj then
+		reporter.error(
+			string.format(
+				"hub %q (%s): not connected -- no client registered. "
+					.. "The initial connection failed (check :messages for the reason) or setup() was never called.",
+				name,
+				record.url
+			)
+		)
+		-- Still report auth so the user sees the whole picture for this hub.
+		report_auth(reporter, name, record)
+		return
+	end
+
+	if obj:is_stopped() then
+		reporter.error(
+			string.format(
+				"hub %q (%s): disconnected -- reconnect attempts were exhausted. "
+					.. "Check the hub is reachable, then restart Neovim or re-run setup().",
+				name,
+				record.url
+			)
+		)
+	else
+		reporter.ok(string.format("hub %q (%s): connected", name, record.url))
+	end
+
+	report_auth(reporter, name, record)
+end
+
+--- Report the registered native, in-process servers. Native servers are
+--- first-party, in-process code: unlike a remote hub there is no connection to
+--- be up or down, so a registered native server is simply reported as present.
+local function report_native(reporter, native_servers)
+	if #native_servers == 0 then
+		reporter.info("no native (in-process) servers registered")
+		return
+	end
+	for _, name in ipairs(native_servers) do
+		-- Correlate with the live registry so a native server that was somehow
+		-- removed is reported accurately, not just because setup listed it.
+		local obj = live_client(name)
+		if obj and not obj:is_stopped() then
+			reporter.ok(string.format("native server %q: registered (in-process)", name))
+		elseif obj then
+			reporter.warn(string.format("native server %q: registered but stopped", name))
+		else
+			reporter.warn(string.format("native server %q: recorded at setup but not in the client registry", name))
+		end
+	end
+end
+
+--- The health entrypoint invoked by `:checkhealth mcphub-neovim`.
+--- @param reporter table|nil  { start, ok, warn, error, info } -- defaults to vim.health.
+function M.check(reporter)
+	reporter = reporter or vim.health
+
+	local state = config.state()
+
+	reporter.start("mcphub-neovim")
+
+	-- Trust-model reminder: native servers run with full Neovim/Lua privilege
+	-- (R8). Surface it in the health view so an operator auditing their setup is
+	-- reminded of it right where they see the server list.
+	reporter.info(
+		"Native servers run in-process with full Neovim/Lua privilege (no sandboxing). "
+			.. "Only register native servers you trust as first-party code."
+	)
+
+	-- Hubs.
+	local hub_names = {}
+	for name in pairs(state.hubs) do
+		table.insert(hub_names, name)
+	end
+	table.sort(hub_names)
+
+	if #hub_names == 0 then
+		reporter.info("no remote hubs configured")
+	else
+		for _, name in ipairs(hub_names) do
+			report_hub(reporter, name, state.hubs[name])
+		end
+	end
+
+	-- Native servers.
+	report_native(reporter, state.native_servers)
+end
+
+return M

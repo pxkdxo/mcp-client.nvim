@@ -91,4 +91,22 @@ function M.connect(config, opts)
 	end)
 end
 
+--- The user-facing setup entrypoint: `require("mcphub-neovim").setup(opts)`,
+--- mirroring `require("mcphub").setup(opts)`'s call shape so a real config's
+--- migration off `mcphub.nvim` is a mechanical swap rather than a redesign.
+---
+--- All orchestration (validating/normalizing config, registering native
+--- servers, connecting hubs, wiring OAuth token stores) lives in
+--- `config.lua`; this is a thin, deliberate delegation so the module's own
+--- public name (`require("mcphub-neovim")`) is the entrypoint, matching the
+--- established U3/U6/U7 pattern of a small, justified extension to a shared
+--- file. `config` is required lazily so this thin U1-era `connect` path (and
+--- the specs that exercise it in isolation) never pull in the whole
+--- client/native/auth stack unless `setup()` is actually called.
+---
+--- @param opts table|nil  see `mcphub-neovim.config.setup` for the full shape.
+function M.setup(opts)
+	return require("mcphub-neovim.config").setup(opts)
+end
+
 return M
