@@ -1,7 +1,8 @@
---- Avante adapter (U4): translate this plugin's client/tool surface --
---- `require("mcphub-neovim.client").get_clients(filter)` plus each client
---- object's `request(rpc_message, callback)` -- into Avante's real
---- `custom_tools` integration point, replacing `mcphub.extensions.avante`.
+--- Avante adapter (U4, extended by U11): translate this plugin's
+--- client/tool/prompt surface -- `require("mcphub-neovim.client").get_clients(filter)`
+--- plus each client object's `request(rpc_message, callback)` -- into
+--- Avante's real `custom_tools` and `slash_commands` integration points,
+--- replacing `mcphub.extensions.avante`.
 ---
 --- This is a thin adapter (R6): it holds no direct hub or transport logic
 --- of its own. Every tool call it exposes to Avante is, underneath, a
@@ -289,6 +290,229 @@ function M.custom_tools()
 		end
 	end
 	return tools
+end
+
+--- Prompt/slash-command bridging (U11). Avante's real `slash_commands`
+--- integration point (verified against the actual `yetone/avante.nvim`
+--- source, not guessed):
+---
+---   require("avante").setup({
+---     slash_commands = require("mcphub-neovim.adapters.avante").slash_commands,
+---   })
+---
+--- Unlike `custom_tools` (`config.lua:1110`, typed `AvanteLLMToolPublic[] |
+--- fun(): AvanteLLMToolPublic[]` -- either a table or a function Avante
+--- calls fresh each time), `Config.slash_commands` (`config.lua:348,1111`)
+--- is typed `AvanteSlashCommand[]` only: a plain array, with no function
+--- form. It is read fresh on every `avante.utils.get_commands()` call
+--- (`utils/init.lua:1559-1579`) -- itself called on every chat submission
+--- (`sidebar.lua:2814`, inside `Sidebar:handle_submit`) and on every
+--- `/`-triggered completion (`cmp_avante/commands.lua:33,56`) -- but
+--- `Config.slash_commands` itself is never re-invoked. So there is no
+--- "recompute and return a fresh table on every access" option here the way
+--- `custom_tools()` uses; the only way to keep Avante's live view current is
+--- to hand it one stable table reference up front and mutate that same
+--- table's *contents* afterward.
+---
+--- That mutate-in-place contract is not an invented workaround: Avante's own
+--- ACP integration does exactly this at runtime, unprompted by any adapter --
+--- `llm.lua:1188-1211` (`available_commands_update`) does
+--- `table.insert(Config.slash_commands, {...})` to register agent-defined
+--- commands after `setup()` has already run. `M.slash_commands` below is
+--- that same kind of table: created once, handed to `setup()` once, and
+--- refreshed by clearing and refilling its contents in place on every
+--- `M.custom_slash_commands()` call (which also returns the freshly-built
+--- list directly, for callers -- tests included -- that just want the
+--- current listing without relying on table-identity mutation).
+M.slash_commands = {}
+
+--- Cache of prompt *metadata* per client id, refreshed on every
+--- `M.custom_slash_commands()` call -- the exact same shape and staleness
+--- handling as `tools_cache`/`refresh_client_tools` above (see those
+--- comments for the full rationale: synchronous-for-native/async-for-remote
+--- callback timing, pcall defense-in-depth, "leave the previous entry in
+--- place on failure" degradation).
+local prompts_cache = {} ---@type table<string, table[]>
+
+--- Ask one client for its current prompt listing via the standard MCP
+--- `prompts/list` method. Mirrors `refresh_client_tools` exactly (see its
+--- comments): routed through the client's own `request()`, `pcall`-guarded
+--- as defense-in-depth against a hypothetical synchronously-throwing
+--- client, `unwrap_result()`'d so a remote client's JSON-RPC envelope and a
+--- native client's bare payload are handled identically, and a
+--- missing/malformed reply just leaves the previous cache entry in place
+--- rather than raising.
+local function refresh_client_prompts(mcp_client)
+	local ok, err = pcall(function()
+		mcp_client:request({
+			jsonrpc = "2.0",
+			id = 1,
+			method = "prompts/list",
+			-- vim.empty_dict(), not {}, for the same reason as tools/list above:
+			-- MCP requires `params` to be a JSON object, and a strict real hub
+			-- rejects an empty Lua table's `[]` serialization.
+			params = vim.empty_dict(),
+		}, function(cb_err, result, _response)
+			local payload = unwrap_result(result)
+			if cb_err or type(payload) ~= "table" or type(payload.prompts) ~= "table" then
+				return
+			end
+			prompts_cache[mcp_client.id] = payload.prompts
+		end)
+	end)
+	if not ok then
+		return err
+	end
+end
+
+--- Render a `prompts/get` result as chat message tables suitable for
+--- `Sidebar:add_chat_history` (`sidebar.lua:2481`: `AvanteLLMMessage |
+--- AvanteLLMMessage[]`, each `{ role, content }` where `content` is a
+--- string or the first element of a content-part list). `native.lua`'s
+--- `prompts/get` handler returns "whatever the prompt function returns as
+--- its result" verbatim (native.lua:21), so a real prompt is free to return
+--- the full MCP `GetPromptResult` shape (`{ description?, messages:
+--- [{role, content: {type, text}}] }`) or something simpler; this handles
+--- both without erroring on an unexpected shape.
+local function render_prompt_result(payload)
+	if type(payload) == "table" and type(payload.messages) == "table" then
+		local messages = {}
+		for _, message in ipairs(payload.messages) do
+			local content = message.content
+			local text
+			if type(content) == "table" then
+				text = content.text
+			elseif type(content) == "string" then
+				text = content
+			end
+			table.insert(messages, { role = message.role or "user", content = text or "" })
+		end
+		return messages
+	elseif type(payload) == "string" then
+		return { { role = "user", content = payload } }
+	elseif payload ~= nil then
+		return { { role = "user", content = vim.json.encode(payload) } }
+	end
+	return { { role = "user", content = "" } }
+end
+
+--- Map Avante's single raw `args` string (whatever the user typed after the
+--- slash command name) onto MCP's `prompts/get` `arguments` shape (a flat
+--- `{[string]: string}` object, per each declared `PromptArgument`'s `name`
+--- -- see `prompt_meta`'s `arguments` list, native.lua's `build_listing`
+--- sidecar mechanism). Avante's slash-command input is a single opaque
+--- string, not per-argument fields, so there is no lossless way to fill in
+--- more than one declared argument from it; the one pragmatic, non-lossy
+--- mapping available is binding that whole string to the first declared
+--- argument's name (the common case for these prompts is exactly one
+--- argument). A prompt with no declared arguments gets an empty object --
+--- still callable, just with the typed text discarded, matching how a tool
+--- with no declared inputSchema is still callable without documented
+--- fields.
+local function build_prompt_arguments(prompt_info, args)
+	local declared = prompt_info.arguments
+	if type(declared) ~= "table" or #declared == 0 then
+		return vim.empty_dict()
+	end
+	local first_name = declared[1] and declared[1].name
+	if type(first_name) ~= "string" or first_name == "" then
+		return vim.empty_dict()
+	end
+	if args == nil or args == "" then
+		return vim.empty_dict()
+	end
+	return { [first_name] = args }
+end
+
+--- Build one Avante `AvanteSlashCommand` entry for a single MCP prompt
+--- exposed by `mcp_client`. Namespaced as `mcp:<client name>:<prompt name>`
+--- -- following the same precedent as the old `mcphub.nvim`'s
+--- `extensions/avante/slash_commands.lua` (`"mcp:" .. server_name .. ":" ..
+--- prompt_name`) this adapter replaces -- both so same-named prompts from
+--- two different clients cannot collide, and so a `mcp:`-prefixed name can
+--- be recognized and pruned on refresh without disturbing any other
+--- (built-in or user-defined) slash command sharing `Config.slash_commands`.
+local function build_prompt_command(mcp_client, prompt_info)
+	return {
+		name = string.format("mcp:%s:%s", mcp_client.name, prompt_info.name),
+		description = prompt_info.description or ("MCP prompt " .. prompt_info.name),
+		details = prompt_info.description or ("MCP prompt " .. prompt_info.name),
+		--- Avante invokes this as `callback(sidebar, args)`
+		--- (`sidebar.lua:2827`, the "any command other than the two
+		--- hardcoded special-cased names" branch of `handle_submit`) with no
+		--- generic path for a `cb`-mediated return into the normal LLM turn
+		--- -- rendering is entirely this callback's own responsibility. Drive
+		--- the result out through `sidebar:add_chat_history(...)` the same
+		--- way whether `mcp_client:request()`'s callback fires synchronously
+		--- (native, U3) or asynchronously (remote, U1/U2); no sync/async
+		--- branching needed since nothing here has to return a value to a
+		--- caller the way `custom_tools`' `func` does.
+		callback = function(sidebar, args)
+			local arguments = build_prompt_arguments(prompt_info, args)
+			local ok, call_err = pcall(function()
+				mcp_client:request({
+					jsonrpc = "2.0",
+					id = 1,
+					method = "prompts/get",
+					params = { name = prompt_info.name, arguments = arguments },
+				}, function(err, result, _response)
+					if err then
+						vim.notify("mcphub-neovim: prompt failed: " .. tostring(err), vim.log.levels.ERROR)
+						return
+					end
+					local payload = unwrap_result(result)
+					local messages = render_prompt_result(payload)
+					if sidebar and sidebar.add_chat_history then
+						sidebar:add_chat_history(messages, { visible = true })
+					end
+				end)
+			end)
+			if not ok then
+				vim.notify("mcphub-neovim: prompt failed: " .. tostring(call_err), vim.log.levels.ERROR)
+			end
+		end,
+	}
+end
+
+--- Avante's `slash_commands` integration point. Unlike `custom_tools()`,
+--- this both returns the freshly-built list AND refreshes `M.slash_commands`
+--- in place (clear, then refill by index) so the one stable table Avante
+--- was handed at `setup()` time reflects the current client/prompt registry
+--- on `Config.slash_commands`'s very next read, exactly mirroring
+--- `custom_tools()`'s "always re-evaluated against the current client
+--- registry, never a snapshot frozen at require() time" guarantee -- a
+--- client that disconnects between two accesses must drop its slash
+--- commands by the very next call, not linger.
+---
+--- Usage:
+---   require("avante").setup({
+---     slash_commands = require("mcphub-neovim.adapters.avante").slash_commands,
+---   })
+function M.custom_slash_commands()
+	local commands = {}
+	for _, mcp_client in ipairs(client.get_clients()) do
+		if not mcp_client:is_stopped() then
+			refresh_client_prompts(mcp_client)
+			for _, prompt_info in ipairs(prompts_cache[mcp_client.id] or {}) do
+				table.insert(commands, build_prompt_command(mcp_client, prompt_info))
+			end
+		else
+			-- Same staleness handling as tools_cache: a stopped client's
+			-- cache entry is dropped so a later reconnect under the same id
+			-- starts clean rather than replaying a previous session's
+			-- listing.
+			prompts_cache[mcp_client.id] = nil
+		end
+	end
+
+	for i = #M.slash_commands, 1, -1 do
+		M.slash_commands[i] = nil
+	end
+	for _, command in ipairs(commands) do
+		table.insert(M.slash_commands, command)
+	end
+
+	return commands
 end
 
 return M

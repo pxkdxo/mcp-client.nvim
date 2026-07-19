@@ -60,6 +60,28 @@ local function make_remote_double(name, tools_listing, on_call)
 	})
 end
 
+--- A remote-shaped double answering only prompts/list and prompts/get --
+--- deliberately separate from make_remote_double (which only answers
+--- tools/*) so prompt-bridging specs don't have to thread unrelated tool
+--- fixtures through, and to independently prove the adapter's prompt path
+--- also unwraps a remote client's JSON-RPC envelope (unwrap_result), not
+--- just its tool path.
+local function make_remote_prompt_double(name, prompts_listing, on_get)
+	return make_async_client({
+		name = name,
+		handle = function(rpc_message, callback)
+			if rpc_message.method == "prompts/list" then
+				-- Envelope-shaped reply, like a real remote hub -- proves
+				-- unwrap_result() is exercised for prompts too.
+				return callback(nil, { jsonrpc = "2.0", id = 1, result = { prompts = prompts_listing } }, nil)
+			elseif rpc_message.method == "prompts/get" then
+				return on_get(rpc_message.params, callback)
+			end
+			return callback("unsupported method: " .. tostring(rpc_message.method), nil, nil)
+		end,
+	})
+end
+
 --- A pathological client double whose `request()` throws synchronously
 --- instead of reporting failure through the `(err, result, response)`
 --- callback -- neither of this codebase's real client implementations
@@ -325,5 +347,219 @@ describe("adapters.avante (custom_tools translation)", function()
 		assert.is_nil(got_result)
 		assert.is_not_nil(got_err)
 		assert.matches("synchronous throw from request", got_err)
+	end)
+end)
+
+--- Avante adapter specs (U11): prompt/slash-command bridging. Verified
+--- against the real, installed `yetone/avante.nvim` source --
+--- `Config.slash_commands` (`avante/config.lua:348,1111`) is a plain
+--- `AvanteSlashCommand[]` array (unlike `custom_tools`, it has no function
+--- form), read fresh on every `avante.utils.get_commands()` call
+--- (`avante/utils/init.lua:1559-1579`, itself invoked on every chat
+--- submission via `Sidebar:handle_submit` at `avante/sidebar.lua:2814` and
+--- on every `/`-completion via `cmp_avante/commands.lua:33,56`) but never
+--- re-invoked as a function -- so, like Avante's own ACP integration
+--- (`avante/llm.lua:1188-1211`, which does
+--- `table.insert(Config.slash_commands, {...})` at runtime to register
+--- agent-defined commands), this adapter's contract is to hand callers a
+--- table (`M.slash_commands`) whose *contents* are refreshed in place, not
+--- a table that is replaced wholesale.
+---
+--- `AvanteSlashCommand` (`avante/types.lua:555-560`): `name`, `description`,
+--- `details`, optional `shorthelp`, optional `callback` typed
+--- `fun(self: avante.Sidebar, args: string, cb?: fun(args: string): nil)`.
+--- Critically, `Sidebar:handle_submit` (`avante/sidebar.lua:2808-2834`) only
+--- forwards a callback's `cb`-rewritten text into the normal LLM turn for
+--- the two hardcoded names `"lines"` and `"commit"` -- every other command
+--- (built-in or custom) just runs `cmd.callback(self, args); return`, i.e.
+--- the callback is solely responsible for rendering its own output. The
+--- only generic, publicly-referenced rendering primitive available to an
+--- external command (confirmed via the old `mcphub.nvim`'s own
+--- `extensions/avante/slash_commands.lua`, which this adapter replaces, and
+--- still present in the installed source) is
+--- `Sidebar:add_chat_history(messages, opts)` (`avante/sidebar.lua:2481`).
+--- So a prompt's rendered content is appended as a chat message via
+--- `sidebar:add_chat_history(...)`, exactly like the old extension did.
+---
+--- `M.custom_tools()`'s dual sync/async and cache-per-client-id/`pcall`/
+--- `unwrap_result` conventions all carry over unchanged for prompts: a
+--- native client's `prompts/get` callback fires synchronously (U3); a
+--- remote client's is always async (U1/U2); a remote reply is enveloped
+--- (`{jsonrpc, id, result = {...}}`) while a native one is the bare payload.
+describe("adapters.avante (prompt/slash-command translation, U11)", function()
+	after_each(function()
+		client._reset_registry()
+	end)
+
+	it("happy path: an MCP prompt on a native server is an invocable slash command matching prompts/get", function()
+		local example = require("tests.fixtures.example_native_server")
+		native.register(example)
+
+		local commands = avante.custom_slash_commands()
+		assert.is_table(commands)
+
+		local greet_command
+		for _, cmd in ipairs(commands) do
+			if cmd.name:match("greet$") then
+				greet_command = cmd
+			end
+		end
+		assert.is_not_nil(greet_command)
+		assert.are.equal("Greet someone by name", greet_command.description)
+		assert.is_function(greet_command.callback)
+
+		-- Exercise the callback the way Sidebar:handle_submit actually calls
+		-- it: callback(sidebar, args). A fake sidebar double stands in for
+		-- avante.Sidebar; only add_chat_history is exercised here.
+		local rendered
+		local fake_sidebar = {
+			add_chat_history = function(_self, messages, _opts)
+				rendered = messages
+			end,
+		}
+		greet_command.callback(fake_sidebar, "Ada")
+
+		assert.is_not_nil(rendered)
+		local found = false
+		for _, message in ipairs(rendered) do
+			if message.content and message.content:match("Hello, Ada!") then
+				found = true
+			end
+		end
+		assert.is_true(found)
+	end)
+
+	it("happy path: a prompt exposed by a remote (enveloped) client is an invocable slash command", function()
+		make_remote_prompt_double("remote-prompts", {
+			{
+				name = "remote_greet",
+				description = "Greet someone via a remote hub",
+				arguments = { { name = "who", required = false } },
+			},
+		}, function(params, callback)
+			local who = (params.arguments and params.arguments.who) or "world"
+			-- Remote reply is also enveloped, like the real hub U9 validated
+			-- against.
+			callback(nil, {
+				jsonrpc = "2.0",
+				id = 1,
+				result = { messages = { { role = "user", content = { type = "text", text = "Hi, " .. who .. "!" } } } },
+			}, nil)
+		end)
+
+		-- custom_slash_commands()'s own contract is synchronous (mirroring
+		-- custom_tools()), so the first call only kicks off the prompts/list
+		-- refresh; the listing catches up on the next call once the remote
+		-- double's deferred reply has landed.
+		local commands = avante.custom_slash_commands()
+		local remote_command
+		for _, cmd in ipairs(commands) do
+			if cmd.name:match("remote_greet$") then
+				remote_command = cmd
+			end
+		end
+		assert.is_nil(remote_command)
+
+		vim.wait(200, function()
+			for _, cmd in ipairs(avante.custom_slash_commands()) do
+				if cmd.name:match("remote_greet$") then
+					remote_command = cmd
+				end
+			end
+			return remote_command ~= nil
+		end)
+		assert.is_not_nil(remote_command)
+		assert.are.equal("Greet someone via a remote hub", remote_command.description)
+
+		local rendered
+		local completed = false
+		local fake_sidebar = {
+			add_chat_history = function(_self, messages, _opts)
+				rendered = messages
+				completed = true
+			end,
+		}
+		remote_command.callback(fake_sidebar, "Grace")
+		-- Must not have rendered synchronously: the double's callback is
+		-- deferred via vim.schedule.
+		assert.is_false(completed)
+
+		vim.wait(200, function()
+			return completed
+		end)
+
+		assert.is_true(completed)
+		assert.is_not_nil(rendered)
+		local found = false
+		for _, message in ipairs(rendered) do
+			if message.content and message.content:match("Hi, Grace!") then
+				found = true
+			end
+		end
+		assert.is_true(found)
+	end)
+
+	it("edge case: zero connected clients means no slash commands are registered, not an error", function()
+		assert.are.equal(0, #client.get_clients())
+		local commands
+		assert.has_no.errors(function()
+			commands = avante.custom_slash_commands()
+		end)
+		assert.is_table(commands)
+		assert.are.equal(0, #commands)
+	end)
+
+	it(
+		"integration: a client transitioning to disconnected is reflected in the slash-command list on next access",
+		function()
+			local example = require("tests.fixtures.example_native_server")
+			local server = native.register(example)
+
+			local commands_before = avante.custom_slash_commands()
+			local found_before = false
+			for _, cmd in ipairs(commands_before) do
+				if cmd.name:match("greet$") then
+					found_before = true
+				end
+			end
+			assert.is_true(found_before)
+
+			server:disconnect()
+			assert.is_true(server:is_stopped())
+
+			local commands_after = avante.custom_slash_commands()
+			local found_after = false
+			for _, cmd in ipairs(commands_after) do
+				if cmd.name:match("greet$") then
+					found_after = true
+				end
+			end
+			assert.is_false(found_after)
+		end
+	)
+
+	it("M.slash_commands is the same live table handed to avante.setup(), mutated in place on refresh", function()
+		-- Config.slash_commands (a plain AvanteSlashCommand[] array, not a
+		-- function like custom_tools) is read fresh on every
+		-- avante.utils.get_commands() call but never re-invoked -- so the
+		-- adapter must hand callers a stable table reference and mutate its
+		-- *contents* in place, exactly like avante/llm.lua's own ACP
+		-- integration does to Config.slash_commands at runtime.
+		local example = require("tests.fixtures.example_native_server")
+		native.register(example)
+
+		local handle = avante.slash_commands
+		assert.is_table(handle)
+
+		avante.custom_slash_commands()
+		assert.is_true(handle == avante.slash_commands)
+
+		local found = false
+		for _, cmd in ipairs(handle) do
+			if cmd.name:match("greet$") then
+				found = true
+			end
+		end
+		assert.is_true(found)
 	end)
 end)

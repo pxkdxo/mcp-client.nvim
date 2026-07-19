@@ -38,5 +38,23 @@ return {
 			description = "A static greeting resource",
 		},
 	},
-	prompts = {},
+	prompts = {
+		greet = function(arguments)
+			local who = (arguments and arguments.who) or "world"
+			return {
+				messages = {
+					{
+						role = "user",
+						content = { type = "text", text = "Hello, " .. who .. "!" },
+					},
+				},
+			}
+		end,
+	},
+	prompt_meta = {
+		greet = {
+			description = "Greet someone by name",
+			arguments = { { name = "who", description = "Who to greet", required = false } },
+		},
+	},
 }
