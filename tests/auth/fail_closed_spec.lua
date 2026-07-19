@@ -356,6 +356,247 @@ describe("auth.refresh (refresh-token grant)", function()
 	end)
 end)
 
+describe("client transparent token refresh (expired -> refresh -> retry)", function()
+	-- End-to-end coverage of the U7 scenario the standalone refresh.lua tests do
+	-- NOT reach: an expired access token, configured on the client via
+	-- config.auth.token_store, is refreshed transparently through client:request
+	-- before the request is sent, and a revoked refresh token surfaces a terminal
+	-- re-auth error through that same path -- never an indefinite retry.
+	local token_store = require("mcphub-neovim.auth.token_store")
+
+	local double
+	local tmp
+
+	after_each(function()
+		client._reset_registry()
+		vim.wait(30, function()
+			return false
+		end)
+		if double then
+			double:stop()
+			double = nil
+		end
+	end)
+
+	local function make_tmpdir()
+		local dir = vim.fn.tempname()
+		vim.fn.mkdir(dir, "p")
+		return dir
+	end
+
+	-- A file-backed store seeded with an *expired* access token whose refresh
+	-- metadata points at the double's /token endpoint. Using a real store (file
+	-- backend, temp data_home) exercises the real load/save/status path.
+	local function seed_expired_store(token_endpoint, overrides)
+		tmp = make_tmpdir()
+		local store = token_store.new({ key = "hubX", backend = "file", data_home = tmp })
+		store:save(vim.tbl_extend("force", {
+			access_token = "expired-access-token",
+			refresh_token = "the-refresh-token",
+			token_type = "Bearer",
+			expires_at = os.time() - 1, -- already expired
+			scope = "mcp",
+			token_endpoint = token_endpoint,
+			client_id = "the-client-id",
+			resource = "https://hub.example/mcp",
+		}, overrides or {}))
+		return store
+	end
+
+	it("refreshes an expired token transparently and the request succeeds with the new token", function()
+		local seen_auth_on_ping = {}
+		double = HttpDouble.new({
+			on_request = function(method, path, rest, head)
+				if method == "POST" and path == "/token" then
+					return {
+						status = 200,
+						body = vim.json.encode({
+							access_token = "fresh-access-token",
+							refresh_token = "rotated-refresh-token",
+							token_type = "Bearer",
+							expires_in = 3600,
+						}),
+					}
+				end
+				if method == "POST" and path == "/mcp" then
+					local ok, decoded = pcall(vim.json.decode, rest)
+					if ok and decoded.method == "initialize" then
+						return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
+					end
+					-- A ping: record the Authorization it carried so we can prove it
+					-- used the refreshed token, not the expired one.
+					table.insert(seen_auth_on_ping, head and head:match("[Aa]uthorization:%s*([^\r\n]+)"))
+					return {
+						status = 200,
+						body = vim.json.encode({ jsonrpc = "2.0", id = decoded.id, result = { pong = true } }),
+					}
+				end
+				return { status = 404, body = "" }
+			end,
+		})
+
+		local store = seed_expired_store(double.url .. "/token")
+
+		local got
+		client.connect({
+			url = double.url .. "/mcp",
+			auth = { token_store = store },
+		}, {
+			on_connect = function(c, e)
+				got = { client = c, err = e }
+			end,
+		})
+		assert.is_true(wait_for(function()
+			return got ~= nil
+		end, 3000))
+		assert.is_nil(got.err)
+
+		local reply
+		got.client:request({ jsonrpc = "2.0", id = 7, method = "ping", params = {} }, function(err, result)
+			reply = { err = err, result = result }
+		end)
+
+		assert.is_true(wait_for(function()
+			return reply ~= nil
+		end, 3000))
+		-- The caller observes only the successful retry -- no error surfaced.
+		assert.is_nil(reply.err)
+		assert.are.same({ pong = true }, reply.result.result)
+		-- The ping went out carrying the refreshed token, not the expired one.
+		assert.are.equal(1, #seen_auth_on_ping)
+		assert.are.equal("Bearer fresh-access-token", seen_auth_on_ping[1])
+		-- The rotated token was persisted for next time.
+		local status = store:status()
+		assert.is_true(status.has_token)
+		assert.is_false(status.expired)
+
+		got.client:disconnect()
+	end)
+
+	it("surfaces a terminal re-auth-required error when the refresh token is revoked (no infinite retry)", function()
+		local ping_attempts = 0
+		double = HttpDouble.new({
+			on_request = function(method, path, rest)
+				if method == "POST" and path == "/token" then
+					-- Refresh token revoked: invalid_grant is terminal.
+					return {
+						status = 400,
+						body = vim.json.encode({ error = "invalid_grant", error_description = "revoked" }),
+					}
+				end
+				if method == "POST" and path == "/mcp" then
+					local ok, decoded = pcall(vim.json.decode, rest)
+					if ok and decoded.method == "initialize" then
+						return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
+					end
+					ping_attempts = ping_attempts + 1
+					return {
+						status = 200,
+						body = vim.json.encode({ jsonrpc = "2.0", id = decoded.id, result = { pong = true } }),
+					}
+				end
+				return { status = 404, body = "" }
+			end,
+		})
+
+		local store = seed_expired_store(double.url .. "/token", { refresh_token = "SUPER-SECRET-refresh" })
+
+		local got
+		client.connect({
+			url = double.url .. "/mcp",
+			auth = { token_store = store },
+		}, {
+			on_connect = function(c, e)
+				got = { client = c, err = e }
+			end,
+		})
+		assert.is_true(wait_for(function()
+			return got ~= nil
+		end, 3000))
+		assert.is_nil(got.err)
+
+		local reply
+		got.client:request({ jsonrpc = "2.0", id = 8, method = "ping", params = {} }, function(err, result)
+			reply = { err = err, result = result }
+		end)
+
+		assert.is_true(wait_for(function()
+			return reply ~= nil
+		end, 3000))
+		-- A distinct re-auth error, not a hang and not a success.
+		assert.is_not_nil(reply.err)
+		assert.is_nil(reply.result)
+		assert.matches("re%-auth", reply.err)
+		-- The request was NEVER sent to the hub: refresh failed first, no retry.
+		assert.are.equal(0, ping_attempts)
+		-- The secret refresh token never leaks into the surfaced error.
+		assert.is_nil(reply.err:find("SUPER-SECRET-refresh", 1, true))
+
+		-- Give any (erroneous) retry a chance to fire; there must be none.
+		vim.wait(150, function()
+			return false
+		end)
+		assert.are.equal(0, ping_attempts)
+
+		got.client:disconnect()
+	end)
+
+	it("does not refresh when the configured token is still valid (single request, no /token hit)", function()
+		local token_hits = 0
+		double = HttpDouble.new({
+			on_request = function(method, path, rest, head)
+				if method == "POST" and path == "/token" then
+					token_hits = token_hits + 1
+					return { status = 200, body = vim.json.encode({ access_token = "should-not-happen" }) }
+				end
+				if method == "POST" and path == "/mcp" then
+					local ok, decoded = pcall(vim.json.decode, rest)
+					if ok and decoded.method == "initialize" then
+						return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
+					end
+					return {
+						status = 200,
+						body = vim.json.encode({ jsonrpc = "2.0", id = decoded.id, result = { pong = true } }),
+					}
+				end
+				return { status = 404, body = "" }
+			end,
+		})
+
+		-- A store whose token is NOT expired: no refresh should be attempted.
+		local store = seed_expired_store(double.url .. "/token", { expires_at = os.time() + 3600 })
+
+		local got
+		client.connect({
+			url = double.url .. "/mcp",
+			auth = { token_store = store },
+		}, {
+			on_connect = function(c, e)
+				got = { client = c, err = e }
+			end,
+		})
+		assert.is_true(wait_for(function()
+			return got ~= nil
+		end, 3000))
+		assert.is_nil(got.err)
+
+		local reply
+		got.client:request({ jsonrpc = "2.0", id = 9, method = "ping", params = {} }, function(err, result)
+			reply = { err = err, result = result }
+		end)
+
+		assert.is_true(wait_for(function()
+			return reply ~= nil
+		end, 3000))
+		assert.is_nil(reply.err)
+		assert.are.same({ pong = true }, reply.result.result)
+		-- The valid token means the token endpoint was never contacted.
+		assert.are.equal(0, token_hits)
+
+		got.client:disconnect()
+	end)
+end)
+
 describe("bearer attachment on the wire (happy path)", function()
 	-- The transport doesn't care that 127.0.0.1 is technically localhost for the
 	-- header-merge test (per the brief): this exercises that a token applied to a

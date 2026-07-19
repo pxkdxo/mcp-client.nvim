@@ -20,6 +20,8 @@
 
 local detect = require("mcphub-neovim.transport.detect")
 local tls = require("mcphub-neovim.transport.tls")
+local token_store = require("mcphub-neovim.auth.token_store")
+local refresh = require("mcphub-neovim.auth.refresh")
 local Session = require("mcphub-neovim.session")
 local Reconnect = require("mcphub-neovim.reconnect")
 
@@ -234,6 +236,48 @@ local function make_reinitializer(entry)
 	end
 end
 
+--- Ensure the configured token is fresh before a request goes out, refreshing
+--- transparently at most once if it has expired -- the token-refresh analogue of
+--- session.lua's single 404-reinitialize retry, one layer up.
+---
+--- With no `config.auth.token_store` configured (`entry._token_store` nil), this
+--- is a zero-overhead pass-through: it invokes `proceed()` immediately, so every
+--- non-OAuth client behaves exactly as before this wiring existed.
+---
+--- When a store IS configured and its access token is expired, it runs the
+--- refresh-token grant EXACTLY once:
+---   * success -> persist the (possibly rotated) token, mutate the shared
+---     config.headers table in place via token_store.apply_to_headers (the same
+---     mechanism the transports read on their next request), then `proceed()`;
+---   * failure -> surface the refresh error to `on_error(err)` and DO NOT send
+---     the request, so a revoked refresh token yields a terminal
+---     "re-authentication required" error rather than an unbounded retry.
+--- It never loops: exactly one refresh attempt per request, and the refresh
+--- error string (from refresh.lua) is already secret-free.
+local function ensure_fresh_token(entry, proceed, on_error)
+	local store = entry._token_store
+	if not store then
+		return proceed()
+	end
+	local status = store:status()
+	if not status.has_token or not status.expired then
+		-- No stored token, or it is still valid: nothing to refresh.
+		return proceed()
+	end
+	refresh.refresh(store:load(), function(new_token, err)
+		if err then
+			-- Terminal for this request: refresh failed (revoked token, network
+			-- failure, or no refresh token). Surface it; never retry in a loop.
+			return on_error(err)
+		end
+		store:save(new_token)
+		-- Mutate the shared headers table in place so this request -- and every
+		-- subsequent one, across reconnects -- carries the refreshed bearer.
+		token_store.apply_to_headers(entry.config.headers, new_token)
+		proceed()
+	end)
+end
+
 --- Construct the public client object exposed to callers, backed by a
 --- registry `entry`.
 local function make_client_object(entry)
@@ -271,11 +315,20 @@ local function make_client_object(entry)
 		if key ~= nil then
 			entry._in_flight[key] = callback
 		end
-		entry.session:request(rpc_message, function(err, result, response)
+		local function settle(err, result, response)
 			if key ~= nil then
 				entry._in_flight[key] = nil
 			end
 			callback(err, result, response)
+		end
+		-- Refresh an expired configured token transparently (at most once) before
+		-- dispatching; with no token_store this is an immediate pass-through.
+		ensure_fresh_token(entry, function()
+			entry.session:request(rpc_message, settle)
+		end, function(refresh_err)
+			-- Refresh failed terminally: resolve the caller with a clear error
+			-- instead of sending a request we know is unauthenticated.
+			settle(refresh_err, nil, nil)
 		end)
 	end
 
@@ -341,14 +394,30 @@ end
 --- config/opts split, but returns the richer, reconnecting client object.
 ---
 --- @param config table  url, name, client_version, capabilities, headers,
----   timeout, and an optional `reconnect` sub-table (initial_delay,
----   max_delay, growth_factor, max_attempts) forwarded to the machine.
+---   timeout, an optional `reconnect` sub-table (initial_delay, max_delay,
+---   growth_factor, max_attempts) forwarded to the machine, and an optional
+---   `auth` sub-table `{ token_store = <TokenStore> }`: when present, the stored
+---   bearer token is attached to every request and refreshed transparently on
+---   expiry (see ensure_fresh_token). Consistent with how `headers`/`reconnect`
+---   are optional sub-tables; absent it is the zero-overhead non-OAuth path.
 --- @param opts table  on_connect(client|nil, err|nil)
 function M.connect(config, opts)
 	assert(type(config) == "table", "config table is required")
 	assert(type(config.url) == "string" and config.url ~= "", "config.url is required")
 	opts = opts or {}
 	assert(type(opts.on_connect) == "function", "opts.on_connect is required")
+
+	-- Optional OAuth identity: a TokenStore the client consults and updates. When
+	-- configured, seed the shared config.headers table with the currently-stored
+	-- bearer so the initialize handshake, the R12 gate below, and every request
+	-- see it. (config.headers is the one table threaded verbatim into every
+	-- transport (re)construction, so mutating it in place keeps auth current
+	-- across reconnects -- the same mechanism a later refresh reuses.)
+	local store = config.auth and config.auth.token_store or nil
+	if store then
+		config.headers = config.headers or {}
+		token_store.apply_to_headers(config.headers, store:load())
+	end
 
 	-- R12 fail-closed gate: before opening ANY connection, refuse a
 	-- non-localhost hub that lacks TLS (https://) or a configured credential.
@@ -381,6 +450,9 @@ function M.connect(config, opts)
 			config = config,
 			transport = result.transport,
 			transport_client = result.client,
+			-- The optional OAuth identity: when set, obj:request consults it to
+			-- transparently refresh an expired token before dispatching.
+			_token_store = store,
 			_in_flight = {},
 			_closed = false,
 		}
