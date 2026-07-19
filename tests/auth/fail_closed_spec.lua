@@ -597,6 +597,155 @@ describe("client transparent token refresh (expired -> refresh -> retry)", funct
 	end)
 end)
 
+describe("client concurrent refresh coalescing (single-flight)", function()
+	-- Reproduces the reachable CodeCompanion resource-fan-out scenario: N requests
+	-- are issued against the same client in a tight loop (without awaiting each
+	-- callback) while the configured token is expired. Without single-flight
+	-- coalescing, every one of the N calls independently observes the token as
+	-- expired and fires its own refresh-token grant. Because refresh tokens ROTATE
+	-- (the AS invalidates the presented refresh_token and issues a new one), the
+	-- first grant to complete rotates the token; the remaining N-1 grants are then
+	-- presenting an already-stale refresh_token and are rejected with invalid_grant
+	-- -- so most of the batch spuriously surfaces a terminal re-auth error even
+	-- though a sibling refreshed successfully. With coalescing, exactly ONE grant
+	-- runs for the whole batch and every request succeeds.
+	local token_store = require("mcphub-neovim.auth.token_store")
+
+	local double
+	local tmp
+
+	after_each(function()
+		client._reset_registry()
+		vim.wait(30, function()
+			return false
+		end)
+		if double then
+			double:stop()
+			double = nil
+		end
+	end)
+
+	local function make_tmpdir()
+		local dir = vim.fn.tempname()
+		vim.fn.mkdir(dir, "p")
+		return dir
+	end
+
+	it("coalesces N concurrent refreshes onto one grant; every request succeeds", function()
+		local token_hits = 0
+		local ping_replies = 0
+		-- A rotating token endpoint with reuse-detection: the currently-valid
+		-- refresh token starts as "rt-0"; each successful exchange rotates it to a
+		-- fresh value and returns that value. A grant presenting anything other
+		-- than the currently-valid refresh token is rejected with invalid_grant --
+		-- exactly what a real rotating AS does when it detects reuse of a token it
+		-- already rotated away.
+		local current_refresh = "rt-0"
+		local rotation = 0
+		double = HttpDouble.new({
+			on_request = function(method, path, rest, _head)
+				if method == "POST" and path == "/token" then
+					token_hits = token_hits + 1
+					local presented = rest and rest:match("refresh_token=([^&]+)")
+					if presented ~= current_refresh then
+						-- Reuse of an already-rotated refresh token: terminal.
+						return {
+							status = 400,
+							body = vim.json.encode({
+								error = "invalid_grant",
+								error_description = "refresh token already used",
+							}),
+						}
+					end
+					rotation = rotation + 1
+					current_refresh = "rt-" .. rotation
+					return {
+						status = 200,
+						body = vim.json.encode({
+							access_token = "fresh-access-" .. rotation,
+							refresh_token = current_refresh,
+							token_type = "Bearer",
+							expires_in = 3600,
+						}),
+					}
+				end
+				if method == "POST" and path == "/mcp" then
+					local ok, decoded = pcall(vim.json.decode, rest)
+					if ok and decoded.method == "initialize" then
+						return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
+					end
+					ping_replies = ping_replies + 1
+					return {
+						status = 200,
+						body = vim.json.encode({ jsonrpc = "2.0", id = decoded.id, result = { pong = true } }),
+					}
+				end
+				return { status = 404, body = "" }
+			end,
+		})
+
+		tmp = make_tmpdir()
+		local store = token_store.new({ key = "hubConcurrent", backend = "file", data_home = tmp })
+		store:save({
+			access_token = "expired-access-token",
+			refresh_token = "rt-0",
+			token_type = "Bearer",
+			expires_at = os.time() - 1, -- already expired
+			scope = "mcp",
+			token_endpoint = double.url .. "/token",
+			client_id = "the-client-id",
+			resource = "https://hub.example/mcp",
+		})
+
+		local got
+		client.connect({
+			url = double.url .. "/mcp",
+			auth = { token_store = store },
+		}, {
+			on_connect = function(c, e)
+				got = { client = c, err = e }
+			end,
+		})
+		assert.is_true(wait_for(function()
+			return got ~= nil
+		end, 3000))
+		assert.is_nil(got.err)
+
+		-- Fire N requests in a tight loop, exactly like codecompanion.lua's
+		-- resources/read fan-out: each is dispatched before any callback runs, so
+		-- they all reach ensure_fresh_token while the token is still expired.
+		local N = 5
+		local replies = {}
+		for i = 1, N do
+			got.client:request({ jsonrpc = "2.0", id = 100 + i, method = "ping", params = {} }, function(err, result)
+				table.insert(replies, { err = err, result = result })
+			end)
+		end
+
+		assert.is_true(wait_for(function()
+			return #replies == N
+		end, 3000))
+
+		-- (1) The token endpoint was hit exactly ONCE for the whole batch.
+		assert.are.equal(1, token_hits)
+		-- (2) Every one of the N concurrent requests succeeded; none spuriously
+		--     surfaced a re-auth error.
+		assert.are.equal(N, #replies)
+		for _, reply in ipairs(replies) do
+			assert.is_nil(reply.err)
+			assert.are.same({ pong = true }, reply.result.result)
+		end
+		-- All N pings actually reached the hub carrying the (single) refreshed token.
+		assert.are.equal(N, ping_replies)
+		-- The rotated token was persisted for next time and is no longer expired.
+		local status = store:status()
+		assert.is_true(status.has_token)
+		assert.is_false(status.expired)
+
+		got.client:disconnect()
+	end)
+end)
+
 describe("bearer attachment on the wire (happy path)", function()
 	-- The transport doesn't care that 127.0.0.1 is technically localhost for the
 	-- header-merge test (per the brief): this exercises that a token applied to a

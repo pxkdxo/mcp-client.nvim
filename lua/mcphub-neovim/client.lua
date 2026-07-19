@@ -254,6 +254,25 @@ end
 ---     "re-authentication required" error rather than an unbounded retry.
 --- It never loops: exactly one refresh attempt per request, and the refresh
 --- error string (from refresh.lua) is already secret-free.
+---
+--- Single-flight coalescing (keyed per connection `entry`). When several requests
+--- are issued concurrently against the same client while its token is expired --
+--- which happens in practice: an adapter's resource fan-out (codecompanion.lua)
+--- fires a tight loop of `request(...)` calls without awaiting each callback, so
+--- every one independently observes `status().expired == true` before any refresh
+--- has completed -- only the FIRST starts a `refresh.refresh(...)` grant. The rest
+--- queue their `(proceed, on_error)` pair onto `entry._refresh_waiters` and are
+--- resolved together when that single in-flight grant settles. This is essential
+--- because OAuth refresh tokens rotate: firing N concurrent grants would let the
+--- first rotate the token and leave the other N-1 presenting an already-stale
+--- refresh token, which the AS's reuse-detection rejects with `invalid_grant` --
+--- spuriously forcing most of the batch into re-authentication even though a
+--- sibling refreshed successfully. Coalescing collapses the batch onto one grant.
+---
+--- Race-safety within Lua's single-threaded, cooperative model: the check-and-set
+--- of the in-flight flag (`entry._refreshing`) is synchronous and completes before
+--- `refresh.refresh` yields control (it is an async curl call), so no second
+--- caller can slip past the flag between the check and the dispatch.
 local function ensure_fresh_token(entry, proceed, on_error)
 	local store = entry._token_store
 	if not store then
@@ -264,17 +283,46 @@ local function ensure_fresh_token(entry, proceed, on_error)
 		-- No stored token, or it is still valid: nothing to refresh.
 		return proceed()
 	end
+
+	-- A refresh is already in flight for this entry: join the queue and let the
+	-- single in-flight grant resolve us. Do NOT start a second grant.
+	if entry._refreshing then
+		table.insert(entry._refresh_waiters, { proceed = proceed, on_error = on_error })
+		return
+	end
+
+	-- We are the first: mark in flight and seed the queue with our own pair.
+	entry._refreshing = true
+	entry._refresh_waiters = { { proceed = proceed, on_error = on_error } }
+
 	refresh.refresh(store:load(), function(new_token, err)
+		-- Drain the ENTIRE queue (every joined caller, including the originator)
+		-- with this single outcome, then clear the in-flight state so a *later*
+		-- expiry can trigger a fresh single-flight cycle.
+		local waiters = entry._refresh_waiters
+		entry._refresh_waiters = {}
+		entry._refreshing = false
+
 		if err then
-			-- Terminal for this request: refresh failed (revoked token, network
-			-- failure, or no refresh token). Surface it; never retry in a loop.
-			return on_error(err)
+			-- Terminal for this batch: refresh failed (revoked token, network
+			-- failure, or no refresh token). Surface it to every caller; never
+			-- retry in a loop.
+			for _, waiter in ipairs(waiters) do
+				waiter.on_error(err)
+			end
+			return
 		end
+
+		-- Persist and reapply headers exactly once (the mutation is idempotent on
+		-- the shared table, but there is no reason to repeat it per caller), then
+		-- release every queued caller.
 		store:save(new_token)
 		-- Mutate the shared headers table in place so this request -- and every
 		-- subsequent one, across reconnects -- carries the refreshed bearer.
 		token_store.apply_to_headers(entry.config.headers, new_token)
-		proceed()
+		for _, waiter in ipairs(waiters) do
+			waiter.proceed()
+		end
 	end)
 end
 
@@ -453,6 +501,11 @@ function M.connect(config, opts)
 			-- The optional OAuth identity: when set, obj:request consults it to
 			-- transparently refresh an expired token before dispatching.
 			_token_store = store,
+			-- Single-flight refresh coalescing state (see ensure_fresh_token):
+			-- `_refreshing` is the in-flight flag; `_refresh_waiters` is the queue of
+			-- `{ proceed, on_error }` pairs resolved together when that grant settles.
+			_refreshing = false,
+			_refresh_waiters = {},
 			_in_flight = {},
 			_closed = false,
 		}
