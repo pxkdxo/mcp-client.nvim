@@ -432,4 +432,128 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 			"the abandoned transport's stale stream-exit hook must not drive reconnect against the live client"
 		)
 	end)
+
+	it("abandons a wedged reconnect dial: frees the slot, times out coalesced waiters, closes a late result", function()
+		-- Scenario (round 3), the wedged-dial starvation: a reconnect attempt's
+		-- handshake dial (D1) is dispatched but its underlying detect.connect NEVER
+		-- calls back (a hub that accepts the connection but hangs the MCP handshake
+		-- with no response and no clean exit -- exactly what ATTEMPT_TIMEOUT_MS
+		-- exists to bound). A reinitialize (a 404 request) COALESCES onto D1 before
+		-- the guard fires, joining its waiter list.
+		--
+		-- Pre-fix: the attempt's guard timeout calls reconnect:on_drop() but does
+		-- NOTHING to entry._handshake. D1's waiter list stays populated forever, so
+		-- (a) attempt #2 sees entry._handshake still non-nil and JOINS the dead list
+		-- instead of dialing fresh, and (b) the coalesced reinitialize's on_done
+		-- (session.lua's Session:request retry callback) never fires.
+		--
+		-- Post-fix: on the guard timeout, because D1 is still the current dial
+		-- (generation unchanged), attempt_reconnect actively ABANDONS it -- drains
+		-- and clears entry._handshake's waiter list (freeing the slot), bumps
+		-- entry._handshake_gen (so a late D1 result is recognized as stale), and
+		-- notifies every drained waiter with a clear timeout error. Then attempt #2
+		-- dials FRESH (D2), and if D1's detect.connect ever DOES resolve, its result
+		-- is closed, not adopted.
+		--
+		-- Determinism: a small per-attempt timeout (10ms) fires D1's guard while D1
+		-- is held pending; attempt #2 fires after a longer backoff (initial_delay=80).
+		-- The reinitialize is issued before the guard fires so it coalesces onto D1.
+		local obj, initial = connect_client({
+			reconnect = { initial_delay = 80, max_attempts = 3 },
+			attempt_timeout = 10,
+		})
+		local dials_after_connect = detect_stub.dials
+
+		-- Drop the stream: on_drop -> reconnecting -> schedule attempt #1 (fires
+		-- after ~80ms). Wait for attempt #1's handshake dial (D1) to appear.
+		initial.fire_exit()
+		vim.wait(300, function()
+			return detect_stub.dials >= dials_after_connect + 1
+		end)
+		assert.are.equal(
+			dials_after_connect + 1,
+			detect_stub.dials,
+			"attempt #1 should have started its handshake dial (D1)"
+		)
+		local d1_index = #detect_stub.pending
+
+		-- While D1 is still pending (before its 10ms guard fires), fire a 404 request
+		-- so the reinitialize path COALESCES onto D1's waiter list rather than
+		-- starting its own dial. Its callback (the on_done session.lua awaits) is
+		-- what must be notified with a timeout error when we abandon D1.
+		initial:set_responder(function()
+			return "hub returned status 404: session expired", nil, { status = 404 }
+		end)
+		local reinit_reply
+		obj:request({ jsonrpc = "2.0", id = 1, method = "ping" }, function(err, result)
+			reinit_reply = { err = err, result = result }
+		end)
+		-- The reinitialize must have JOINED D1 (coalesced), not opened a new dial.
+		assert.are.equal(
+			dials_after_connect + 1,
+			detect_stub.dials,
+			"the reinitialize must coalesce onto the pending D1 dial, not open a new one"
+		)
+
+		-- Attempt #1's per-attempt guard timeout (10ms) fires while D1 is still
+		-- pending and unresolved. Post-fix this ABANDONS D1: the slot frees, the
+		-- coalesced reinitialize waiter is notified with a timeout error, and the
+		-- machine (max_attempts=3, still reconnecting) schedules attempt #2.
+		vim.wait(200, function()
+			-- Early-exit only once the coalesced reinitialize was notified AND a
+			-- second, distinct dial (D2) has appeared -- both are the post-fix
+			-- behavior. A correctly-behaving impl still waits until attempt #2 dials.
+			return reinit_reply ~= nil and detect_stub.dials >= dials_after_connect + 2
+		end)
+		assert.is_false(obj:is_stopped(), "the machine must still be reconnecting, not disconnected")
+
+		-- ASSERTION 1: the coalesced reinitialize waiter got its own callback with a
+		-- clear timeout error -- it did NOT hang waiting for the wedged dial or the
+		-- reconnect machine's unrelated exhaustion sweep.
+		assert.is_not_nil(
+			reinit_reply,
+			"a caller coalesced onto the wedged dial must be notified when the dial is abandoned, not hang forever"
+		)
+		assert.is_not_nil(
+			reinit_reply.err,
+			"the coalesced waiter's notification must carry a timeout error, not a phantom success"
+		)
+
+		-- ASSERTION 2: the slot is genuinely freed -- attempt #2 dialed FRESH (a new,
+		-- distinct dial at a higher index), not joining the abandoned D1.
+		assert.are.equal(
+			dials_after_connect + 2,
+			detect_stub.dials,
+			"attempt #2 must dial FRESH after the wedged D1 is abandoned, not join the dead waiter list"
+		)
+		local d2_index = #detect_stub.pending
+		assert.is_true(d2_index > d1_index, "attempt #2's dial (D2) must be a new, distinct dial from D1")
+
+		-- Resolve D2 successfully so the client converges back to connected on D2.
+		local t2 = transport_double({ label = "t2" })
+		detect_stub.resolve(d2_index, { transport = "legacy_sse", client = t2, session_id = "sess-t2" })
+		vim.wait(100, function()
+			return not obj:is_stopped()
+		end)
+		assert.is_false(obj:is_stopped(), "the client should be connected again on the fresh D2 transport")
+		assert.are.equal(1, t2.hook_count, "the fresh D2 transport must be adopted/hooked exactly once")
+
+		-- ASSERTION 3: NOW the originally-wedged D1's detect.connect finally calls
+		-- back, very late -- after D1 was abandoned and after D2 was adopted. Its
+		-- result must be recognized as stale (generation was bumped on abandon) and
+		-- CLOSED, never adopted into the client that has moved on to D2.
+		local t1_late = transport_double({ label = "t1-late" })
+		detect_stub.resolve(d1_index, { transport = "legacy_sse", client = t1_late, session_id = "sess-t1" })
+		vim.wait(60, function()
+			return t1_late.closed
+		end)
+		assert.is_true(
+			t1_late.closed,
+			"a wedged dial that resolves after being abandoned and superseded must be closed, not adopted"
+		)
+		assert.are.equal(0, t1_late.hook_count, "the abandoned late result must never be hooked/adopted")
+		-- T2 remains the live transport; the late D1 result did not disturb it.
+		assert.is_false(t2.closed, "the live D2 transport must stay open when the abandoned D1 resolves late")
+		assert.is_false(obj:is_stopped(), "the client stays connected on D2 despite the late abandoned D1 result")
+	end)
 end)

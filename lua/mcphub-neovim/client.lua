@@ -229,6 +229,15 @@ end
 --- check-and-set of `entry._handshake` is synchronous and completes before
 --- detect.connect yields (it is an async curl call), so no second trigger can
 --- slip past the flag between the check and the dispatch.
+---
+--- Returns the generation number of the dial this call started-or-joined, so a
+--- caller with its own timeout guard (attempt_reconnect) can later check whether
+--- that specific dial is still the current one -- i.e. whether it should actively
+--- abandon a still-in-flight (wedged) dial on timeout, or leave it alone because a
+--- newer dial has already superseded it (meaning this one already resolved via the
+--- normal path). A coalesced waiter joining an in-flight dial gets that dial's
+--- generation; the first caller that dispatches a dial gets the fresh generation it
+--- just claimed.
 local function perform_handshake(entry, on_settled)
 	if entry._handshake then
 		-- A dial is already in flight: join it, do NOT start a second one. A
@@ -236,7 +245,7 @@ local function perform_handshake(entry, on_settled)
 		-- never starts its own), so it always sees that one dial's single adopted
 		-- result -- it is NOT a superseded, later dial.
 		table.insert(entry._handshake, on_settled)
-		return
+		return entry._handshake_gen
 	end
 
 	-- Each call that actually STARTS a dial (as opposed to joining one as a
@@ -295,6 +304,12 @@ local function perform_handshake(entry, on_settled)
 			waiter(result, err)
 		end
 	end)
+
+	-- Report back the generation of the dial this call dispatched, so a caller
+	-- with its own timeout guard can later tell whether this specific dial is
+	-- still current (and thus a wedged one it should abandon) or has already been
+	-- superseded by a newer dial.
+	return my_gen
 end
 
 --- Perform one reconnection attempt: a fresh transport handshake. On
@@ -310,7 +325,54 @@ end
 --- the machine in `reconnecting`. The timeout converts that silent stall
 --- into a counted failure so the machine can still exhaust to disconnected
 --- rather than hang -- the R11 "never leave a caller hanging" guarantee.
+---
+--- The timeout does more than count the attempt: if the underlying detect.connect
+--- dial genuinely never calls back (the pathological hangs-the-handshake hub), the
+--- single-flight slot (entry._handshake) would otherwise stay populated FOREVER --
+--- every future reconnect attempt or reinitialize would just JOIN the same dead
+--- waiter list instead of dialing fresh, and any caller that coalesced onto the
+--- wedged dial would hang indefinitely. So on timeout we actively ABANDON the
+--- wedged dial (see abandon_wedged_dial below), but only if it is still the dial
+--- this attempt is waiting on -- if a newer dial has since superseded it, it
+--- already resolved via the normal path and needs no intervention.
 local ATTEMPT_TIMEOUT_MS = 10000
+
+--- Actively abandon a wedged (never-resolving) handshake dial of generation `gen`,
+--- called from attempt_reconnect's guard timeout when that dial is still the
+--- current one. Frees the single-flight slot so the next attempt/reinitialize
+--- dials fresh, and notifies every coalesced waiter with a clear timeout error so
+--- none hangs. Bumping the generation makes the abandoned dial's own late result
+--- (if detect.connect ever DOES call back) fail perform_handshake's staleness
+--- check, so it is closed via close_transport rather than adopted -- reusing the
+--- exact mechanism round 2 built for the "resolves after a newer dial started"
+--- ordering, now reachable via an explicit abandon too.
+---
+--- Fully synchronous: under Lua's cooperative model the whole capture/clear/bump
+--- sequence completes before yielding, so nothing can interleave between "still the
+--- current dial?" and the abandon.
+local function abandon_wedged_dial(entry, gen)
+	-- Only abandon if this is still the current, in-flight dial. If a newer dial
+	-- has since started (generation moved on), this one already resolved via the
+	-- normal path before the guard fired -- a harmless near-simultaneous race that
+	-- perform_handshake already handled; touching entry._handshake now would
+	-- corrupt the newer dial's waiter list.
+	if not entry._handshake or entry._handshake_gen ~= gen then
+		return
+	end
+	-- Capture and clear the waiter list, freeing the slot for a fresh dial.
+	local waiters = entry._handshake
+	entry._handshake = nil
+	-- Bump the generation so the abandoned dial's late result (should it ever
+	-- arrive) is recognized as stale by perform_handshake and closed, not adopted.
+	entry._handshake_gen = (entry._handshake_gen or 0) + 1
+	-- Notify every coalesced waiter with a clear, stage-labeled timeout error so a
+	-- reinitialize (or a second reconnect attempt) that joined this wedged dial is
+	-- resolved promptly rather than depending on the reconnect machine's eventual
+	-- exhaustion to incidentally save it.
+	for _, waiter in ipairs(waiters) do
+		waiter(nil, "handshake attempt timed out")
+	end
+end
 
 local function attempt_reconnect(entry)
 	local settled = false
@@ -322,18 +384,29 @@ local function attempt_reconnect(entry)
 		fn()
 	end
 
+	-- The generation of the dial this attempt started-or-joined via
+	-- perform_handshake, captured below. The guard uses it to tell whether a
+	-- timed-out dial is still current (wedged -> abandon it) or already superseded.
+	local my_gen
+
 	local guard = vim.uv.new_timer()
 	guard:start(entry.config.attempt_timeout or ATTEMPT_TIMEOUT_MS, 0, function()
 		guard:stop()
 		guard:close()
 		vim.schedule(function()
 			settle(function()
+				-- Actively free a still-wedged dial before counting the attempt, so
+				-- the slot is available for the next attempt/reinitialize to dial
+				-- fresh and any coalesced waiter is notified rather than stranded.
+				abandon_wedged_dial(entry, my_gen)
+				-- Unchanged: a per-attempt timeout is always a failed attempt for the
+				-- machine's bookkeeping -- schedule the next one or exhaust.
 				entry.reconnect:on_drop()
 			end)
 		end)
 	end)
 
-	perform_handshake(entry, function(result, err)
+	my_gen = perform_handshake(entry, function(result, err)
 		if not guard:is_closing() then
 			guard:stop()
 			guard:close()
