@@ -139,6 +139,105 @@ local function fail_in_flight(entry, message)
 	end
 end
 
+--- Adopt a freshly-handshaken transport into `entry` -- the entry-state
+--- mutation that must happen EXACTLY ONCE per resolved handshake, even when
+--- several triggers coalesced onto it (see perform_handshake). Sets the live
+--- transport fields and (re-)registers the stream-exit and notification hooks
+--- on the new transport. Calling hook_stream_job twice against the same result
+--- would double-register the exit hook, so this is deliberately the single
+--- adoption point both handshake-driven paths share.
+local function adopt_transport(entry, result)
+	entry.transport_client = result.client
+	entry.transport = result.transport
+	hook_stream_job(entry, result.client)
+	hook_notifications(entry, result.client)
+end
+
+--- Coalesce concurrent transport-handshake dials against a single `entry`.
+---
+--- Both handshake-dialing paths -- the reconnect path (attempt_reconnect,
+--- driven by an unexpected stream drop) and the session-reinitialize path
+--- (make_reinitializer, driven by a session-scoped 404) -- go through here
+--- rather than calling detect.connect directly. A real hub restart fires both
+--- at once (the restart both kills the legacy SSE GET stream Job AND makes the
+--- next request 404), so without coordination they would open two independent
+--- handshakes against the same entry: whichever resolved last would silently
+--- win and the loser's freshly-opened transport would leak.
+---
+--- Single-flight per entry (the same shape U7 uses for token refresh):
+---   * `entry._handshake` is a list of waiter callbacks while a dial is in
+---     flight, and nil when idle. Its non-nil-ness is the in-flight flag.
+---   * The FIRST caller seeds the queue with its own `on_settled` and dispatches
+---     the one physical detect.connect. Any caller that arrives while a dial is
+---     in flight simply JOINS the queue -- it never starts a second dial.
+---   * When the single dial resolves, the queue is captured and cleared (so a
+---     *later* trigger can start a fresh cycle), the entry-state mutation is
+---     applied EXACTLY ONCE via adopt_transport (not once per waiter), and then
+---     every waiter is notified with the same `(result, err)` so each can run
+---     its own path-specific follow-up (reconnect: on_connected; reinitialize:
+---     hand `{transport, session_id}` back to session.lua's _adopt).
+---
+--- Superseded/orphaned cleanup: if the entry was intentionally closed while the
+--- dial was in flight, a now-irrelevant successful handshake is CLOSED rather
+--- than adopted or leaked, and its waiters are notified with an error so none
+--- adopts it -- mirroring attempt_reconnect's original timeout-vs-late-success
+--- guard, generalized to the close case.
+---
+--- Race-safety within Lua's single-threaded, cooperative model: the
+--- check-and-set of `entry._handshake` is synchronous and completes before
+--- detect.connect yields (it is an async curl call), so no second trigger can
+--- slip past the flag between the check and the dispatch.
+local function perform_handshake(entry, on_settled)
+	if entry._handshake then
+		-- A dial is already in flight: join it, do NOT start a second one.
+		table.insert(entry._handshake, on_settled)
+		return
+	end
+
+	entry._handshake = { on_settled }
+
+	detect.connect({
+		url = entry.config.url,
+		request = build_initialize_request(entry.config),
+		headers = entry.config.headers,
+		timeout = entry.config.timeout,
+	}, function(result, err)
+		-- Capture and clear the queue first so a follow-up trigger fired from a
+		-- waiter's callback starts a fresh cycle rather than joining this one.
+		local waiters = entry._handshake or {}
+		entry._handshake = nil
+
+		if not err and result then
+			-- Superseded if the client became terminal while this dial was in
+			-- flight -- either an explicit caller disconnect (`_closed`) or the
+			-- reconnect machine exhausting its bounded attempts to `disconnected`.
+			-- In both cases no handshake result may be adopted (adopting into a
+			-- terminal client would resurrect a torn-down connection). Close the
+			-- now-orphaned transport rather than leak it, and fail every waiter so
+			-- none adopts it -- generalizing attempt_reconnect's original
+			-- timeout-vs-late-success cleanup to the terminal-client case.
+			local terminal = entry._closed or entry.reconnect:state() == "disconnected"
+			if terminal then
+				if result.client and result.client.close then
+					pcall(function()
+						result.client:close()
+					end)
+				end
+				err = "client is closed"
+				result = nil
+			else
+				-- Apply the shared entry-state mutation exactly once, before any
+				-- waiter's path-specific follow-up runs.
+				adopt_transport(entry, result)
+			end
+		end
+
+		for _, waiter in ipairs(waiters) do
+			waiter(result, err)
+		end
+	end)
+end
+
 --- Perform one reconnection attempt: a fresh transport handshake. On
 --- success, adopt the new transport, re-hook its stream Job, and tell the
 --- reconnect machine we are connected again (which fires MCPAttach). On
@@ -175,25 +274,21 @@ local function attempt_reconnect(entry)
 		end)
 	end)
 
-	detect.connect({
-		url = entry.config.url,
-		request = build_initialize_request(entry.config),
-		headers = entry.config.headers,
-		timeout = entry.config.timeout,
-	}, function(result, err)
+	perform_handshake(entry, function(result, err)
 		if not guard:is_closing() then
 			guard:stop()
 			guard:close()
 		end
 		if settled then
-			-- The timeout already counted this attempt as failed. A late,
-			-- now-orphaned successful handshake would otherwise leak its stream;
-			-- close it rather than adopt it out of band.
-			if not err and result and result.client and result.client.close then
-				pcall(function()
-					result.client:close()
-				end)
-			end
+			-- The per-attempt timeout already counted this attempt as failed and
+			-- drove the machine (another attempt, or exhaustion). We must NOT run
+			-- the success follow-up (on_connected) now. Crucially we also do NOT
+			-- close result.client here: perform_handshake is the single owner of
+			-- the handshake result's lifecycle -- it has either already adopted a
+			-- non-terminal success as the entry's live transport (which a coalesced
+			-- reinitialize waiter still legitimately uses -- closing it would sever
+			-- a live connection) or already closed a terminal/superseded one. So
+			-- there is nothing orphaned for this waiter to clean up.
 			return
 		end
 		settle(function()
@@ -202,14 +297,14 @@ local function attempt_reconnect(entry)
 				entry.reconnect:on_drop()
 				return
 			end
-			entry.transport_client = result.client
-			entry.transport = result.transport
+			-- adopt_transport (transport_client/transport/hook_stream_job/
+			-- hook_notifications) already ran exactly once in perform_handshake.
+			-- Only the reconnect-specific follow-up remains: converge the session
+			-- onto the new transport and tell the machine we are connected again.
 			entry.session.transport = result.client
 			if result.session_id then
 				entry.session.session_id = result.session_id
 			end
-			hook_stream_job(entry, result.client)
-			hook_notifications(entry, result.client)
 			entry.reconnect:on_connected()
 		end)
 	end)
@@ -221,19 +316,13 @@ end
 --- event).
 local function make_reinitializer(entry)
 	return function(on_done)
-		detect.connect({
-			url = entry.config.url,
-			request = build_initialize_request(entry.config),
-			headers = entry.config.headers,
-			timeout = entry.config.timeout,
-		}, function(result, err)
+		perform_handshake(entry, function(result, err)
 			if err then
 				return on_done(err, nil)
 			end
-			entry.transport_client = result.client
-			entry.transport = result.transport
-			hook_stream_job(entry, result.client)
-			hook_notifications(entry, result.client)
+			-- adopt_transport already ran exactly once in perform_handshake; the
+			-- reinitialize-specific follow-up is to hand the new transport/session
+			-- id back to session.lua's _adopt.
 			on_done(nil, {
 				transport = result.client,
 				session_id = result.session_id,
@@ -366,14 +455,34 @@ local function make_client_object(entry)
 			return callback("client is disconnected", nil, nil)
 		end
 		local key = rpc_message.id
-		if key ~= nil then
-			entry._in_flight[key] = callback
-		end
+		-- Idempotency guard: a caller's callback must fire AT MOST ONCE, no
+		-- matter how the request is resolved. Without this, a request whose
+		-- callback was already invoked by fail_in_flight (reconnect exhausted to
+		-- disconnected -> the whole _in_flight table is cleared and each entry
+		-- fired with a disconnect error) could fire a SECOND time if a
+		-- concurrently-pending session-reinitialize retry for the same original
+		-- request later completes and calls settle again with a contradictory
+		-- (now-successful) result. Guarding on the _in_flight bookkeeping table
+		-- alone is insufficient: fail_in_flight clears that table, so the second
+		-- settle sees `key already nil` yet would still call `callback`. This is
+		-- the same "settled once" pattern attempt_reconnect uses internally.
+		local resolved = false
 		local function settle(err, result, response)
+			if resolved then
+				return
+			end
+			resolved = true
 			if key ~= nil then
 				entry._in_flight[key] = nil
 			end
 			callback(err, result, response)
+		end
+		-- Register the GUARDED settle (not the raw callback) as the in-flight
+		-- entry, so fail_in_flight resolves through the same idempotency guard:
+		-- once it fires settle, a later reinitialize-retry settle for the same
+		-- request is a no-op instead of a second, contradictory invocation.
+		if key ~= nil then
+			entry._in_flight[key] = settle
 		end
 		-- Refresh an expired configured token transparently (at most once) before
 		-- dispatching; with no token_store this is an immediate pass-through.
