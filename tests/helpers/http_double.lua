@@ -23,7 +23,10 @@ local function parse_request_head(buf)
 	return method, path, rest, head
 end
 
---- opts.on_request(method, path) -> a "handler" table describing the response:
+--- opts.on_request(method, path, rest, head) -> a "handler" table describing
+--- the response. `rest` is any body bytes already read; `head` is the raw
+--- request head (request line + headers, no trailing CRLFCRLF) so a fixture can
+--- assert on request headers (e.g. Authorization) it received:
 ---   { status = 200, headers = {...}, body = "..." }
 ---   or { status = 200, headers = {...}, sse = { {event=..., data=...}, ... } }
 ---     -- sse entries are written one at a time, flushed immediately, and the
@@ -60,12 +63,12 @@ function HttpDouble.new(opts)
 			end
 			buf = buf .. chunk
 
-			local method, path, rest = parse_request_head(buf)
+			local method, path, rest, head = parse_request_head(buf)
 			if not method then
 				return -- keep buffering until we see the header terminator
 			end
 
-			local handler = self._on_request(method, path, rest)
+			local handler = self._on_request(method, path, rest, head)
 			handler = handler or { status = 404, body = "" }
 
 			local status_line = string.format("HTTP/1.1 %d %s\r\n", handler.status, handler.reason or "OK")

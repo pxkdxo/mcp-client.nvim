@@ -19,6 +19,7 @@
 --- connect that tore down again.
 
 local detect = require("mcphub-neovim.transport.detect")
+local tls = require("mcphub-neovim.transport.tls")
 local Session = require("mcphub-neovim.session")
 local Reconnect = require("mcphub-neovim.reconnect")
 
@@ -348,6 +349,20 @@ function M.connect(config, opts)
 	assert(type(config.url) == "string" and config.url ~= "", "config.url is required")
 	opts = opts or {}
 	assert(type(opts.on_connect) == "function", "opts.on_connect is required")
+
+	-- R12 fail-closed gate: before opening ANY connection, refuse a
+	-- non-localhost hub that lacks TLS (https://) or a configured credential.
+	-- A configured token is surfaced as an Authorization header in
+	-- config.headers (token_store.apply_to_headers puts it there); its presence
+	-- is the "auth is configured" signal. A localhost hub is exempt entirely.
+	-- This must run before detect.connect so we never emit an unauthenticated
+	-- request to a non-localhost hub.
+	local allowed, refusal = tls.check_connection_allowed(config.url, {
+		has_token = config.headers ~= nil and config.headers["Authorization"] ~= nil,
+	})
+	if not allowed then
+		return opts.on_connect(nil, refusal)
+	end
 
 	detect.connect({
 		url = config.url,
