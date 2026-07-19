@@ -534,9 +534,12 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 				assert.are.equal("user", msg.data.role)
 				-- Matches prompts/get's actual result for prompts.greet({who="Ada"}):
 				-- { messages = { { role = "user", content = { type = "text", text =
-				-- "Hello, Ada!" } } } } -- the rendered content must reflect that
-				-- exact result, not an invented shape.
-				assert.matches("Hello, Ada!", msg.data.content)
+				-- "Hello, Ada!" } } } } -- the rendered content must be exactly that
+				-- plain text, not a JSON-encoded blob that merely contains this
+				-- substring (render_result's list-shaped fallback would produce
+				-- '{"text":"Hello, Ada!","type":"text"}', which `assert.matches`
+				-- would wrongly accept -- assert exact equality instead).
+				assert.are.equal("Hello, Ada!", msg.data.content)
 			end
 		)
 
@@ -631,7 +634,9 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 				end)
 
 				assert.are.equal(1, #chat.messages)
-				assert.matches("Summary of: remote payload", chat.messages[1].data.content)
+				-- Exact equality, not a substring match: a JSON-encoded blob would
+				-- still contain this substring and wrongly pass `assert.matches`.
+				assert.are.equal("Summary of: remote payload", chat.messages[1].data.content)
 			end
 		)
 

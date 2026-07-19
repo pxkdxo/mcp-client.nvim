@@ -566,15 +566,33 @@ end
 --- prompt invocation rather than sending an incomplete request.
 ---
 --- The `prompts/get` result's `messages` (MCP's `GetPromptResult` shape --
---- a list of `{ role, content }`, confirmed against
---- `example_native_server.lua`'s `greet` prompt) are each rendered via
---- `render_result` (the same content-shape renderer tool/resource bridging
---- already use) and added to the chat via `Chat:add_message`, NOT
---- `add_buf_message` -- the latter explicitly does not enter the
---- LLM-visible message stack (`interactions/chat/init.lua:1811-1812`),
---- which would defeat a prompt's entire purpose of seeding real
---- conversational context. This is the same call every content-bearing
---- builtin slash command uses (`fetch.lua:75-78` et al).
+--- a list of `{ role, content }`) are each added to the chat via
+--- `Chat:add_message`, NOT `add_buf_message` -- the latter explicitly does
+--- not enter the LLM-visible message stack
+--- (`interactions/chat/init.lua:1811-1812`), which would defeat a prompt's
+--- entire purpose of seeding real conversational context. This is the same
+--- call every content-bearing builtin slash command uses (`fetch.lua:75-78`
+--- et al).
+---
+--- Each `message.content` is, per MCP's `PromptMessage` shape (confirmed
+--- against `example_native_server.lua`'s `greet` prompt,
+--- `tests/fixtures/example_native_server.lua`), a single content object --
+--- e.g. `{ type = "text", text = "Hello, Ada!" }` -- NOT the
+--- `{ content = [...] }`-wrapped list shape `CallToolResult`/
+--- `ReadResourceResult` use (which is what `render_result` above is built
+--- for, and where it is correctly used elsewhere in this file). Calling
+--- `render_result(message.content)` directly on a bare `{type, text}`
+--- object would fail its `type(result.content) == "table"` list-branch
+--- check (a bare content object has no `.content` field of its own) and
+--- silently fall through to `render_result`'s `vim.json.encode(result)`
+--- fallback, corrupting every rendered prompt message into a raw JSON
+--- string. Instead, `message.content` is wrapped into the one-element list
+--- shape `render_result` expects (`{ content = { message.content } }`)
+--- before calling it -- this reuses `render_result`'s existing, correct
+--- single-text-item branch (`result.content[1].text`) for the common text
+--- case, and its existing `vim.inspect(result.content)` fallback for any
+--- other MCP-permitted content type (e.g. image/embedded-resource prompt
+--- content) instead of silently corrupting it.
 local function build_prompt_slash_command_entry(mcp_client, prompt_info)
 	local prefixed_name = NAME_PREFIX .. mcp_client.name .. "_" .. prompt_info.name
 
@@ -622,9 +640,14 @@ local function build_prompt_slash_command_entry(mcp_client, prompt_info)
 							return
 						end
 						for _, message in ipairs(payload.messages) do
+							-- Wrap the single PromptMessage content object into the
+							-- one-element list shape render_result expects (see the
+							-- doc comment above) -- render_result(message.content)
+							-- directly would silently corrupt this into a raw JSON
+							-- string.
 							chat:add_message({
 								role = message.role or "user",
-								content = render_result(message.content),
+								content = render_result({ content = { message.content } }),
 							})
 						end
 					end)
