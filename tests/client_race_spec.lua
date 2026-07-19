@@ -328,4 +328,114 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 		-- Its stream-exit hook was never registered (it was never adopted).
 		assert.are.equal(0, orphan.hook_count, "a superseded handshake transport must not be hooked/adopted")
 	end)
+
+	it("closes a handshake that resolves after its own attempt timed out and a later attempt superseded it", function()
+		-- Scenario (c), the intermediate-timeout supersede leak: a reconnect
+		-- attempt's handshake dial (D1) times out MID-BACKOFF -- the reconnect
+		-- machine is still `reconnecting` (more bounded attempts remain), NOT
+		-- `disconnected`. The machine schedules the NEXT attempt. Then D1 resolves
+		-- LATE (after its own attempt-timeout, but before the next attempt dials):
+		-- perform_handshake sees a non-terminal client and adopts D1's transport
+		-- (T1). The machine's next attempt (D2) then fires, resolves, and adopts a
+		-- DIFFERENT transport (T2) -- overwriting entry.transport_client but never
+		-- closing T1. T1 leaks: a live transport whose stream-exit hook is still
+		-- registered, so its own eventual exit spuriously drives reconnect against
+		-- a client that has moved on to T2.
+		--
+		-- This is distinct from the coalesced-waiter case (multiple callers on the
+		-- SAME dial, all seeing ONE adopted result -- none closes it): here D1's own
+		-- caller (attempt #1) already gave up on D1 (its attempt timed out), and a
+		-- DIFFERENT, LATER dial (D2) has since been adopted in its place. D1's late
+		-- result is stale and must be closed, not adopted.
+		--
+		-- Determinism: a small per-attempt timeout (10ms) fires D1's timeout, which
+		-- schedules attempt #2 on a longer backoff (initial_delay=80ms). We resolve
+		-- D1 inside that window (after its timeout, before attempt #2 dials), then
+		-- let attempt #2 fire and resolve D2. No wall-clock racing -- the ordering
+		-- is forced by construction.
+		local obj, initial = connect_client({
+			reconnect = { initial_delay = 80, max_attempts = 3 },
+			attempt_timeout = 10,
+		})
+		local dials_after_connect = detect_stub.dials
+
+		-- Drop the stream: on_drop -> reconnecting -> schedule attempt #1 (fires
+		-- after ~80ms). Wait for attempt #1's handshake dial (D1) to appear.
+		initial.fire_exit()
+		vim.wait(300, function()
+			return detect_stub.dials >= dials_after_connect + 1
+		end)
+		assert.are.equal(
+			dials_after_connect + 1,
+			detect_stub.dials,
+			"attempt #1 should have started its handshake dial (D1)"
+		)
+		local d1_index = #detect_stub.pending
+
+		-- Attempt #1's per-attempt timeout (10ms) fires while D1 is still pending:
+		-- the machine counts the failed attempt and (max_attempts=3, still
+		-- reconnecting) schedules attempt #2. The machine must NOT be disconnected.
+		vim.wait(60, function()
+			return detect_stub.dials >= dials_after_connect + 2
+		end)
+		assert.is_false(obj:is_stopped(), "the machine must still be reconnecting, not disconnected")
+		-- attempt #2 has not dialed yet (still in its 80ms backoff), so no new dial.
+		assert.are.equal(
+			dials_after_connect + 1,
+			detect_stub.dials,
+			"attempt #2 must not have dialed yet -- D1 is the only handshake dial so far"
+		)
+
+		-- Now D1 resolves LATE (after its own attempt timed out, before attempt #2
+		-- dials). The client is NON-terminal (still reconnecting), so pre-fix
+		-- perform_handshake adopts T1 as the live transport.
+		local t1 = transport_double({ label = "t1-late" })
+		detect_stub.resolve(d1_index, { transport = "legacy_sse", client = t1, session_id = "sess-t1" })
+
+		-- Let attempt #2's backoff elapse so it fires, dials (D2), and we resolve
+		-- it with a DIFFERENT transport (T2), which supersedes T1.
+		vim.wait(300, function()
+			return detect_stub.dials >= dials_after_connect + 2
+		end)
+		assert.are.equal(
+			dials_after_connect + 2,
+			detect_stub.dials,
+			"attempt #2 should have started a second, distinct handshake dial (D2)"
+		)
+		local d2_index = #detect_stub.pending
+		local t2 = transport_double({ label = "t2" })
+		detect_stub.resolve(d2_index, { transport = "legacy_sse", client = t2, session_id = "sess-t2" })
+		vim.wait(100, function()
+			return not obj:is_stopped() and t1.closed
+		end)
+
+		-- CORE ASSERTION: T1 -- adopted by the intermediate, already-abandoned
+		-- attempt and then superseded by T2 -- must have been CLOSED, not leaked.
+		-- Pre-fix this is false: T1 is silently overwritten and its live curl
+		-- process (and stale stream-exit hook) leak.
+		assert.is_true(
+			t1.closed,
+			"a handshake adopted by a timed-out attempt and then superseded by a later attempt must be closed, not leaked"
+		)
+		-- T2 is the live transport and stays open.
+		assert.is_false(t2.closed, "the superseding transport (T2) must stay open")
+		-- T2's stream-exit hook is registered exactly once (adopted once).
+		assert.are.equal(1, t2.hook_count, "the superseding transport must be adopted/hooked exactly once")
+		-- The client converged back to connected on the surviving transport.
+		assert.is_false(obj:is_stopped(), "the client should be connected again on the surviving transport")
+
+		-- T1's stream-exit hook was registered when it was (transiently) adopted.
+		-- Its eventual, unrelated exit must NOT spuriously drive the reconnect
+		-- machine: reaping T1 tagged its job intentional_close, so firing its exit
+		-- is a no-op and the client stays connected on T2 -- it does not fall back
+		-- into reconnecting/disconnected on a stream that the client has abandoned.
+		t1.fire_exit()
+		vim.wait(60, function()
+			return obj:is_stopped()
+		end)
+		assert.is_false(
+			obj:is_stopped(),
+			"the abandoned transport's stale stream-exit hook must not drive reconnect against the live client"
+		)
+	end)
 end)

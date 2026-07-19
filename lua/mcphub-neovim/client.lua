@@ -139,6 +139,32 @@ local function fail_in_flight(entry, message)
 	end
 end
 
+--- Close a transport client intentionally: tag its long-lived stream Job with
+--- the intentional-close flag *before* closing so the exit hook we registered on
+--- it (hook_stream_job) recognises the resulting stream-end as our own teardown
+--- and does NOT drive on_drop. Without the tag, closing a transport whose exit
+--- hook is still registered -- e.g. an intermediate, adopted-then-superseded
+--- transport being reaped by a later adoption -- would spuriously fire on_drop
+--- against a client that has already moved on to a different transport. Swallows
+--- any error; a no-op when the client is nil or exposes no close.
+local function close_transport(transport_client)
+	if not transport_client then
+		return
+	end
+	local ok, job = pcall(function()
+		return transport_client.get_stream_job and transport_client:get_stream_job()
+	end)
+	if ok and job then
+		job.user_data = job.user_data or {}
+		job.user_data.intentional_close = true
+	end
+	if transport_client.close then
+		pcall(function()
+			transport_client:close()
+		end)
+	end
+end
+
 --- Adopt a freshly-handshaken transport into `entry` -- the entry-state
 --- mutation that must happen EXACTLY ONCE per resolved handshake, even when
 --- several triggers coalesced onto it (see perform_handshake). Sets the live
@@ -146,7 +172,23 @@ end
 --- on the new transport. Calling hook_stream_job twice against the same result
 --- would double-register the exit hook, so this is deliberately the single
 --- adoption point both handshake-driven paths share.
+---
+--- Before installing the new transport it CLOSES the one it replaces (when
+--- distinct). A successful new handshake always abandons the previous transport,
+--- so this is the point that guarantees the old one is not leaked. In the normal
+--- reconnect case the previous transport's stream already exited, so close() is a
+--- harmless no-op; the case that matters is the intermediate-timeout supersede
+--- leak: a reconnect attempt that timed out mid-backoff can still have its dial
+--- resolve late and get adopted (the client is non-terminal -- more bounded
+--- attempts remain), and the machine's next attempt then adopts a DIFFERENT
+--- transport in its place. Closing the replaced transport here reaps that
+--- otherwise-leaked, still-live transport (and stops its stale stream-exit hook
+--- from later firing on_drop against a client that has moved on).
 local function adopt_transport(entry, result)
+	local previous = entry.transport_client
+	if previous ~= nil and previous ~= result.client then
+		close_transport(previous)
+	end
 	entry.transport_client = result.client
 	entry.transport = result.transport
 	hook_stream_job(entry, result.client)
@@ -189,11 +231,22 @@ end
 --- slip past the flag between the check and the dispatch.
 local function perform_handshake(entry, on_settled)
 	if entry._handshake then
-		-- A dial is already in flight: join it, do NOT start a second one.
+		-- A dial is already in flight: join it, do NOT start a second one. A
+		-- coalesced waiter shares the in-flight dial's generation implicitly (it
+		-- never starts its own), so it always sees that one dial's single adopted
+		-- result -- it is NOT a superseded, later dial.
 		table.insert(entry._handshake, on_settled)
 		return
 	end
 
+	-- Each call that actually STARTS a dial (as opposed to joining one as a
+	-- waiter above) claims a fresh monotonic generation. This lets a dial detect,
+	-- when it resolves, whether a NEWER dial has since started -- i.e. whether its
+	-- own caller already gave up on it and moved on -- so a stale late result is
+	-- closed rather than adopted. (Coalesced waiters do not bump this: they join
+	-- the one dial and are not a distinct, superseding cycle.)
+	entry._handshake_gen = (entry._handshake_gen or 0) + 1
+	local my_gen = entry._handshake_gen
 	entry._handshake = { on_settled }
 
 	detect.connect({
@@ -217,17 +270,23 @@ local function perform_handshake(entry, on_settled)
 			-- none adopts it -- generalizing attempt_reconnect's original
 			-- timeout-vs-late-success cleanup to the terminal-client case.
 			local terminal = entry._closed or entry.reconnect:state() == "disconnected"
-			if terminal then
-				if result.client and result.client.close then
-					pcall(function()
-						result.client:close()
-					end)
-				end
+			-- Superseded if a NEWER dial has already started since this one (my_gen
+			-- is no longer the current generation). This catches the ordering where
+			-- this dial's own attempt timed out, the machine started a fresh dial,
+			-- and only THEN did this one resolve: its result is stale -- a different,
+			-- later dial owns the connection now -- so close it instead of adopting.
+			-- A coalesced waiter is unaffected: it never started its own dial, so it
+			-- is never the one whose generation went stale here.
+			local stale = my_gen ~= entry._handshake_gen
+			if terminal or stale then
+				close_transport(result.client)
 				err = "client is closed"
 				result = nil
 			else
 				-- Apply the shared entry-state mutation exactly once, before any
-				-- waiter's path-specific follow-up runs.
+				-- waiter's path-specific follow-up runs. adopt_transport also closes
+				-- the transport it replaces, reaping an intermediate, already-adopted
+				-- result that this later dial supersedes.
 				adopt_transport(entry, result)
 			end
 		end
