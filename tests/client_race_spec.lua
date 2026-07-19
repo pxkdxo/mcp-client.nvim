@@ -118,14 +118,11 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 	local function connect_client(cfg)
 		local initial = transport_double({ label = "initial" })
 		local obj
-		client.connect(
-			vim.tbl_extend("force", { url = "http://127.0.0.1:1/mcp", name = "hub" }, cfg or {}),
-			{
-				on_connect = function(c)
-					obj = c
-				end,
-			}
-		)
+		client.connect(vim.tbl_extend("force", { url = "http://127.0.0.1:1/mcp", name = "hub" }, cfg or {}), {
+			on_connect = function(c)
+				obj = c
+			end,
+		})
 		-- The initial connect is itself a handshake dial; resolve it with our
 		-- controllable transport so the client is up.
 		detect_stub.resolve(1, { transport = "legacy_sse", client = initial, session_id = "sess-1" })
@@ -270,10 +267,7 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 		retry_transport:set_responder(function()
 			return nil, { pong = true }
 		end)
-		detect_stub.resolve(
-			reinit_index,
-			{ transport = "legacy_sse", client = retry_transport, session_id = "sess-2" }
-		)
+		detect_stub.resolve(reinit_index, { transport = "legacy_sse", client = retry_transport, session_id = "sess-2" })
 		vim.wait(200, function()
 			return false
 		end)

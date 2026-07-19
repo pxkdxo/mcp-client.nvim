@@ -778,7 +778,8 @@ local function refresh()
 	local live_ids = {}
 	for _, mcp_client in ipairs(client.get_clients()) do
 		live_ids[mcp_client.id] = true
-		config.interactions.shared.editor_context[NAME_PREFIX .. mcp_client.name] = build_editor_context_entry(mcp_client)
+		config.interactions.shared.editor_context[NAME_PREFIX .. mcp_client.name] =
+			build_editor_context_entry(mcp_client)
 		registered_editor_context_ids[mcp_client.id] = mcp_client.name
 
 		if mcp_client:is_stopped() then
