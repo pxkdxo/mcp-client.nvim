@@ -49,6 +49,80 @@ describe("transport.streamable_http", function()
 		client:close()
 	end)
 
+	it("sends an Accept header naming both response shapes the spec allows", function()
+		-- A real hub (samanhappy/mcphub) rejects any Streamable HTTP request
+		-- missing this header with 406 Not Acceptable -- confirmed against
+		-- the live hub during U9 validation.
+		local received_head
+		double = HttpDouble.new({
+			on_request = function(method, path, rest, head)
+				received_head = head
+				if method == "POST" and path == "/mcp" then
+					return {
+						status = 200,
+						body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = { ok = true } }),
+					}
+				end
+				return { status = 404, body = "" }
+			end,
+		})
+
+		local client = StreamableHttp.new({ url = double.url .. "/mcp" })
+		local done = false
+		client:request({ jsonrpc = "2.0", id = 1, method = "ping", params = {} }, function()
+			done = true
+		end)
+
+		assert.is_true(wait_for(function()
+			return done
+		end))
+		assert.matches("Accept:%s*application/json,%s*text/event%-stream", received_head)
+
+		client:close()
+	end)
+
+	it("decodes a JSON-RPC result delivered as a single-event SSE response", function()
+		-- The Streamable HTTP spec sanctions this response mode as an
+		-- alternative to a direct JSON body -- a real hub may choose either.
+		-- Reproduces the exact shape samanhappy/mcphub sent during U9's live
+		-- validation: status 200, Content-Type: text/event-stream, a
+		-- Content-Length-framed (not left-open/chunked) body containing one
+		-- `event: message` frame with the JSON-RPC envelope as `data:`. Built
+		-- as a plain `body` string (not the double's `sse` field, which is
+		-- for the legacy transport's deliberately-left-open long-lived
+		-- stream -- the wrong shape for this single-shot response).
+		double = HttpDouble.new({
+			on_request = function(method, path)
+				if method == "POST" and path == "/mcp" then
+					local data = vim.json.encode({ jsonrpc = "2.0", id = 1, result = { ok = true } })
+					return {
+						status = 200,
+						headers = { ["Content-Type"] = "text/event-stream", ["Mcp-Session-Id"] = "sse-session" },
+						body = "event: message\ndata: " .. data .. "\n\n",
+					}
+				end
+				return { status = 404, body = "" }
+			end,
+		})
+
+		local client = StreamableHttp.new({ url = double.url .. "/mcp" })
+
+		local got_err, got_result
+		local done = false
+		client:request({ jsonrpc = "2.0", id = 1, method = "ping", params = {} }, function(err, result)
+			got_err, got_result = err, result
+			done = true
+		end)
+
+		assert.is_true(wait_for(function()
+			return done
+		end))
+		assert.is_nil(got_err)
+		assert.are.same({ ok = true }, got_result.result)
+
+		client:close()
+	end)
+
 	it("surfaces a non-2xx response as an error rather than decoding it as success", function()
 		double = HttpDouble.new({
 			on_request = function()

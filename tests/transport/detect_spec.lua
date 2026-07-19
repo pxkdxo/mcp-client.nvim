@@ -114,6 +114,89 @@ describe("transport.detect", function()
 		end)
 	end
 
+	it("sends an Accept header naming both response shapes the spec allows", function()
+		-- A real hub (samanhappy/mcphub) rejects the initial InitializeRequest
+		-- with 406 Not Acceptable if this header is missing -- confirmed
+		-- against the live hub during U9 validation.
+		local received_head
+		double = HttpDouble.new({
+			on_request = function(method, path, rest, head)
+				received_head = head
+				if method == "POST" and path == "/mcp" then
+					return {
+						status = 200,
+						headers = { ["Content-Type"] = "application/json", ["Mcp-Session-Id"] = "session-abc" },
+						body = initialize_result_body(),
+					}
+				end
+				return { status = 404, body = "" }
+			end,
+		})
+
+		local done = false
+		local result
+		detect.connect({
+			url = double.url .. "/mcp",
+			request = INITIALIZE_REQUEST,
+			timeout = 2000,
+		}, function(r)
+			result = r
+			done = true
+		end)
+
+		assert.is_true(wait_for(function()
+			return done
+		end))
+		assert.matches("Accept:%s*application/json,%s*text/event%-stream", received_head)
+
+		result.client:close()
+	end)
+
+	it("uses the streamable_http transport when POST initialize's response is a single-event SSE stream", function()
+		-- The Streamable HTTP spec sanctions this response mode as an
+		-- alternative to a direct JSON body -- a real hub may choose either.
+		-- Reproduces the exact shape samanhappy/mcphub sent during U9's live
+		-- validation for the initialize handshake itself: a Content-Length-
+		-- framed (not left-open) body containing one `event: message` frame.
+		-- Built as a plain `body` string, not the double's `sse` field (that
+		-- field is for the legacy transport's deliberately-left-open
+		-- long-lived stream -- the wrong shape for this single-shot response).
+		double = HttpDouble.new({
+			on_request = function(method, path)
+				if method == "POST" and path == "/mcp" then
+					return {
+						status = 200,
+						headers = { ["Content-Type"] = "text/event-stream", ["Mcp-Session-Id"] = "sse-session-1" },
+						body = "event: message\ndata: " .. initialize_result_body() .. "\n\n",
+					}
+				end
+				return { status = 404, body = "" }
+			end,
+		})
+
+		local result, err
+		local done = false
+		detect.connect({
+			url = double.url .. "/mcp",
+			request = INITIALIZE_REQUEST,
+			timeout = 2000,
+		}, function(r, e)
+			result, err = r, e
+			done = true
+		end)
+
+		assert.is_true(wait_for(function()
+			return done
+		end))
+		assert.is_nil(err)
+		assert.is_not_nil(result)
+		assert.are.equal("streamable_http", result.transport)
+		assert.are.equal("sse-session-1", result.session_id)
+		assert.are.equal("test-hub", result.initialize_result.result.serverInfo.name)
+
+		result.client:close()
+	end)
+
 	it("surfaces a clear error when the hub is unreachable", function()
 		-- Nothing is listening on this port: connection refused, not a hang.
 		local unreachable_url = "http://127.0.0.1:1/mcp"

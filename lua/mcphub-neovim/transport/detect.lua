@@ -100,9 +100,25 @@ local function discover_legacy(url, headers, on_done)
 end
 
 local function finalize_streamable_http(response, url, headers, on_done)
+	-- The Streamable HTTP spec sanctions two response shapes for a POST: a
+	-- direct `application/json` body, or a single-event `text/event-stream`
+	-- response carrying the JSON-RPC message in its `data:` field. Try the
+	-- direct-JSON case first (the common/simple case), then fall back to
+	-- unwrapping a single SSE event -- a real hub may choose either.
 	local ok, decoded = pcall(vim.json.decode, response.body)
 	if not ok then
-		return on_done(nil, "failed to decode InitializeResult as JSON: " .. tostring(decoded))
+		local sse_decoded, sse_err = transport_util.decode_json_from_sse_body(response.body)
+		if not sse_decoded then
+			return on_done(
+				nil,
+				"failed to decode InitializeResult as JSON: "
+					.. tostring(decoded)
+					.. " (also tried SSE framing: "
+					.. tostring(sse_err)
+					.. ")"
+			)
+		end
+		decoded = sse_decoded
 	end
 
 	local session_id = transport_util.find_header(response.headers, "Mcp-Session-Id")
@@ -141,7 +157,11 @@ function M.connect(opts, on_done)
 	local headers = opts.headers or {}
 
 	curl.post(url, {
-		headers = vim.tbl_extend("force", { ["Content-Type"] = "application/json" }, headers),
+		headers = vim.tbl_extend(
+			"force",
+			{ ["Content-Type"] = "application/json", ["Accept"] = "application/json, text/event-stream" },
+			headers
+		),
 		body = vim.json.encode(request),
 		timeout = timeout,
 		callback = vim.schedule_wrap(function(response)

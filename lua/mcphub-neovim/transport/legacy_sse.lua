@@ -8,6 +8,7 @@
 --- process (raw = {"-N"} to disable curl's buffering, fed incrementally
 --- via the `stream` callback), never re-invoked per message.
 local curl = require("plenary.curl")
+local transport_util = require("mcphub-neovim.transport.util")
 
 local LegacySse = {}
 LegacySse.__index = LegacySse
@@ -17,44 +18,9 @@ LegacySse.__index = LegacySse
 --- already splits on "\n" and strips "\r" before invoking the callback.
 --- Feed each line via :feed_line(line); it calls
 --- on_event({event=..., data=...}) for each complete event as soon as its
---- terminating blank line arrives.
-local SseParser = {}
-SseParser.__index = SseParser
-
-function SseParser.new(on_event)
-	return setmetatable({ _event_name = nil, _data_lines = {}, _retry = nil, _on_event = on_event }, SseParser)
-end
-
-function SseParser:feed_line(line)
-	if line == "" then
-		if #self._data_lines > 0 or self._event_name or self._retry ~= nil then
-			self._on_event({
-				event = self._event_name,
-				data = table.concat(self._data_lines, "\n"),
-				retry = self._retry,
-			})
-		end
-		self._event_name = nil
-		self._data_lines = {}
-		self._retry = nil
-		return
-	end
-
-	local field, value = line:match("^(%a+):%s?(.*)$")
-	if field == "event" then
-		self._event_name = value
-	elseif field == "data" then
-		table.insert(self._data_lines, value)
-	elseif field == "retry" then
-		-- Reconnection hint: the server's requested delay, in ms, for the
-		-- next reconnect attempt (U2). Ignore a malformed non-integer value.
-		local ms = tonumber(value)
-		if ms then
-			self._retry = math.floor(ms)
-		end
-	end
-	-- Other fields (id:, comments starting with ":") are ignored.
-end
+--- terminating blank line arrives. Shared with the Streamable HTTP
+--- transport's single-shot SSE-framed response parsing (transport/util.lua).
+local SseParser = transport_util.SseParser
 
 --- @param opts table
 ---   stream_url (string) the GET endpoint the SSE stream is opened on

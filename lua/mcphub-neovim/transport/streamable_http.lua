@@ -25,7 +25,11 @@ function StreamableHttp.new(opts)
 end
 
 function StreamableHttp:_headers()
-	local headers = vim.tbl_extend("force", { ["Content-Type"] = "application/json" }, self.headers)
+	local headers = vim.tbl_extend(
+		"force",
+		{ ["Content-Type"] = "application/json", ["Accept"] = "application/json, text/event-stream" },
+		self.headers
+	)
 	if self.session_id then
 		headers["Mcp-Session-Id"] = self.session_id
 	end
@@ -64,9 +68,24 @@ function StreamableHttp:request(rpc_message, callback)
 				)
 			end
 
+			-- Same dual response-shape handling as detect.lua's initialize
+			-- parsing: a real hub may answer with a direct JSON body or a
+			-- single-event `text/event-stream` response.
 			local ok, decoded = pcall(vim.json.decode, response.body)
 			if not ok then
-				return callback("failed to decode hub response as JSON: " .. tostring(decoded), nil, response)
+				local sse_decoded, sse_err = transport_util.decode_json_from_sse_body(response.body)
+				if not sse_decoded then
+					return callback(
+						"failed to decode hub response as JSON: "
+							.. tostring(decoded)
+							.. " (also tried SSE framing: "
+							.. tostring(sse_err)
+							.. ")",
+						nil,
+						response
+					)
+				end
+				decoded = sse_decoded
 			end
 
 			callback(nil, decoded, response)
