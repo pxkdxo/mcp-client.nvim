@@ -613,11 +613,68 @@ local function build_prompt_slash_command_entry(mcp_client, prompt_info)
 	return prefixed_name,
 		{
 			description = prompt_info.description or ("MCP prompt " .. prompt_info.name),
+			--- Argument collection is continuation-passing, not a `for` loop
+			--- that reads a variable after `vim.ui.input()` returns: stock,
+			--- synchronous Neovim `vim.ui.input` calls `on_confirm` before
+			--- returning, but async providers actually in use (confirmed
+			--- against the real installed `snacks.nvim`,
+			--- `lua/snacks/input.lua:122-136` -- `confirm()` wraps
+			--- `on_confirm(value)` in `vim.schedule(...)`, deferring it to a
+			--- later event-loop tick; also true of dressing.nvim/noice.nvim)
+			--- return immediately with `on_confirm` not yet called. Reading
+			--- `cancelled`/`value` right after the call, as this used to do,
+			--- would silently see only their unset initial state under any
+			--- such provider. `collect(i)` instead proceeds to argument
+			--- `i + 1` (or issues the request once all declared arguments are
+			--- exhausted) exclusively from inside `vim.ui.input`'s own
+			--- callback -- the same shape CodeCompanion's own builtin MCP
+			--- slash command already uses for its `vim.ui.select`-based server
+			--- picker (`interactions/chat/slash_commands/builtin/mcp.lua:61-72`:
+			--- the continuation lives inside the selection callback, not after
+			--- the call returns). This is correct under both a synchronous
+			--- provider (the recursive call happens immediately, inside the
+			--- still-executing outer `vim.ui.input` call, reproducing the old
+			--- behavior exactly) and an async one (the recursive call happens
+			--- whenever the user actually submits that argument's prompt).
 			callback = function(chat)
 				local arguments = {}
-				for _, arg_info in ipairs(prompt_info.arguments or {}) do
-					local value
-					local cancelled = false
+				local declared = prompt_info.arguments or {}
+
+				local function issue_request()
+					pcall(function()
+						mcp_client:request({
+							jsonrpc = "2.0",
+							id = 1,
+							method = "prompts/get",
+							params = { name = prompt_info.name, arguments = arguments },
+						}, function(err, result, _response)
+							if err then
+								return
+							end
+							local payload = unwrap_result(result)
+							if type(payload) ~= "table" or type(payload.messages) ~= "table" then
+								return
+							end
+							for _, message in ipairs(payload.messages) do
+								-- Wrap the single PromptMessage content object into
+								-- the one-element list shape render_result expects
+								-- (see the doc comment above) --
+								-- render_result(message.content) directly would
+								-- silently corrupt this into a raw JSON string.
+								chat:add_message({
+									role = message.role or "user",
+									content = render_result({ content = { message.content } }),
+								})
+							end
+						end)
+					end)
+				end
+
+				local function collect(i)
+					local arg_info = declared[i]
+					if arg_info == nil then
+						return issue_request()
+					end
 					vim.ui.input({
 						prompt = string.format(
 							"%s%s: ",
@@ -626,46 +683,17 @@ local function build_prompt_slash_command_entry(mcp_client, prompt_info)
 						),
 					}, function(input)
 						if input == nil then
-							cancelled = true
+							if arg_info.required then
+								return -- abort: a required argument was cancelled
+							end
 						else
-							value = input
+							arguments[arg_info.name] = input
 						end
+						collect(i + 1)
 					end)
-					if cancelled and arg_info.required then
-						return
-					end
-					if value ~= nil then
-						arguments[arg_info.name] = value
-					end
 				end
 
-				pcall(function()
-					mcp_client:request({
-						jsonrpc = "2.0",
-						id = 1,
-						method = "prompts/get",
-						params = { name = prompt_info.name, arguments = arguments },
-					}, function(err, result, _response)
-						if err then
-							return
-						end
-						local payload = unwrap_result(result)
-						if type(payload) ~= "table" or type(payload.messages) ~= "table" then
-							return
-						end
-						for _, message in ipairs(payload.messages) do
-							-- Wrap the single PromptMessage content object into the
-							-- one-element list shape render_result expects (see the
-							-- doc comment above) -- render_result(message.content)
-							-- directly would silently corrupt this into a raw JSON
-							-- string.
-							chat:add_message({
-								role = message.role or "user",
-								content = render_result({ content = { message.content } }),
-							})
-						end
-					end)
-				end)
+				collect(1)
 			end,
 		}
 end

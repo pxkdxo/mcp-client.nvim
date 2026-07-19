@@ -709,6 +709,262 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 			end
 		)
 
+		--- Regression: `vim.ui.input`'s `on_confirm` callback is NOT guaranteed
+		--- to run synchronously before `vim.ui.input()` returns -- confirmed
+		--- against the real installed `snacks.nvim`
+		--- (`~/.local/share/nvim/lazy/snacks.nvim/lua/snacks/input.lua:122-136`,
+		--- `confirm()` wraps `on_confirm(value)` in `vim.schedule(...)`) --
+		--- which the user's own real dotfiles config enables
+		--- (`nvim/lua/plugins/snacks.lua:10`, `input = { enabled = true }`).
+		--- This stub mirrors that: it captures `on_confirm` and returns
+		--- immediately without calling it, so a caller that (bug) reads a
+		--- variable right after `vim.ui.input()` returns sees only the
+		--- pre-call initial state, and a caller that (fix) continues from
+		--- inside the eventually-fired callback sees the real answer.
+		local function deferred_input_stub()
+			local pending = {}
+			local stub = {}
+			function stub.input(_opts, on_confirm)
+				table.insert(pending, on_confirm)
+			end
+			--- Fire the oldest still-pending on_confirm with `value` (nil to
+			--- simulate a cancelled/Esc'd prompt).
+			function stub.answer(value)
+				local on_confirm = table.remove(pending, 1)
+				assert(on_confirm, "deferred_input_stub.answer() called with no pending vim.ui.input call")
+				on_confirm(value)
+			end
+			function stub.pending_count()
+				return #pending
+			end
+			return stub
+		end
+
+		it(
+			"regression: a required argument collected via a genuinely deferred vim.ui.input "
+				.. "(snacks.nvim-style) still reaches prompts/get once the callback actually fires",
+			function()
+				local obj = { name = "deferred-prompts" }
+				function obj:is_stopped()
+					return false
+				end
+				function obj:request(rpc_message, callback)
+					if rpc_message.method == "prompts/list" then
+						return callback(nil, {
+							prompts = {
+								{
+									name = "deferred_greet",
+									description = "Greet someone, requiring their name",
+									arguments = {
+										{ name = "who", description = "Who to greet", required = true },
+									},
+								},
+							},
+						}, nil)
+					elseif rpc_message.method == "prompts/get" then
+						return callback(nil, {
+							messages = {
+								{
+									role = "user",
+									content = { type = "text", text = "Hello, " .. rpc_message.params.arguments.who .. "!" },
+								},
+							},
+						}, nil)
+					end
+					return callback("unsupported method: " .. tostring(rpc_message.method), nil, nil)
+				end
+				function obj:notify(_rpc_message) end
+				function obj:disconnect() end
+				client.register_native(obj)
+
+				local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+				codecompanion_adapter.setup({})
+
+				local slash_commands = fake_config.interactions.chat.slash_commands
+				local entry_key
+				for key in pairs(slash_commands) do
+					if key:match("deferred_greet$") and key:match("deferred%-prompts") then
+						entry_key = key
+					end
+				end
+				assert.is_not_nil(entry_key, "expected a slash command entry for the `deferred_greet` prompt")
+				local entry = slash_commands[entry_key]
+
+				local input_stub = deferred_input_stub()
+				local original_input = vim.ui.input
+				vim.ui.input = input_stub.input
+
+				local chat = fake_chat()
+				entry.callback(chat)
+
+				-- The callback() call has returned, but the deferred on_confirm
+				-- has NOT fired yet -- under the old (buggy) code, this is exactly
+				-- the moment it read `cancelled`/`value` at their unset initial
+				-- values and proceeded regardless. No request must have gone out,
+				-- and no message must have landed, yet.
+				assert.are.equal(1, input_stub.pending_count())
+				assert.are.equal(0, #chat.messages)
+
+				-- Now the user actually submits the floating input.
+				input_stub.answer("Grace")
+				vim.ui.input = original_input
+
+				assert.are.equal(1, #chat.messages)
+				assert.are.equal("Hello, Grace!", chat.messages[1].data.content)
+			end
+		)
+
+		it(
+			"regression: a cancelled required argument (deferred on_confirm fires with nil) aborts "
+				.. "the whole flow -- no prompts/get request is sent",
+			function()
+				local request_methods = {}
+				local obj = { name = "deferred-required-cancel" }
+				function obj:is_stopped()
+					return false
+				end
+				function obj:request(rpc_message, callback)
+					table.insert(request_methods, rpc_message.method)
+					if rpc_message.method == "prompts/list" then
+						return callback(nil, {
+							prompts = {
+								{
+									name = "needs_name",
+									description = "Requires a name",
+									arguments = {
+										{ name = "who", description = "Who to greet", required = true },
+									},
+								},
+							},
+						}, nil)
+					elseif rpc_message.method == "prompts/get" then
+						return callback(nil, {
+							messages = {
+								{ role = "user", content = { type = "text", text = "should never be reached" } },
+							},
+						}, nil)
+					end
+					return callback("unsupported method: " .. tostring(rpc_message.method), nil, nil)
+				end
+				function obj:notify(_rpc_message) end
+				function obj:disconnect() end
+				client.register_native(obj)
+
+				local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+				codecompanion_adapter.setup({})
+
+				local slash_commands = fake_config.interactions.chat.slash_commands
+				local entry_key
+				for key in pairs(slash_commands) do
+					if key:match("needs_name$") and key:match("deferred%-required%-cancel") then
+						entry_key = key
+					end
+				end
+				assert.is_not_nil(entry_key)
+				local entry = slash_commands[entry_key]
+
+				local input_stub = deferred_input_stub()
+				local original_input = vim.ui.input
+				vim.ui.input = input_stub.input
+
+				local chat = fake_chat()
+				entry.callback(chat)
+
+				assert.are.equal(1, input_stub.pending_count())
+
+				-- Simulate the user cancelling (Esc) the required argument's
+				-- floating prompt: on_confirm fires with nil.
+				input_stub.answer(nil)
+				vim.ui.input = original_input
+
+				assert.are.equal(0, #chat.messages)
+				for _, method in ipairs(request_methods) do
+					assert.are_not.equal("prompts/get", method)
+				end
+			end
+		)
+
+		it(
+			"regression: a cancelled OPTIONAL argument (deferred on_confirm fires with nil) is omitted "
+				.. "from arguments and collection continues to the next argument",
+			function()
+				local sent_arguments
+				local obj = { name = "deferred-optional-skip" }
+				function obj:is_stopped()
+					return false
+				end
+				function obj:request(rpc_message, callback)
+					if rpc_message.method == "prompts/list" then
+						return callback(nil, {
+							prompts = {
+								{
+									name = "multi_arg",
+									description = "One optional, then one required argument",
+									arguments = {
+										{ name = "nickname", description = "Optional nickname", required = false },
+										{ name = "who", description = "Who to greet", required = true },
+									},
+								},
+							},
+						}, nil)
+					elseif rpc_message.method == "prompts/get" then
+						sent_arguments = rpc_message.params.arguments
+						return callback(nil, {
+							messages = {
+								{ role = "user", content = { type = "text", text = "Hello, " .. sent_arguments.who .. "!" } },
+							},
+						}, nil)
+					end
+					return callback("unsupported method: " .. tostring(rpc_message.method), nil, nil)
+				end
+				function obj:notify(_rpc_message) end
+				function obj:disconnect() end
+				client.register_native(obj)
+
+				local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+				codecompanion_adapter.setup({})
+
+				local slash_commands = fake_config.interactions.chat.slash_commands
+				local entry_key
+				for key in pairs(slash_commands) do
+					if key:match("multi_arg$") and key:match("deferred%-optional%-skip") then
+						entry_key = key
+					end
+				end
+				assert.is_not_nil(entry_key)
+				local entry = slash_commands[entry_key]
+
+				local input_stub = deferred_input_stub()
+				local original_input = vim.ui.input
+				vim.ui.input = input_stub.input
+
+				local chat = fake_chat()
+				entry.callback(chat)
+
+				-- Only the FIRST declared argument's vim.ui.input call should be
+				-- pending so far -- the second must not be issued until the
+				-- first's deferred callback actually fires (continuation-passing,
+				-- not a loop that already moved on).
+				assert.are.equal(1, input_stub.pending_count())
+
+				-- Cancel the optional "nickname" argument.
+				input_stub.answer(nil)
+
+				-- Collection must now have proceeded to the required "who"
+				-- argument's vim.ui.input call.
+				assert.are.equal(1, input_stub.pending_count())
+				assert.are.equal(0, #chat.messages)
+
+				input_stub.answer("Ada")
+				vim.ui.input = original_input
+
+				assert.are.equal(1, #chat.messages)
+				assert.is_nil(sent_arguments.nickname, "a cancelled optional argument must be omitted, not sent as nil/empty")
+				assert.are.equal("Ada", sent_arguments.who)
+				assert.are.equal("Hello, Ada!", chat.messages[1].data.content)
+			end
+		)
+
 		it("edge case: zero connected clients means no slash-command entries, not an error", function()
 			local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
 			assert.has_no.errors(function()
