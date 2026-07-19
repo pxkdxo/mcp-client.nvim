@@ -499,7 +499,10 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 					entry_key = key
 				end
 			end
-			assert.is_not_nil(entry_key, "expected the entry under the real, live interactions.shared.editor_context path")
+			assert.is_not_nil(
+				entry_key,
+				"expected the entry under the real, live interactions.shared.editor_context path"
+			)
 
 			-- The old path must stay exactly as the real config leaves it
 			-- after setup() (nil / absent) -- this is the fake's initial
@@ -766,7 +769,10 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 							messages = {
 								{
 									role = "user",
-									content = { type = "text", text = "Hello, " .. rpc_message.params.arguments.who .. "!" },
+									content = {
+										type = "text",
+										text = "Hello, " .. rpc_message.params.arguments.who .. "!",
+									},
 								},
 							},
 						}, nil)
@@ -911,7 +917,10 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 						sent_arguments = rpc_message.params.arguments
 						return callback(nil, {
 							messages = {
-								{ role = "user", content = { type = "text", text = "Hello, " .. sent_arguments.who .. "!" } },
+								{
+									role = "user",
+									content = { type = "text", text = "Hello, " .. sent_arguments.who .. "!" },
+								},
 							},
 						}, nil)
 					end
@@ -959,7 +968,10 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 				vim.ui.input = original_input
 
 				assert.are.equal(1, #chat.messages)
-				assert.is_nil(sent_arguments.nickname, "a cancelled optional argument must be omitted, not sent as nil/empty")
+				assert.is_nil(
+					sent_arguments.nickname,
+					"a cancelled optional argument must be omitted, not sent as nil/empty"
+				)
 				assert.are.equal("Ada", sent_arguments.who)
 				assert.are.equal("Hello, Ada!", chat.messages[1].data.content)
 			end
