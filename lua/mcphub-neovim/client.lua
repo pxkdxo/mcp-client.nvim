@@ -446,19 +446,81 @@ end
 --- handshake yielding a new transport + session id, without disturbing the
 --- reconnect machine (a 404 is a session-level, not a connection-level,
 --- event).
+---
+--- Bounded by its own guard timeout (default ATTEMPT_TIMEOUT_MS, overridable
+--- via `entry.config.reinit_timeout` -- a dedicated key, deliberately not
+--- `attempt_timeout`, which is attempt_reconnect's own per-attempt knob; the
+--- two are semantically distinct paths and must not share one config value).
+---
+--- Without this guard, a 404-triggered reinitialize that is the sole trigger
+--- on `entry._handshake` (no concurrent reconnect attempt in flight to
+--- contribute attempt_reconnect's own guard) has no timeout anywhere in its
+--- call chain: if the underlying detect.connect dial wedges (a hub that
+--- accepts the connection but never completes or cleanly fails the
+--- handshake), `on_done` -- and therefore the original request's callback --
+--- would hang forever, an unconditional R11 violation. This is a structural
+--- copy of attempt_reconnect's guard/settle/dispatch shape, deliberately
+--- duplicated rather than shared: attempt_reconnect's own logic has survived
+--- three independent adversarial review rounds and is pinned by the existing
+--- race tests, so this guard is kept entirely outside perform_handshake and
+--- attempt_reconnect, touching zero lines of that three-times-fragile
+--- mechanism.
+---
+--- Divergence from attempt_reconnect's guard that must be preserved: on
+--- timeout this calls `on_done(err, nil)` directly and does NOT call
+--- `entry.reconnect:on_drop()` -- a 404-reinitialize is session-scoped, not
+--- connection-scoped (see the docstring above), so it must never perturb the
+--- reconnect machine's state or attempt counter.
 local function make_reinitializer(entry)
 	return function(on_done)
-		perform_handshake(entry, function(result, err)
-			if err then
-				return on_done(err, nil)
+		local settled = false
+		local function settle(fn)
+			if settled then
+				return
 			end
-			-- adopt_transport already ran exactly once in perform_handshake; the
-			-- reinitialize-specific follow-up is to hand the new transport/session
-			-- id back to session.lua's _adopt.
-			on_done(nil, {
-				transport = result.client,
-				session_id = result.session_id,
-			})
+			settled = true
+			fn()
+		end
+
+		local my_gen
+		local guard = vim.uv.new_timer()
+		guard:start(entry.config.reinit_timeout or ATTEMPT_TIMEOUT_MS, 0, function()
+			guard:stop()
+			guard:close()
+			vim.schedule(function()
+				settle(function()
+					-- Actively free a still-wedged dial (see abandon_wedged_dial), so
+					-- the slot is available for a future attempt/reinitialize to dial
+					-- fresh and any coalesced waiter is notified rather than stranded.
+					abandon_wedged_dial(entry, my_gen)
+					on_done("handshake attempt timed out", nil)
+				end)
+			end)
+		end)
+
+		my_gen = perform_handshake(entry, function(result, err)
+			if not guard:is_closing() then
+				guard:stop()
+				guard:close()
+			end
+			if settled then
+				-- The guard already timed out and resolved on_done; perform_handshake
+				-- is the single owner of the handshake result's lifecycle, so there is
+				-- nothing orphaned for this waiter to clean up here.
+				return
+			end
+			settle(function()
+				if err then
+					return on_done(err, nil)
+				end
+				-- adopt_transport already ran exactly once in perform_handshake; the
+				-- reinitialize-specific follow-up is to hand the new transport/session
+				-- id back to session.lua's _adopt.
+				on_done(nil, {
+					transport = result.client,
+					session_id = result.session_id,
+				})
+			end)
 		end)
 	end
 end

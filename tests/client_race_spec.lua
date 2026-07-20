@@ -556,4 +556,106 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 		assert.is_false(t2.closed, "the live D2 transport must stay open when the abandoned D1 resolves late")
 		assert.is_false(obj:is_stopped(), "the client stays connected on D2 despite the late abandoned D1 result")
 	end)
+
+	it("times out a reinitialize-only wedged dial with no concurrent reconnect activity", function()
+		-- Scenario (round 4), the reinit-only wedge: `entry.reconnect:state()` stays
+		-- "connected" throughout (no stream drop observed at all -- untagged exit
+		-- never fires), so `attempt_reconnect`'s guard -- the ONLY existing timeout on
+		-- a handshake dial -- never runs. A 404 request drives `make_reinitializer`
+		-- straight into `perform_handshake` as the sole, first caller; it dispatches
+		-- the one physical dial and that dial NEVER calls back (a hub that accepts the
+		-- TCP connection but hangs the MCP handshake forever, exactly the pathology
+		-- ATTEMPT_TIMEOUT_MS exists to bound elsewhere).
+		--
+		-- Pre-fix: make_reinitializer is a thin wrapper with no timer, no timeout
+		-- config, no guard of its own -- nothing ever resolves `on_done`, so the
+		-- original request's callback hangs forever: an unconditional R11 violation.
+		--
+		-- Post-fix: make_reinitializer owns its own guard (default ATTEMPT_TIMEOUT_MS,
+		-- overridable via `entry.config.reinit_timeout`). On timeout it abandons the
+		-- wedged dial (freeing entry._handshake for a future caller) and resolves the
+		-- original request's callback with a clear timeout error -- WITHOUT touching
+		-- entry.reconnect (a 404-reinitialize is session-scoped, not connection-scoped,
+		-- so the reconnect attempt counter/state must be untouched).
+		local obj, initial = connect_client({ reinit_timeout = 10 })
+		local dials_after_connect = detect_stub.dials
+
+		initial:set_responder(function()
+			return "hub returned status 404: session expired", nil, { status = 404 }
+		end)
+		local reply
+		obj:request({ jsonrpc = "2.0", id = 1, method = "ping" }, function(err, result)
+			reply = { err = err, result = result }
+		end)
+
+		-- The reinitialize dispatched exactly one dial (it is the sole, first caller;
+		-- no concurrent reconnect activity exists to coalesce with).
+		assert.are.equal(
+			dials_after_connect + 1,
+			detect_stub.dials,
+			"the reinitialize should have dispatched its own handshake dial"
+		)
+		local d1_index = #detect_stub.pending
+
+		-- Bounded wait: this is the core regression check. Pre-fix, `reply` never
+		-- becomes non-nil (nothing resolves make_reinitializer's on_done), so this
+		-- wait always times out at its bound rather than hanging the test suite
+		-- itself -- the bound is the point, not a race to shrink.
+		vim.wait(200, function()
+			return reply ~= nil
+		end)
+
+		-- CORE ASSERTION: the caller's request callback resolves within the bound,
+		-- with a clear timeout error -- never silently, never with a phantom success.
+		assert.is_not_nil(
+			reply,
+			"a reinit-only wedged dial with no concurrent reconnect activity must still resolve the caller, not hang forever"
+		)
+		assert.is_not_nil(reply.err, "the resolution must carry a timeout-shaped error, not a phantom success")
+
+		-- The reconnect machine must be entirely untouched by a session-scoped
+		-- reinitialize timeout: still "connected", no attempt counted, no MCPDetach.
+		assert.is_false(obj:is_stopped(), "a 404-reinitialize timeout must not perturb the reconnect machine's state")
+
+		-- The slot is genuinely freed: a follow-up reinitialize dials FRESH rather
+		-- than joining the abandoned dial's dead waiter list.
+		initial:set_responder(function()
+			return "hub returned status 404: session expired", nil, { status = 404 }
+		end)
+		local reply2
+		obj:request({ jsonrpc = "2.0", id = 2, method = "ping" }, function(err, result)
+			reply2 = { err = err, result = result }
+		end)
+		assert.are.equal(
+			dials_after_connect + 2,
+			detect_stub.dials,
+			"a follow-up reinitialize must dial fresh after the wedged dial is abandoned, not join the dead waiter list"
+		)
+		local d2_index = #detect_stub.pending
+		assert.is_true(d2_index > d1_index, "the follow-up dial must be a new, distinct dial from the abandoned one")
+
+		-- Resolve the follow-up dial successfully so the retry completes.
+		local fresh = transport_double({ label = "fresh" })
+		fresh:set_responder(function()
+			return nil, { pong = true }
+		end)
+		detect_stub.resolve(d2_index, { transport = "legacy_sse", client = fresh, session_id = "sess-2" })
+		vim.wait(100, function()
+			return reply2 ~= nil
+		end)
+		assert.is_not_nil(reply2, "the follow-up reinitialize must resolve the second request")
+		assert.is_nil(reply2.err)
+		assert.are.same({ pong = true }, reply2.result)
+
+		-- A very-late result from the FIRST (abandoned) dial must be closed, not
+		-- adopted -- it is stale by generation once the follow-up dial superseded it.
+		local t1_late = transport_double({ label = "t1-late" })
+		detect_stub.resolve(d1_index, { transport = "legacy_sse", client = t1_late, session_id = "sess-t1" })
+		vim.wait(60, function()
+			return t1_late.closed
+		end)
+		assert.is_true(t1_late.closed, "the abandoned dial's very-late result must be closed, not adopted")
+		assert.are.equal(0, t1_late.hook_count, "the abandoned dial's very-late result must never be hooked/adopted")
+		assert.is_false(fresh.closed, "the live, adopted transport must stay open despite the late abandoned result")
+	end)
 end)
