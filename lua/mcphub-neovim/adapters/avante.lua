@@ -78,12 +78,7 @@ local M = {}
 --- genuine JSON-RPC response carries (`jsonrpc`, `id`) alongside the nested
 --- `result` table before unwrapping; otherwise use the value as-is.
 local function unwrap_result(result)
-	if
-		type(result) == "table"
-		and type(result.result) == "table"
-		and result.jsonrpc == "2.0"
-		and result.id ~= nil
-	then
+	if type(result) == "table" and type(result.result) == "table" and result.jsonrpc == "2.0" and result.id ~= nil then
 		return result.result
 	end
 	return result

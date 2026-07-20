@@ -172,52 +172,49 @@ describe("adapters.avante (custom_tools translation)", function()
 		assert.are.equal('{"text":"hello"}', got_result)
 	end)
 
-	it(
-		"regression: unwrap_result must not strip a native tool's own {result=...} payload",
-		function()
-			native.register({
-				name = "result-shaped-native",
-				tools = {
-					lookup = function()
-						return { result = { value = 42, unit = "kg" } }
-					end,
-				},
-			})
-
-			local tools = avante.custom_tools()
-			local lookup_tool
-			for _, t in ipairs(tools) do
-				if t.name == "lookup" then
-					lookup_tool = t
-				end
-			end
-			assert.is_not_nil(lookup_tool)
-
-			local got_result, got_err
-			local completed = false
-			local result, err = lookup_tool.func({}, {
-				on_complete = function(result, err)
-					completed = true
-					got_result, got_err = result, err
+	it("regression: unwrap_result must not strip a native tool's own {result=...} payload", function()
+		native.register({
+			name = "result-shaped-native",
+			tools = {
+				lookup = function()
+					return { result = { value = 42, unit = "kg" } }
 				end,
-			})
-			if result ~= nil or err ~= nil then
-				got_result, got_err = result, err
-				completed = true
-			end
+			},
+		})
 
-			assert.is_true(completed)
-			assert.is_nil(got_err)
-			assert.is_not_nil(got_result)
-			-- The native tool's own `result` key must survive intact: it is
-			-- application data, not a JSON-RPC envelope for unwrap_result to
-			-- strip -- only a genuine remote envelope also carries jsonrpc/id.
-			local decoded = vim.json.decode(got_result)
-			assert.is_table(decoded.result)
-			assert.are.equal(42, decoded.result.value)
-			assert.are.equal("kg", decoded.result.unit)
+		local tools = avante.custom_tools()
+		local lookup_tool
+		for _, t in ipairs(tools) do
+			if t.name == "lookup" then
+				lookup_tool = t
+			end
 		end
-	)
+		assert.is_not_nil(lookup_tool)
+
+		local got_result, got_err
+		local completed = false
+		local result, err = lookup_tool.func({}, {
+			on_complete = function(result, err)
+				completed = true
+				got_result, got_err = result, err
+			end,
+		})
+		if result ~= nil or err ~= nil then
+			got_result, got_err = result, err
+			completed = true
+		end
+
+		assert.is_true(completed)
+		assert.is_nil(got_err)
+		assert.is_not_nil(got_result)
+		-- The native tool's own `result` key must survive intact: it is
+		-- application data, not a JSON-RPC envelope for unwrap_result to
+		-- strip -- only a genuine remote envelope also carries jsonrpc/id.
+		local decoded = vim.json.decode(got_result)
+		assert.is_table(decoded.result)
+		assert.are.equal(42, decoded.result.value)
+		assert.are.equal("kg", decoded.result.unit)
+	end)
 
 	it("happy path: a tool call from Avante resolves through the adapter to a remote hub connection", function()
 		make_remote_double("remote-hub", {
