@@ -78,7 +78,10 @@ end
 --- @class Client
 --- @field id string
 --- @field name string
---- @field config table
+--- @field config table  a live-computed, read-only snapshot of the connection
+---   config (url, name, timeout, reconnect, ...); `headers` is a redacted
+---   copy with any credential-bearing header (e.g. Authorization) replaced by
+---   a fixed placeholder -- see build_exposed_config. Never the real secret.
 --- @field transport string  "streamable_http" | "legacy_sse"
 
 --- Attach the stream-end exit hook to a transport's long-lived stream Job
@@ -615,20 +618,79 @@ local function ensure_fresh_token(entry, proceed, on_error)
 	end)
 end
 
+--- Headers whose VALUE is credential material and must never be exposed in
+--- cleartext through the public client object. Only "Authorization" is
+--- populated by this codebase today (token_store.apply_to_headers writes
+--- `headers["Authorization"] = scheme .. " " .. access_token`), but the set
+--- is a table (not a single hardcoded key) so a future credential-bearing
+--- header added here is redacted the same way without another leak surface
+--- to remember.
+local REDACTED_HEADER_KEYS = {
+	["Authorization"] = true,
+}
+
+local REDACTED_PLACEHOLDER = "[redacted]"
+
+--- Build a redacted copy of a headers table: every credential-bearing key
+--- (REDACTED_HEADER_KEYS) is replaced with a fixed placeholder; every other
+--- header is preserved verbatim so introspection/debugging still shows what
+--- headers exist. Returns nil when given nil (no headers configured).
+local function redact_headers(headers)
+	if not headers then
+		return nil
+	end
+	local out = {}
+	for k, v in pairs(headers) do
+		out[k] = REDACTED_HEADER_KEYS[k] and REDACTED_PLACEHOLDER or v
+	end
+	return out
+end
+
+--- Build the exposed `.config` snapshot for the public client object: a
+--- shallow copy of `entry.config` (so `url`/`name`/`timeout`/`reconnect`/etc.
+--- remain genuinely useful for introspection) with a freshly redacted copy of
+--- `headers`.
+---
+--- This is computed on EVERY access (via the metatable `__index` below, the
+--- same live-getter pattern already used for `transport`) rather than cached
+--- once at construction time. entry.config.headers is the exact table
+--- token_store.apply_to_headers mutates in place -- on initial connect, on
+--- every transparent refresh, and (if a caller does it directly, as the
+--- shared-table contract in token_store.lua documents) at any later point --
+--- so a one-time snapshot taken in make_client_object would either (a) go
+--- stale and keep showing a since-revoked/rotated token's redacted
+--- placeholder forever, indistinguishable from the current state, or worse
+--- (b) if some future caller cached the ORIGINAL live table by reference
+--- instead of copying it, leak a token added after construction. A live
+--- getter that redacts fresh from entry.config on each read has neither
+--- failure mode: it always reflects the CURRENT set of header keys, while the
+--- redacted VALUE is always the fixed placeholder -- never the secret. (The
+--- token's mere *presence*/expiry is already non-secret and surfaced via
+--- TokenStore:status(), so there is nothing extra to hide beyond the value.)
+local function build_exposed_config(entry)
+	local exposed = vim.tbl_extend("force", {}, entry.config)
+	exposed.headers = redact_headers(entry.config.headers)
+	return exposed
+end
+
 --- Construct the public client object exposed to callers, backed by a
 --- registry `entry`.
 local function make_client_object(entry)
 	local obj = {
 		id = entry.id,
 		name = entry.name,
-		config = entry.config,
 	}
-	-- `transport` is read through a metatable so callers always see the
-	-- current transport even after a transparent reconnect/reinitialize.
+	-- `transport` and `config` are read through a metatable so callers always
+	-- see the current transport (after a transparent reconnect/reinitialize)
+	-- and a freshly redacted config (after a transparent token refresh),
+	-- rather than a value frozen at construction time.
 	setmetatable(obj, {
 		__index = function(_, key)
 			if key == "transport" then
 				return entry.transport
+			end
+			if key == "config" then
+				return build_exposed_config(entry)
 			end
 		end,
 	})

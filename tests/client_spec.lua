@@ -524,4 +524,169 @@ describe("client (session + reconnect + event API)", function()
 		assert.is_not_nil(reply.err)
 		assert.is_nil(reply.result)
 	end)
+
+	describe("the exposed client object's .config never leaks the live bearer token", function()
+		-- token_store.apply_to_headers mutates entry.config.headers in place,
+		-- writing headers["Authorization"] = "Bearer " .. access_token. Before
+		-- this fix, make_client_object aliased obj.config = entry.config
+		-- directly, so any reader of the public client object's .config.headers
+		-- saw the real, live secret -- the one surface in this codebase that did
+		-- NOT follow the "never expose the raw token, only redacted status"
+		-- convention TokenStore:status()/health.lua establish everywhere else.
+		local token_store = require("mcphub-neovim.auth.token_store")
+
+		local double
+		local tmp
+
+		after_each(function()
+			client._reset_registry()
+			vim.wait(30, function()
+				return false
+			end)
+			if double then
+				double:stop()
+				double = nil
+			end
+			if tmp then
+				vim.fn.delete(tmp, "rf")
+				tmp = nil
+			end
+		end)
+
+		local function make_tmpdir()
+			local dir = vim.fn.tempname()
+			vim.fn.mkdir(dir, "p")
+			return dir
+		end
+
+		it("redacts Authorization in exposed config.headers; the real request still carries the bearer", function()
+			tmp = make_tmpdir()
+			local store = token_store.new({ key = "hubSecret", backend = "file", data_home = tmp })
+			store:save({
+				access_token = "SECRET-live-access-token",
+				token_type = "Bearer",
+				expires_at = os.time() + 3600, -- not expired: no refresh path involved
+			})
+
+			local seen_auth_on_wire
+			double = HttpDouble.new({
+				on_request = function(method, path, rest, head)
+					if method == "POST" and path == "/mcp" then
+						local ok, decoded = pcall(vim.json.decode, rest)
+						if ok and decoded.method == "initialize" then
+							return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
+						end
+						seen_auth_on_wire = head and head:match("[Aa]uthorization:%s*([^\r\n]+)")
+						return {
+							status = 200,
+							body = vim.json.encode({ jsonrpc = "2.0", id = decoded.id, result = { pong = true } }),
+						}
+					end
+					return { status = 404, body = "" }
+				end,
+			})
+
+			local got
+			client.connect({
+				url = double.url .. "/mcp",
+				name = "hubSecret",
+				auth = { token_store = store },
+			}, {
+				on_connect = function(c, e)
+					got = { client = c, err = e }
+				end,
+			})
+			assert.is_true(wait_for(function()
+				return got ~= nil
+			end, 3000))
+			assert.is_nil(got.err)
+
+			-- The publicly exposed client object's .config must never surface the
+			-- real bearer token: this is the core assertion this test exists to
+			-- prove.
+			assert.is_not_nil(got.client.config)
+			assert.is_not_nil(got.client.config.headers)
+			assert.are_not.equal("Bearer SECRET-live-access-token", got.client.config.headers["Authorization"])
+			-- No token material anywhere in the exposed config, however nested.
+			local dumped = vim.inspect(got.client.config)
+			assert.is_nil(dumped:find("SECRET-live-access-token", 1, true))
+
+			-- get_clients() returns the same exposed shape (it's the same object),
+			-- so the leak-free guarantee holds for every caller of get_clients()
+			-- too, not just the on_connect callback's object.
+			local from_registry = client.get_clients({ name = "hubSecret" })[1]
+			assert.is_not_nil(from_registry)
+			local dumped_registry = vim.inspect(from_registry.config)
+			assert.is_nil(dumped_registry:find("SECRET-live-access-token", 1, true))
+
+			-- Non-secret introspection fields remain genuinely useful.
+			assert.are.equal(double.url .. "/mcp", got.client.config.url)
+
+			-- Meanwhile the REAL request on the wire still authenticates with the
+			-- real bearer token -- the redaction must not touch the transport's
+			-- actual internal headers.
+			local reply
+			got.client:request({ jsonrpc = "2.0", id = 42, method = "ping", params = {} }, function(err, result)
+				reply = { err = err, result = result }
+			end)
+			assert.is_true(wait_for(function()
+				return reply ~= nil
+			end, 3000))
+			assert.is_nil(reply.err)
+			assert.are.same({ pong = true }, reply.result.result)
+			assert.are.equal("Bearer SECRET-live-access-token", seen_auth_on_wire)
+
+			got.client:disconnect()
+		end)
+
+		it(
+			"keeps redaction current: headers added after client creation stay redacted, not a stale snapshot",
+			function()
+				tmp = make_tmpdir()
+				local store = token_store.new({ key = "hubSecret2", backend = "file", data_home = tmp })
+				store:save({
+					access_token = "SECRET-token-v1",
+					token_type = "Bearer",
+					expires_at = os.time() + 3600,
+				})
+
+				double = HttpDouble.new({
+					on_request = function(_, _, rest)
+						local ok, decoded = pcall(vim.json.decode, rest or "")
+						local id = ok and decoded.id or 1
+						return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = id, result = {} }) }
+					end,
+				})
+
+				local got
+				client.connect({
+					url = double.url .. "/mcp",
+					name = "hubSecret2",
+					auth = { token_store = store },
+				}, {
+					on_connect = function(c, e)
+						got = { client = c, err = e }
+					end,
+				})
+				assert.is_true(wait_for(function()
+					return got ~= nil
+				end, 3000))
+				assert.is_nil(got.err)
+
+				-- Simulate a later token rotation writing a NEW real token into the
+				-- live, shared headers table (exactly what token_store.apply_to_headers
+				-- does on refresh) -- this must never surface through the exposed
+				-- object either, proving the redaction is not a one-time snapshot that
+				-- could go stale.
+				token_store.apply_to_headers(got.client.config.headers, { access_token = "SECRET-token-v2" })
+
+				assert.are_not.equal("Bearer SECRET-token-v2", got.client.config.headers["Authorization"])
+				local dumped = vim.inspect(got.client.config)
+				assert.is_nil(dumped:find("SECRET-token-v1", 1, true))
+				assert.is_nil(dumped:find("SECRET-token-v2", 1, true))
+
+				got.client:disconnect()
+			end
+		)
+	end)
 end)
