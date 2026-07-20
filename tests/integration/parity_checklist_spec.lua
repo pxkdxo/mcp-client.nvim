@@ -10,19 +10,26 @@
 --
 -- The checklist (verbatim from the brief), with how each row is covered here:
 --
---   | mcphub.nvim surface                    | mcphub-neovim equivalent          | Status            |
---   |----------------------------------------|-----------------------------------|-------------------|
---   | server_url (hub connection)            | R1 core conn, ext. configured(R7) | Covered by U1,U8  |
---   | native_servers.orchestrator            | Excluded for v1                   | Out of scope      |
---   | extensions.avante (tools/vars/slash)   | U4 Avante adapter                 | Covered by U4     |
---   | extensions.codecompanion (...)         | U5 CodeCompanion adapter          | Covered by U5     |
---   | :MCPHub interactive dashboard          | :checkhealth mcphub-neovim        | Covered by U8     |
---   | Avante disabled_tools (host config)    | host-plugin config, not ours      | Out of scope      |
+--   | mcphub.nvim surface                    | mcphub-neovim equivalent          | Status              |
+--   |----------------------------------------|-----------------------------------|---------------------|
+--   | server_url (hub connection)            | R1 core conn, ext. configured(R7) | Covered by U1,U8    |
+--   | native_servers.orchestrator            | Excluded for v1                   | Out of scope        |
+--   | extensions.avante (tools/vars/slash)   | U4 Avante adapter, U11 slash cmds | Covered by U4,U11   |
+--   | extensions.codecompanion (...)         | U5 CodeCompanion adapter, U12/U13 | Covered by U5,U12,U13 |
+--   | :MCPHub interactive dashboard          | :checkhealth mcphub-neovim        | Covered by U8       |
+--   | Avante disabled_tools (host config)    | host-plugin config, not ours      | Out of scope        |
 --
--- Note (carried from U4/U5): prompt/slash-command bridging is a known,
--- user-approved deferred gap in both adapters (tracked in minor-findings.md).
--- The codecompanion row's "make_vars gap documented" phrasing already accounts
--- for it; this spec asserts the gap is DOCUMENTED, not that the feature exists.
+-- Note (U11/U12 closed the original gap this file used to test around):
+-- prompt/slash-command bridging was a known, user-approved deferred gap in
+-- both adapters when this spec was first written (U9). U11 (Avante) and U12
+-- (CodeCompanion) subsequently implemented it in full -- see
+-- minor-findings.md's "KNOWN GAP ... now RESOLVED by U11"/"...U12" entries --
+-- and U13 fixed a CodeCompanion editor_context regression discovered along
+-- the way. The rows below now assert the actual bridging surface exists,
+-- not merely that a gap is recorded. The one genuinely still-open gap is
+-- Avante's own resources/vars clause (investigated, not built -- see
+-- minor-findings.md's "RESOLVED: Avante adapter resource/vars bridging (R4
+-- gap) -- investigated, not built"), asserted directly in that row below.
 
 describe("U9 parity checklist (against ai.lua's mcphub.nvim config)", function()
 	it("row: server_url -> externally-configured hub connection (U1 + U8)", function()
@@ -58,38 +65,60 @@ describe("U9 parity checklist (against ai.lua's mcphub.nvim config)", function()
 		assert.is_false(ok, "no orchestrator native server should be bundled (out of scope for v1)")
 	end)
 
-	it("row: extensions.avante -> U4 Avante adapter (tools surface present)", function()
+	it("row: extensions.avante -> U4 tools bridge + U11 prompt/slash-command bridge", function()
 		-- mcphub.nvim: `extensions.avante = { make_tools, make_vars, make_slash_commands }`.
-		-- mcphub-neovim's Avante adapter (U4) provides the tools bridge.
+		-- mcphub-neovim's Avante adapter provides the tools bridge (U4) and the
+		-- prompt/slash-command bridge (U11, closing what was a deferred gap when
+		-- this spec was first written). `custom_slash_commands`/`refresh` are the
+		-- real, callable U11 entry points (avante.lua), independently exercised
+		-- end-to-end in tests/adapters/avante_spec.lua's own "prompt/slash-command
+		-- translation, U11" describe block -- this row only asserts the surface
+		-- exists, not the full behavior that spec already covers.
 		local avante = require("mcphub-neovim.adapters.avante")
 		assert.is_table(avante)
-		-- The tools bridge is the adapter's public entry (the mcp_tool()/custom_tools
-		-- analogue of ai.lua's `custom_tools`).
 		assert.is_true(
 			type(avante.custom_tools) == "function" or type(avante.mcp_tool) == "function",
 			"Avante adapter must expose a tools bridge"
 		)
-	end)
+		assert.is_function(avante.custom_slash_commands, "Avante adapter must expose a prompt/slash-command bridge")
+		assert.is_function(avante.refresh, "Avante adapter must expose a refresh() to re-publish slash commands")
 
-	it("row: extensions.codecompanion -> U5 adapter, with make_vars gap DOCUMENTED", function()
-		-- mcphub.nvim's codecompanion extension config already sets
-		-- `make_vars = false, -- Broken, tries to access 'variables'` in ai.lua --
-		-- i.e. the upstream make_vars path is known-broken. The plan's checklist
-		-- row requires that mcphub-neovim's adapter does NOT silently paper over
-		-- this gap but documents it. Assert (a) the adapter exists (U5) and (b) the
-		-- gap is recorded in minor-findings.md rather than hidden.
-		local cc = require("mcphub-neovim.adapters.codecompanion")
-		assert.is_table(cc)
-
+		-- The one still-genuinely-open gap in this row: Avante's own
+		-- resources/vars clause was investigated and deliberately not built (no
+		-- resources/vars-equivalent extension point exists in avante.nvim's real
+		-- config surface) -- confirm that decision is still recorded, not silently
+		-- dropped from tracking.
 		local repo_root =
 			vim.fn.fnamemodify(vim.api.nvim_get_runtime_file("lua/mcphub-neovim/init.lua", false)[1], ":h:h:h")
 		local findings = repo_root .. "/.superpowers/sdd/minor-findings.md"
 		assert.are.equal(1, vim.fn.filereadable(findings), "minor-findings.md must exist to record the gap")
 		local text = table.concat(vim.fn.readfile(findings), "\n")
-		-- The deferred prompt/slash-command + make_vars gap is explicitly tracked.
 		assert.is_truthy(
-			text:find("make_vars", 1, true) or text:find("prompt/slash", 1, true),
-			"the make_vars / prompt-bridging gap must be documented in minor-findings.md, not silently worked around"
+			text:find("resource/vars", 1, true),
+			"Avante's resources/vars gap must stay documented in minor-findings.md, not silently dropped"
+		)
+	end)
+
+	it("row: extensions.codecompanion -> U5 adapter, U12 prompt bridge, U13 editor_context fix", function()
+		-- mcphub.nvim's codecompanion extension config sets `make_vars = false --
+		-- Broken, tries to access 'variables'` in ai.lua. mcphub-neovim's
+		-- CodeCompanion adapter does NOT inherit that brokenness: U5 built real
+		-- resource/editor_context bridging, U12 added prompt/slash-command
+		-- bridging (closing what was a deferred gap when this spec was first
+		-- written), and U13 fixed a real editor_context-path regression discovered
+		-- along the way -- there is no remaining "make_vars" gap for this row to
+		-- document. `setup`/`exports.refresh` are the real, callable entry points
+		-- that wire all of tools/resources/prompts, independently exercised
+		-- end-to-end in tests/adapters/codecompanion_spec.lua's own
+		-- "prompt/slash-command bridging (U12)" describe block -- this row only
+		-- asserts the surface exists, not the full behavior that spec covers.
+		local cc = require("mcphub-neovim.adapters.codecompanion")
+		assert.is_table(cc)
+		assert.is_function(cc.setup, "CodeCompanion adapter must expose setup()")
+		assert.is_table(cc.exports)
+		assert.is_function(
+			cc.exports.refresh,
+			"CodeCompanion adapter must expose exports.refresh() to re-publish tools/resources/prompts"
 		)
 	end)
 
