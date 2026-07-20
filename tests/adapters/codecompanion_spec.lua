@@ -208,7 +208,14 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 
 		assert.is_not_nil(got_output)
 		assert.are.equal("success", got_output.status)
-		assert.matches("hello", got_output.data)
+		-- The echo tool returns exactly { text = "hello" } (a single key, so
+		-- ordering is unambiguous). render_result() has no .content key to
+		-- match here, so it falls through to vim.json.encode(result) -- the
+		-- deterministic output is exactly this JSON string. Assert exact
+		-- equality, not a substring match a broken JSON-producing renderer
+		-- could still satisfy (see the prompt-bridging tests below, added
+		-- for the same reason after a real bug slipped past assert.matches).
+		assert.are.equal('{"text":"hello"}', got_output.data)
 	end)
 
 	it("happy path: a tool call resolves through the adapter to a remote hub connection", function()
@@ -297,7 +304,11 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 
 		assert.is_true(completed)
 		assert.are.equal("success", got_output.status)
-		assert.matches("remote%-hello", got_output.data)
+		-- The remote double replies content = {{ type = "text", text =
+		-- "remote-hello" }}; render_result()'s single-text-content-item
+		-- branch returns that bare string directly (not JSON-encoded), so
+		-- the deterministic output is exactly this plain string.
+		assert.are.equal("remote-hello", got_output.data)
 	end)
 
 	it("edge case: resource bridging via editor_context works for a native client (synchronous)", function()

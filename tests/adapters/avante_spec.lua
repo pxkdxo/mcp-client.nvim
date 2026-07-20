@@ -163,7 +163,13 @@ describe("adapters.avante (custom_tools translation)", function()
 		assert.is_true(completed)
 		assert.is_nil(got_err)
 		assert.is_not_nil(got_result)
-		assert.matches("hello", got_result)
+		-- The echo tool returns exactly { text = "hello" } (a single key, so
+		-- ordering is unambiguous); func()'s payload-is-a-table branch
+		-- (avante.lua) always runs it through vim.json.encode, so the
+		-- deterministic result is exactly this JSON string -- assert exact
+		-- equality, not a substring match that a broken JSON-producing
+		-- renderer could still satisfy.
+		assert.are.equal('{"text":"hello"}', got_result)
 	end)
 
 	it("happy path: a tool call from Avante resolves through the adapter to a remote hub connection", function()
@@ -227,7 +233,11 @@ describe("adapters.avante (custom_tools translation)", function()
 		assert.is_true(completed)
 		assert.is_nil(got_err)
 		assert.is_not_nil(got_result)
-		assert.matches("remote%-hello", got_result)
+		-- The remote double replies { text = params.arguments.text } for
+		-- tools/call, i.e. { text = "remote-hello" }; unwrapped from the
+		-- JSON-RPC envelope and run through vim.json.encode, the
+		-- deterministic result is exactly this JSON string.
+		assert.are.equal('{"text":"remote-hello"}', got_result)
 	end)
 
 	it("edge case: zero connected clients means no tools are registered, not an error", function()
