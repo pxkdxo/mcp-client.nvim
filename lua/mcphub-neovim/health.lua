@@ -42,7 +42,15 @@ end
 --- Report auth status for one hub, reading ONLY the redacted status table.
 --- Returns true if auth is healthy (or not required), false if it warrants a
 --- warning -- so the caller can factor it into the hub's overall verdict.
-local function report_auth(reporter, name, record)
+---
+--- @param connected boolean  whether this hub currently has a live, connected
+---   client object. An expired-but-refreshable token behaves differently
+---   depending on this: with a live client, the NEXT request transparently
+---   refreshes it (`ensure_fresh_token`); with no live client, `M.connect`
+---   itself now refreshes proactively before dialing, so the fix is "retry
+---   the connection", not "the next request" -- there is no live client to
+---   send one.
+local function report_auth(reporter, name, record, connected)
 	local store = record.token_store
 	if not store then
 		-- A localhost hub, or one the user connects without auth: nothing to
@@ -68,16 +76,35 @@ local function report_auth(reporter, name, record)
 	end
 
 	if status.expired then
-		reporter.warn(
-			string.format(
-				"hub %q: stored token is expired (expired at %s). "
-					.. "It will be refreshed automatically on the next request if a refresh "
-					.. "token is present%s.",
-				name,
-				fmt_time(status.expires_at),
-				status.has_refresh_token and "" or " -- but none is stored, so re-authentication is required"
+		if not status.has_refresh_token then
+			reporter.warn(
+				string.format(
+					"hub %q: stored token is expired (expired at %s) and no refresh token is "
+						.. "stored -- re-authentication is required.",
+					name,
+					fmt_time(status.expires_at)
+				)
 			)
-		)
+		elseif connected then
+			reporter.warn(
+				string.format(
+					"hub %q: stored token is expired (expired at %s). "
+						.. "It will be refreshed automatically on the next request.",
+					name,
+					fmt_time(status.expires_at)
+				)
+			)
+		else
+			reporter.warn(
+				string.format(
+					"hub %q: stored token is expired (expired at %s). "
+						.. "It will be refreshed automatically on the next connection attempt -- "
+						.. "re-run setup() or restart Neovim.",
+					name,
+					fmt_time(status.expires_at)
+				)
+			)
+		end
 		return false
 	end
 
@@ -107,11 +134,12 @@ local function report_hub(reporter, name, record)
 			)
 		)
 		-- Still report auth so the user sees the whole picture for this hub.
-		report_auth(reporter, name, record)
+		report_auth(reporter, name, record, false)
 		return
 	end
 
-	if obj:is_stopped() then
+	local stopped = obj:is_stopped()
+	if stopped then
 		reporter.error(
 			string.format(
 				"hub %q (%s): disconnected -- reconnect attempts were exhausted. "
@@ -124,7 +152,7 @@ local function report_hub(reporter, name, record)
 		reporter.ok(string.format("hub %q (%s): connected", name, record.url))
 	end
 
-	report_auth(reporter, name, record)
+	report_auth(reporter, name, record, not stopped)
 end
 
 --- Report the registered native, in-process servers. Native servers are

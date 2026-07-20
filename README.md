@@ -75,6 +75,9 @@ require("mcphub-neovim").setup({
     backend   = nil, -- "keychain" | "file" | nil (auto-detect: keychain on
                      -- macOS if `security` is available, else a 0600 file)
     data_home = nil, -- override $XDG_DATA_HOME for the file backend (rarely needed)
+    key       = nil, -- optional shared prefix, namespaced per-hub as "<key>:<hub name>"
+                     -- (e.g. for a per-machine/per-profile prefix); never a verbatim
+                     -- override, so it can never collapse two hubs onto one stored token
   },
 })
 ```

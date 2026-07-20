@@ -105,6 +105,16 @@ end
 ---     keyed by hub name, on the backend/data_home from `opts.token_store`
 ---     (defaults to auto-detected keychain/file).
 --- Returns the store (or nil) and does NOT trigger any OAuth flow.
+---
+--- `store_opts.key`, if set, is always namespaced with the hub's own `name`
+--- (`"<key>:<name>"`), never used verbatim: `opts.token_store.key` is a single
+--- global default shared across every hub in one `setup()` call, and a bare
+--- override would collapse every non-localhost hub without its own
+--- `auth.token_store` onto the exact same backing file/keychain entry --
+--- silently corrupting one hub's stored credentials with another's on the
+--- next refresh. Namespacing by name preserves `key`'s only legitimate
+--- purpose (a stable per-deployment/per-profile prefix) while keeping
+--- distinct hubs' storage always distinct.
 local function resolve_token_store(name, hub_config, store_opts)
 	local supplied = hub_config.auth and hub_config.auth.token_store or nil
 	if supplied then
@@ -114,8 +124,12 @@ local function resolve_token_store(name, hub_config, store_opts)
 		return nil
 	end
 	store_opts = store_opts or {}
+	local key = name
+	if store_opts.key then
+		key = store_opts.key .. ":" .. name
+	end
 	return token_store.new({
-		key = store_opts.key or name,
+		key = key,
 		backend = store_opts.backend,
 		data_home = store_opts.data_home,
 	})
@@ -150,24 +164,47 @@ local function connect_hub(name, hub_config, store_opts)
 		on_connect = function(_client_object, err)
 			if err then
 				local msg = string.format("mcphub-neovim: failed to connect hub %q: %s", name, tostring(err))
-				-- If the failure is the R12 fail-closed refusal for a
-				-- non-localhost hub with no credential, append the concrete
-				-- next step rather than leaving the user with a dead end.
-				-- (This is a documented manual mechanism, not an auto-login --
+				-- Append a concrete next step for the two credential-related
+				-- failure shapes, rather than leaving the user with a dead end.
+				-- (These are documented manual mechanisms, not an auto-login --
 				-- see design question 3 / the README.)
-				if not tls.is_localhost(hub_config.url) and store and not store:status().has_token then
-					msg = msg
-						.. "\n"
-						.. string.format(
-							"No stored token for this hub yet. Authenticate once with:\n"
-								.. "  require('mcphub-neovim.auth.dcr').run_flow({ hub_url = %q }, function(token, ferr)\n"
-								.. "    if token then require('mcphub-neovim.auth.token_store')\n"
-								.. "      .new({ key = %q }):save(token) end\n"
-								.. "  end)\n"
-								.. "then re-run setup() (or restart Neovim).",
-							hub_config.url,
-							name
-						)
+				if not tls.is_localhost(hub_config.url) and store then
+					local auth_status = store:status()
+					if not auth_status.has_token then
+						-- R12 fail-closed refusal: no credential configured at all.
+						msg = msg
+							.. "\n"
+							.. string.format(
+								"No stored token for this hub yet. Authenticate once with:\n"
+									.. "  require('mcphub-neovim.auth.dcr').run_flow({ hub_url = %q }, function(token, ferr)\n"
+									.. "    if token then require('mcphub-neovim.auth.token_store')\n"
+									.. "      .new({ key = %q }):save(token) end\n"
+									.. "  end)\n"
+									.. "then re-run setup() (or restart Neovim).",
+								hub_config.url,
+								name
+							)
+					elseif auth_status.expired then
+						-- A stored token exists (M.connect already tried to refresh
+						-- it before dialing) but the connection still failed --
+						-- commonly the refresh itself failed (revoked/expired
+						-- refresh token, or a network error). Re-authentication is
+						-- the same manual mechanism as the no-token case above.
+						msg = msg
+							.. "\n"
+							.. string.format(
+								"The stored token was expired and the automatic refresh failed. "
+									.. "Re-authenticate once with:\n"
+									.. "  require('mcphub-neovim.auth.dcr').run_flow({ hub_url = %q }, function(token, ferr)\n"
+									.. "    if token then require('mcphub-neovim.auth.token_store')\n"
+									.. "      .new({ key = %q }):save(token) end\n"
+									.. "  end)\n"
+									.. "then re-run setup() (or restart Neovim) -- or, if this looks like a "
+									.. "transient network failure rather than a revoked token, just retry.",
+								hub_config.url,
+								name
+							)
+					end
 				end
 				vim.schedule(function()
 					vim.notify(msg, vim.log.levels.WARN)
@@ -192,7 +229,9 @@ end
 ---   token_store    (table|nil)  defaults for auto-constructed TokenStores:
 ---                  { backend?, data_home?, key? } -- forwarded to token_store.new.
 ---                  Only used for non-localhost hubs that did not supply their own
----                  `auth.token_store`.
+---                  `auth.token_store`. `key`, if set, is a shared prefix namespaced
+---                  per-hub (`"<key>:<hub name>"`), never a verbatim override -- it
+---                  cannot be used to collapse two hubs onto the same stored token.
 function M.setup(opts)
 	opts = opts or {}
 	assert(type(opts) == "table", "setup: opts must be a table")

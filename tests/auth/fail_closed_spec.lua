@@ -403,6 +403,67 @@ describe("client transparent token refresh (expired -> refresh -> retry)", funct
 		return store
 	end
 
+	it(
+		"regression: refreshes a stored-but-expired token BEFORE dialing, so the InitializeRequest itself carries the fresh token",
+		function()
+			local seen_auth_on_initialize
+			local token_hits = 0
+			double = HttpDouble.new({
+				on_request = function(method, path, rest, head)
+					if method == "POST" and path == "/token" then
+						token_hits = token_hits + 1
+						return {
+							status = 200,
+							body = vim.json.encode({
+								access_token = "fresh-access-token",
+								refresh_token = "rotated-refresh-token",
+								token_type = "Bearer",
+								expires_in = 3600,
+							}),
+						}
+					end
+					if method == "POST" and path == "/mcp" then
+						local ok, decoded = pcall(vim.json.decode, rest)
+						if ok and decoded.method == "initialize" then
+							-- The whole point of the fix: this very first request must
+							-- already carry the refreshed token, not the expired one
+							-- that was in the store when client.connect() was called.
+							seen_auth_on_initialize = head and head:match("[Aa]uthorization:%s*([^\r\n]+)")
+							return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
+						end
+						return { status = 404, body = "" }
+					end
+					return { status = 404, body = "" }
+				end,
+			})
+
+			local store = seed_expired_store(double.url .. "/token")
+
+			local got
+			client.connect({
+				url = double.url .. "/mcp",
+				auth = { token_store = store },
+			}, {
+				on_connect = function(c, e)
+					got = { client = c, err = e }
+				end,
+			})
+			assert.is_true(wait_for(function()
+				return got ~= nil
+			end, 3000))
+			assert.is_nil(got.err)
+			assert.is_not_nil(got.client)
+
+			-- Exactly one refresh grant, spent BEFORE the dial -- not zero
+			-- (the old, broken behavior: dial with the stale token) and not
+			-- deferred to a later request.
+			assert.are.equal(1, token_hits)
+			assert.are.equal("Bearer fresh-access-token", seen_auth_on_initialize)
+
+			got.client:disconnect()
+		end
+	)
+
 	it("refreshes an expired token transparently and the request succeeds with the new token", function()
 		local seen_auth_on_ping = {}
 		double = HttpDouble.new({
@@ -473,73 +534,63 @@ describe("client transparent token refresh (expired -> refresh -> retry)", funct
 		got.client:disconnect()
 	end)
 
-	it("surfaces a terminal re-auth-required error when the refresh token is revoked (no infinite retry)", function()
-		local ping_attempts = 0
-		double = HttpDouble.new({
-			on_request = function(method, path, rest)
-				if method == "POST" and path == "/token" then
-					-- Refresh token revoked: invalid_grant is terminal.
-					return {
-						status = 400,
-						body = vim.json.encode({ error = "invalid_grant", error_description = "revoked" }),
-					}
-				end
-				if method == "POST" and path == "/mcp" then
-					local ok, decoded = pcall(vim.json.decode, rest)
-					if ok and decoded.method == "initialize" then
+	it(
+		"surfaces a terminal re-auth-required error at connect time when the refresh token is revoked (no dial attempted)",
+		function()
+			local initialize_attempts = 0
+			double = HttpDouble.new({
+				on_request = function(method, path, rest)
+					if method == "POST" and path == "/token" then
+						-- Refresh token revoked: invalid_grant is terminal.
+						return {
+							status = 400,
+							body = vim.json.encode({ error = "invalid_grant", error_description = "revoked" }),
+						}
+					end
+					if method == "POST" and path == "/mcp" then
+						local ok, decoded = pcall(vim.json.decode, rest)
+						if ok and decoded.method == "initialize" then
+							initialize_attempts = initialize_attempts + 1
+						end
 						return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
 					end
-					ping_attempts = ping_attempts + 1
-					return {
-						status = 200,
-						body = vim.json.encode({ jsonrpc = "2.0", id = decoded.id, result = { pong = true } }),
-					}
-				end
-				return { status = 404, body = "" }
-			end,
-		})
+					return { status = 404, body = "" }
+				end,
+			})
 
-		local store = seed_expired_store(double.url .. "/token", { refresh_token = "SUPER-SECRET-refresh" })
+			local store = seed_expired_store(double.url .. "/token", { refresh_token = "SUPER-SECRET-refresh" })
 
-		local got
-		client.connect({
-			url = double.url .. "/mcp",
-			auth = { token_store = store },
-		}, {
-			on_connect = function(c, e)
-				got = { client = c, err = e }
-			end,
-		})
-		assert.is_true(wait_for(function()
-			return got ~= nil
-		end, 3000))
-		assert.is_nil(got.err)
+			local got
+			client.connect({
+				url = double.url .. "/mcp",
+				auth = { token_store = store },
+			}, {
+				on_connect = function(c, e)
+					got = { client = c, err = e }
+				end,
+			})
+			assert.is_true(wait_for(function()
+				return got ~= nil
+			end, 3000))
 
-		local reply
-		got.client:request({ jsonrpc = "2.0", id = 8, method = "ping", params = {} }, function(err, result)
-			reply = { err = err, result = result }
-		end)
+			-- The stale, unrefreshable token is caught BEFORE dialing at all: a
+			-- distinct re-auth error, not a deceptive connect success that would
+			-- only fail later on the first real request.
+			assert.is_nil(got.client)
+			assert.is_not_nil(got.err)
+			assert.matches("re%-auth", got.err)
+			-- No connection was ever attempted: refresh failed first, no dial.
+			assert.are.equal(0, initialize_attempts)
+			-- The secret refresh token never leaks into the surfaced error.
+			assert.is_nil(got.err:find("SUPER-SECRET-refresh", 1, true))
 
-		assert.is_true(wait_for(function()
-			return reply ~= nil
-		end, 3000))
-		-- A distinct re-auth error, not a hang and not a success.
-		assert.is_not_nil(reply.err)
-		assert.is_nil(reply.result)
-		assert.matches("re%-auth", reply.err)
-		-- The request was NEVER sent to the hub: refresh failed first, no retry.
-		assert.are.equal(0, ping_attempts)
-		-- The secret refresh token never leaks into the surfaced error.
-		assert.is_nil(reply.err:find("SUPER-SECRET-refresh", 1, true))
-
-		-- Give any (erroneous) retry a chance to fire; there must be none.
-		vim.wait(150, function()
-			return false
-		end)
-		assert.are.equal(0, ping_attempts)
-
-		got.client:disconnect()
-	end)
+			-- Give any (erroneous) retry a chance to fire; there must be none.
+			vim.wait(150, function()
+				return false
+			end)
+			assert.are.equal(0, initialize_attempts)
+		end
+	)
 
 	it("does not refresh when the configured token is still valid (single request, no /token hit)", function()
 		local token_hits = 0
@@ -710,6 +761,16 @@ describe("client concurrent refresh coalescing (single-flight)", function()
 			return got ~= nil
 		end, 3000))
 		assert.is_nil(got.err)
+		-- client.connect() itself now refreshes a stored-but-expired token
+		-- before dialing, so the batch below starts from an ALREADY-fresh
+		-- token (one /token hit already spent here) unless re-expired.
+		assert.are.equal(1, token_hits)
+
+		-- Re-expire the store (keeping the CURRENT, just-rotated refresh
+		-- token, so the double's reuse-detection still accepts it) to
+		-- recreate the scenario this test exercises: N concurrent requests
+		-- all reaching ensure_fresh_token while the token is expired.
+		store:save(vim.tbl_extend("force", store:load(), { expires_at = os.time() - 1 }))
 
 		-- Fire N requests in a tight loop, exactly like codecompanion.lua's
 		-- resources/read fan-out: each is dispatched before any callback runs, so
@@ -726,8 +787,10 @@ describe("client concurrent refresh coalescing (single-flight)", function()
 			return #replies == N
 		end, 3000))
 
-		-- (1) The token endpoint was hit exactly ONCE for the whole batch.
-		assert.are.equal(1, token_hits)
+		-- The token endpoint was hit exactly once more for the whole batch
+		-- (plus the one already spent at connect time above): single-flight
+		-- coalescing, not N independent grants.
+		assert.are.equal(2, token_hits)
 		-- (2) Every one of the N concurrent requests succeeded; none spuriously
 		--     surfaced a re-auth error.
 		assert.are.equal(N, #replies)

@@ -809,30 +809,24 @@ local function make_entry_methods(entry)
 	end
 end
 
---- Connect to a hub and register a managed client. Mirrors init.connect's
---- config/opts split, but returns the richer, reconnecting client object.
+--- Dial the hub and, on success, build and register the managed client entry.
+--- Split out from `M.connect` so the caller can refresh a stored-but-expired
+--- token first (see `M.connect` below) and only then run the actual dial --
+--- by the time this runs, `store:load()` (if any) is assumed already current.
 ---
---- @param config table  url, name, client_version, capabilities, headers,
----   timeout, an optional `reconnect` sub-table (initial_delay, max_delay,
----   growth_factor, max_attempts) forwarded to the machine, and an optional
----   `auth` sub-table `{ token_store = <TokenStore> }`: when present, the stored
----   bearer token is attached to every request and refreshed transparently on
----   expiry (see ensure_fresh_token). Consistent with how `headers`/`reconnect`
----   are optional sub-tables; absent it is the zero-overhead non-OAuth path.
+--- @param config table  see `M.connect`
 --- @param opts table  on_connect(client|nil, err|nil)
-function M.connect(config, opts)
-	assert(type(config) == "table", "config table is required")
-	assert(type(config.url) == "string" and config.url ~= "", "config.url is required")
-	opts = opts or {}
-	assert(type(opts.on_connect) == "function", "opts.on_connect is required")
-
+--- @param store table|nil  the resolved TokenStore, already refreshed if it
+---   was expired -- passed through rather than re-read from `config.auth` so
+---   the refresh-then-dial sequencing in `M.connect` has exactly one place
+---   that decides which store applies.
+local function do_connect(config, opts, store)
 	-- Optional OAuth identity: a TokenStore the client consults and updates. When
 	-- configured, seed the shared config.headers table with the currently-stored
 	-- bearer so the initialize handshake, the R12 gate below, and every request
 	-- see it. (config.headers is the one table threaded verbatim into every
 	-- transport (re)construction, so mutating it in place keeps auth current
 	-- across reconnects -- the same mechanism a later refresh reuses.)
-	local store = config.auth and config.auth.token_store or nil
 	if store then
 		config.headers = config.headers or {}
 		token_store.apply_to_headers(config.headers, store:load())
@@ -933,6 +927,55 @@ function M.connect(config, opts)
 
 		opts.on_connect(client_object, nil)
 	end)
+end
+
+--- Connect to a hub and register a managed client. Mirrors init.connect's
+--- config/opts split, but returns the richer, reconnecting client object.
+---
+--- @param config table  url, name, client_version, capabilities, headers,
+---   timeout, an optional `reconnect` sub-table (initial_delay, max_delay,
+---   growth_factor, max_attempts) forwarded to the machine, and an optional
+---   `auth` sub-table `{ token_store = <TokenStore> }`: when present, the stored
+---   bearer token is attached to every request and refreshed transparently on
+---   expiry (see ensure_fresh_token). Consistent with how `headers`/`reconnect`
+---   are optional sub-tables; absent it is the zero-overhead non-OAuth path.
+--- @param opts table  on_connect(client|nil, err|nil)
+function M.connect(config, opts)
+	assert(type(config) == "table", "config table is required")
+	assert(type(config.url) == "string" and config.url ~= "", "config.url is required")
+	opts = opts or {}
+	assert(type(opts.on_connect) == "function", "opts.on_connect is required")
+
+	local store = config.auth and config.auth.token_store or nil
+
+	-- A stored-but-expired token would otherwise be seeded into config.headers
+	-- verbatim (do_connect) and dialed against the hub as-is: a real hub
+	-- correctly answers 401, which is not one of detect.lua's
+	-- legacy-transport-fallback statuses, so it surfaces as a bare,
+	-- unrecoverable connect failure -- even though the refresh token sitting
+	-- right here would very likely have worked. This is the single most
+	-- common real trigger for token expiry (an access token that outlives one
+	-- Neovim session but not the gap until the next one), and it is exactly
+	-- the transparent-refresh experience `ensure_fresh_token` already
+	-- provides for every request issued AFTER a successful connect -- this
+	-- closes the one gap in the initial dial itself.
+	if store then
+		local status = store:status()
+		if status.has_token and status.expired then
+			return refresh.refresh(store:load(), function(new_token, err)
+				if err then
+					return opts.on_connect(
+						nil,
+						string.format("stored token is expired and refresh failed: %s", tostring(err))
+					)
+				end
+				store:save(new_token)
+				do_connect(config, opts, store)
+			end)
+		end
+	end
+
+	do_connect(config, opts, store)
 end
 
 --- Register a non-remote (e.g. native, in-process) client object into the

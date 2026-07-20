@@ -146,6 +146,26 @@ describe("config.setup (orchestration)", function()
 			assert.are.equal(record.token_store, calls[1].auth.token_store)
 		end)
 
+		it(
+			"regression: a global token_store.key is namespaced per-hub, never used verbatim, so two non-localhost hubs never collide onto the same stored token",
+			function()
+				stub_connect()
+				config.setup({
+					hubs = {
+						remote_a = { url = "https://hub-a.example.com/mcp" },
+						remote_b = { url = "https://hub-b.example.com/mcp" },
+					},
+					token_store = { backend = "file", data_home = vim.fn.tempname(), key = "shared" },
+				})
+				local store_a = config.get_hub("remote_a").token_store
+				local store_b = config.get_hub("remote_b").token_store
+				assert.is_not_nil(store_a)
+				assert.is_not_nil(store_b)
+				assert.are_not.equal(store_a.key, store_b.key)
+				assert.are_not.equal(store_a:path(), store_b:path())
+			end
+		)
+
 		it("does not overwrite a caller-supplied token_store on a hub", function()
 			local calls = stub_connect()
 			local mine = require("mcphub-neovim.auth.token_store").new({
