@@ -218,6 +218,52 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 		assert.are.equal('{"text":"hello"}', got_output.data)
 	end)
 
+	it(
+		"regression: unwrap_result must not strip a native tool's own {result=...} payload",
+		function()
+			native.register({
+				name = "result-shaped-native",
+				tools = {
+					lookup = function()
+						return { result = { value = 42, unit = "kg" } }
+					end,
+				},
+			})
+
+			local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+			codecompanion_adapter.setup({})
+
+			local all_tools = fake_mcp.get_registered_tools()
+
+			local lookup_name
+			for name in pairs(all_tools) do
+				if name:match("lookup$") then
+					lookup_name = name
+				end
+			end
+			assert.is_not_nil(lookup_name, "expected a lookup-derived tool to be registered")
+
+			local resolved = all_tools[lookup_name].callback()
+
+			local got_output
+			resolved.cmds[1]({}, {}, {
+				output_cb = function(output)
+					got_output = output
+				end,
+			})
+
+			assert.is_not_nil(got_output)
+			assert.are.equal("success", got_output.status)
+			-- The native tool's own `result` key must survive intact: it is
+			-- application data, not a JSON-RPC envelope for unwrap_result to
+			-- strip -- only a genuine remote envelope also carries jsonrpc/id.
+			local decoded = vim.json.decode(got_output.data)
+			assert.is_table(decoded.result)
+			assert.are.equal(42, decoded.result.value)
+			assert.are.equal("kg", decoded.result.unit)
+		end
+	)
+
 	it("happy path: a tool call resolves through the adapter to a remote hub connection", function()
 		local stopped = false
 		local obj = { name = "remote-hub" }
@@ -640,7 +686,12 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 					end
 					vim.schedule(function()
 						if rpc_message.method == "prompts/list" then
+							-- Envelope-shaped reply, like a real remote hub -- jsonrpc/id
+							-- are what unwrap_result actually keys on (mirrors
+							-- avante_spec.lua's make_remote_prompt_double).
 							return callback(nil, {
+								jsonrpc = "2.0",
+								id = 1,
 								result = {
 									prompts = {
 										{
@@ -655,6 +706,8 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 							}, nil)
 						elseif rpc_message.method == "prompts/get" then
 							return callback(nil, {
+								jsonrpc = "2.0",
+								id = 1,
 								result = {
 									messages = {
 										{

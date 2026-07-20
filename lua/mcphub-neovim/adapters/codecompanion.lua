@@ -263,11 +263,21 @@ local prompts_cache = {}
 --- `{ tools = {...} }`); remote clients (U1/U2) deliver the full JSON-RPC
 --- envelope (`{ jsonrpc, id, result = { tools = {...} } }`). Local test doubles
 --- historically mimic the native/unwrapped shape, so the divergence only bites
---- against a real remote hub -- surfaced by U9. A remote envelope is
---- unambiguous (it carries a nested `result` table; native payloads for these
---- methods never do), so unwrap one level of `.result` when present.
+--- against a real remote hub -- surfaced by U9. A nested `result` table alone
+--- is NOT a reliable envelope signal: a native tool is an arbitrary,
+--- MCP-unaware Lua function, and its own payload can legitimately use
+--- `result` as an ordinary field name (e.g. a calc/lookup tool returning
+--- `{ result = { value = 42 } }`) -- unwrapping that would silently corrupt
+--- the tool's own data. Require the two fields that only a genuine JSON-RPC
+--- response carries (`jsonrpc`, `id`) alongside the nested `result` table
+--- before unwrapping.
 local function unwrap_result(result)
-	if type(result) == "table" and type(result.result) == "table" then
+	if
+		type(result) == "table"
+		and type(result.result) == "table"
+		and result.jsonrpc == "2.0"
+		and result.id ~= nil
+	then
 		return result.result
 	end
 	return result
