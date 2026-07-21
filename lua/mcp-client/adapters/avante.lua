@@ -45,6 +45,17 @@ local client = require("mcp-client.client")
 
 local M = {}
 
+--- Monotonic JSON-RPC id generator. Requests are correlated by
+--- `rpc_message.id` (client.lua's `entry._in_flight`, legacy_sse.lua's
+--- `_pending`), so two concurrent calls sharing an id would silently deliver
+--- a response to the wrong callback -- e.g. an overlapping `tools/list`
+--- refresh and `tools/call`. Never reused for the life of the session.
+local next_request_id = 0
+local function new_request_id()
+	next_request_id = next_request_id + 1
+	return next_request_id
+end
+
 --- Normalize a client `request()` result to the bare MCP payload. A native
 --- client returns the handler's value directly (e.g. `{ tools = {...} }`); a
 --- remote client returns the full JSON-RPC envelope (`{ jsonrpc, id, result
@@ -77,7 +88,7 @@ local function refresh_client_tools(mcp_client)
 	local ok, err = pcall(function()
 		mcp_client:request({
 			jsonrpc = "2.0",
-			id = 1,
+			id = new_request_id(),
 			method = "tools/list",
 			-- vim.empty_dict(), not {}: an empty Lua table serializes to a JSON
 			-- array `[]`, which a strict real server rejects -- MCP requires
@@ -156,7 +167,7 @@ local function build_tool_spec(mcp_client, tool_info)
 			local ok, call_err = pcall(function()
 				mcp_client:request({
 					jsonrpc = "2.0",
-					id = 1,
+					id = new_request_id(),
 					method = "tools/call",
 					-- arguments defaults to vim.empty_dict() (not {}) so a
 					-- zero-argument tool call serializes `arguments` as a JSON
@@ -268,7 +279,7 @@ local function refresh_client_prompts(mcp_client)
 	local ok, err = pcall(function()
 		mcp_client:request({
 			jsonrpc = "2.0",
-			id = 1,
+			id = new_request_id(),
 			method = "prompts/list",
 			-- vim.empty_dict(), not {}, for the same reason as tools/list above:
 			-- MCP requires `params` to be a JSON object, and a strict real server
@@ -355,7 +366,7 @@ local function build_prompt_command(mcp_client, prompt_info)
 			local ok, call_err = pcall(function()
 				mcp_client:request({
 					jsonrpc = "2.0",
-					id = 1,
+					id = new_request_id(),
 					method = "prompts/get",
 					params = { name = prompt_info.name, arguments = arguments },
 				}, function(err, result, _response)

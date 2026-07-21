@@ -150,6 +150,10 @@ local function connect_server(name, server_config, store_opts)
 					local auth_status = store:status()
 					if not auth_status.has_token then
 						-- Fail-closed refusal: no credential configured at all.
+						-- The snippet below saves to store.key (the resolved,
+						-- possibly-namespaced key), not the bare server name --
+						-- an `opts.token_store.key` prefix would otherwise make
+						-- this snippet save the token where setup() never looks.
 						msg = msg
 							.. "\n"
 							.. string.format(
@@ -160,7 +164,7 @@ local function connect_server(name, server_config, store_opts)
 									.. "  end)\n"
 									.. "then re-run setup() (or restart Neovim).",
 								server_config.url,
-								name
+								store.key
 							)
 					elseif auth_status.expired then
 						-- Stored token exists but refresh (already attempted before
@@ -177,7 +181,7 @@ local function connect_server(name, server_config, store_opts)
 									.. "then re-run setup() (or restart Neovim) -- or, if this looks like a "
 									.. "transient network failure rather than a revoked token, just retry.",
 								server_config.url,
-								name
+								store.key
 							)
 					end
 				end
@@ -211,6 +215,11 @@ function M.setup(opts)
 	opts = opts or {}
 	assert(type(opts) == "table", "setup: opts must be a table")
 
+	-- Disconnect and clear every previously-registered client first, so a
+	-- second setup() call (the README documents this as how you re-apply
+	-- config) replaces the prior roster instead of accumulating duplicate
+	-- connections/native registrations alongside it.
+	mcp_client._reset_registry()
 	M._reset()
 
 	-- Native, in-process servers registered first so they are already in

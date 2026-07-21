@@ -72,6 +72,57 @@ describe("transport.detect", function()
 		result.client:close()
 	end)
 
+	it("regression: sends MCP-Protocol-Version on requests after a successful streamable_http handshake", function()
+		local seen_header
+		double = HttpDouble.new({
+			on_request = function(method, path, rest, head)
+				if method == "POST" and path == "/mcp" then
+					local ok, decoded = pcall(vim.json.decode, rest)
+					if ok and decoded.method == "initialize" then
+						return {
+							status = 200,
+							headers = { ["Content-Type"] = "application/json" },
+							body = initialize_result_body(),
+						}
+					end
+					-- A later request, after the handshake: capture the header
+					-- the real client actually sent.
+					seen_header = head and head:match("[Mm][Cc][Pp]%-[Pp]rotocol%-[Vv]ersion:%s*([^\r\n]+)")
+					return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 2, result = {} }) }
+				end
+				return { status = 404, body = "" }
+			end,
+		})
+
+		local result
+		local done = false
+		detect.connect({
+			url = double.url .. "/mcp",
+			request = INITIALIZE_REQUEST,
+			timeout = 2000,
+		}, function(r, _e)
+			result = r
+			done = true
+		end)
+
+		assert.is_true(wait_for(function()
+			return done
+		end))
+		assert.is_not_nil(result)
+
+		local reply
+		result.client:request({ jsonrpc = "2.0", id = 2, method = "ping", params = {} }, function(_err, r)
+			reply = r
+		end)
+
+		assert.is_true(wait_for(function()
+			return reply ~= nil
+		end))
+		assert.are.equal("2025-03-26", seen_header)
+
+		result.client:close()
+	end)
+
 	for _, fallback_status in ipairs({ 400, 404, 405 }) do
 		it("falls back to legacy_sse when POST returns " .. fallback_status, function()
 			double = HttpDouble.new({

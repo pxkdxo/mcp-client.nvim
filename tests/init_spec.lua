@@ -122,4 +122,41 @@ describe("mcp-client (public entrypoint)", function()
 			mcphub.connect({}, {})
 		end)
 	end)
+
+	it("regression: an omitted capabilities encodes as a JSON object, not an array", function()
+		local seen_body
+		double = HttpDouble.new({
+			on_request = function(method, path, rest)
+				if method == "POST" and path == "/mcp" then
+					seen_body = rest
+					return {
+						status = 200,
+						headers = { ["Content-Type"] = "application/json" },
+						body = initialize_result_body(),
+					}
+				end
+				return { status = 404, body = "" }
+			end,
+		})
+
+		local done = false
+		mcphub.connect({ url = double.url .. "/mcp" }, {
+			on_connect = function(client, _err)
+				if client then
+					client.close()
+				end
+				done = true
+			end,
+		})
+
+		assert.is_true(wait_for(function()
+			return done
+		end))
+		assert.is_not_nil(seen_body)
+		-- vim.json.decode can't distinguish `{}` from `[]` once decoded back
+		-- into an empty Lua table -- check the raw wire body instead. A
+		-- strict server rejects `"capabilities":[]`; MCP requires an object.
+		assert.is_nil(seen_body:find('"capabilities":%[%]', 1))
+		assert.is_not_nil(seen_body:find('"capabilities":{}', 1, true))
+	end)
 end)

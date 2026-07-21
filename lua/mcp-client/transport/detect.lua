@@ -95,7 +95,7 @@ local function discover_legacy(url, headers, on_done)
 	})
 end
 
-local function finalize_streamable_http(response, url, headers, on_done)
+local function finalize_streamable_http(response, url, headers, on_done, requested_protocol_version)
 	-- A POST response may be a direct `application/json` body, or a
 	-- single-event `text/event-stream` carrying the JSON-RPC message in
 	-- its `data:` field -- both are spec-legal, so try JSON first and
@@ -117,17 +117,25 @@ local function finalize_streamable_http(response, url, headers, on_done)
 	end
 
 	local session_id = transport_util.find_header(response.headers, "Mcp-Session-Id")
+	-- The InitializeResult declares the protocol version the server will use
+	-- for this session; echo it back via MCP-Protocol-Version on every later
+	-- request (falling back to what the client itself requested if the
+	-- server's response omits it) -- servers that require the header on every
+	-- request, not just the handshake, otherwise fail every request after it.
+	local protocol_version = (decoded.result and decoded.result.protocolVersion) or requested_protocol_version
 
 	local client = StreamableHttp.new({
 		url = url,
 		session_id = session_id,
 		headers = headers,
+		protocol_version = protocol_version,
 	})
 
 	on_done({
 		transport = "streamable_http",
 		client = client,
 		session_id = session_id,
+		protocol_version = protocol_version,
 		initialize_result = decoded,
 	}, nil)
 end
@@ -141,9 +149,10 @@ end
 ---   On success, result = {
 ---     transport = "streamable_http"|"legacy_sse",
 ---     client = <transport object implementing the common interface>,
----     session_id = string|nil,      -- streamable_http only
----     endpoint = string|nil,        -- legacy_sse only
----     initialize_result = table,    -- the decoded InitializeResult (streamable_http only)
+---     session_id = string|nil,       -- streamable_http only
+---     protocol_version = string|nil, -- streamable_http only
+---     endpoint = string|nil,         -- legacy_sse only
+---     initialize_result = table,     -- the decoded InitializeResult (streamable_http only)
 ---   }
 function M.connect(opts, on_done)
 	local url = assert(opts.url, "url is required")
@@ -165,7 +174,7 @@ function M.connect(opts, on_done)
 			end
 
 			if response.status >= 200 and response.status < 300 then
-				return finalize_streamable_http(response, url, headers, on_done)
+				return finalize_streamable_http(response, url, headers, on_done, request.params.protocolVersion)
 			end
 
 			if FALLBACK_STATUSES[response.status] then
