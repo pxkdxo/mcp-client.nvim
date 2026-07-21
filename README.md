@@ -6,6 +6,8 @@ LSP-inspired core and thin adapters for [Avante][avante] and
 Streamable HTTP (with a legacy HTTP+SSE fallback), hosts native in-process
 servers, and exposes their tools/resources/prompts to your AI plugins — all
 through the standard MCP endpoint, with no server-proprietary management API.
+Any spec-compliant server works; [mcphub][mcphub] is a maintained example of a
+multi-server hub if you want one.
 
 - **Module name:** `require("mcp-client")` (deliberately *not* `require("mcphub")`).
 - **Requirements:** Neovim 0.10+ and [`curl`][curl] on `PATH` (the transports and
@@ -307,3 +309,4 @@ Each client object exposes `id`, `name`, `config`, `is_stopped()`,
 [codecompanion]: https://github.com/olimorris/codecompanion.nvim
 [lazy]: https://github.com/folke/lazy.nvim
 [curl]: https://curl.se/
+[mcphub]: https://github.com/samanhappy/mcphub

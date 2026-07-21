@@ -8,7 +8,10 @@
 --   * LIVE (skips gracefully when the endpoint is unreachable): protocol
 --     parity against ravitemer/mcp-hub (:40032) and samanhappy/mcphub (:3000),
 --     and the successful-auth path against a self-signed-TLS non-localhost
---     double.
+--     double. The two hubs are complementary, not redundant: ravitemer covers
+--     the legacy-SSE transport and a strict-JSON edge case; samanhappy covers
+--     Streamable HTTP and is the more actively maintained of the two, but
+--     neither alone exercises everything this client needs to validate.
 --
 -- Every live block probes reachability first and skips with a visible reason
 -- (pending("...")) rather than hard-failing, so the suite stays green without
