@@ -37,6 +37,7 @@ end
 describe("commands (MCPAuth target resolution + completion)", function()
 	after_each(function()
 		config._reset()
+		commands._reset()
 	end)
 
 	describe("resolve_target", function()
@@ -158,7 +159,7 @@ describe("commands (MCPAuth target resolution + completion)", function()
 		end)
 	end)
 
-	describe("_authenticate", function()
+	describe("authenticate", function()
 		local real_run_flow, real_connect, real_get_clients
 
 		before_each(function()
@@ -200,7 +201,7 @@ describe("commands (MCPAuth target resolution + completion)", function()
 		--- server name. A name-derived id would make a second `connect()` for
 		--- the same name silently overwrite the prior registry slot by id
 		--- collision -- passing the KTD7 "exactly one live client" assertion
-		--- below for the wrong reason, without ever exercising `_authenticate`'s
+		--- below for the wrong reason, without ever exercising `authenticate`'s
 		--- own disconnect-then-`_forget` teardown of the stale entry.
 		local function stub_client_connect(opts)
 			opts = opts or {}
@@ -263,7 +264,7 @@ describe("commands (MCPAuth target resolution + completion)", function()
 				local connect_calls = stub_client_connect()
 
 				local notifications = capture_notifications(function()
-					commands._authenticate("needs_auth")
+					commands.authenticate("needs_auth")
 				end)
 
 				assert.are.equal(1, #run_flow_calls)
@@ -306,7 +307,7 @@ describe("commands (MCPAuth target resolution + completion)", function()
 				local run_flow_calls = stub_run_flow({ token = { access_token = "rotated-token" } })
 
 				capture_notifications(function()
-					commands._authenticate("already_connected")
+					commands.authenticate("already_connected")
 				end)
 
 				assert.are.equal(1, #run_flow_calls)
@@ -355,7 +356,7 @@ describe("commands (MCPAuth target resolution + completion)", function()
 				local connect_calls = stub_client_connect()
 
 				capture_notifications(function()
-					commands._authenticate("fresh_target")
+					commands.authenticate("fresh_target")
 				end)
 
 				assert.are.equal(1, #get_clients_calls)
@@ -384,7 +385,7 @@ describe("commands (MCPAuth target resolution + completion)", function()
 				local connect_calls = stub_client_connect()
 
 				local notifications = capture_notifications(function()
-					commands._authenticate("flow_fails")
+					commands.authenticate("flow_fails")
 				end)
 
 				assert.are.equal(0, #store.saved)
@@ -415,7 +416,7 @@ describe("commands (MCPAuth target resolution + completion)", function()
 				stub_client_connect({ fail = "connection refused" })
 
 				local notifications = capture_notifications(function()
-					commands._authenticate("reconnect_fails")
+					commands.authenticate("reconnect_fails")
 				end)
 
 				assert.are.equal(1, #store.saved)
@@ -445,7 +446,7 @@ describe("commands (MCPAuth target resolution + completion)", function()
 			stub_client_connect({ fail = "connection refused" })
 
 			local notifications = capture_notifications(function()
-				commands._authenticate("secret_headers")
+				commands.authenticate("secret_headers")
 			end)
 
 			for _, n in ipairs(notifications) do
@@ -453,6 +454,41 @@ describe("commands (MCPAuth target resolution + completion)", function()
 				assert.is_nil(n.msg:find("Bearer", 1, true))
 			end
 		end)
+
+		it(
+			"concurrency guard: a second authenticate() call for a name already in flight is rejected, not raced",
+			function()
+				local store = fake_store({ has_token = false, expired = false })
+				local connect_config = {
+					url = "https://server.example.com/mcp",
+					name = "concurrent_target",
+					auth = { token_store = store },
+				}
+				config._record_hub("concurrent_target", {
+					url = connect_config.url,
+					token_store = store,
+					connect_config = connect_config,
+				})
+
+				-- A run_flow double that never calls back, simulating an
+				-- in-progress browser-based OAuth flow the user hasn't finished.
+				local run_flow_calls = {}
+				dcr.run_flow = function(opts, _callback)
+					table.insert(run_flow_calls, opts)
+				end
+
+				local notifications = capture_notifications(function()
+					commands.authenticate("concurrent_target")
+					commands.authenticate("concurrent_target")
+				end)
+
+				-- Only the first call actually dispatched a flow; the second was
+				-- rejected before reaching dcr.run_flow at all.
+				assert.are.equal(1, #run_flow_calls)
+				assert.are.equal(1, #notifications)
+				assert.is_not_nil(notifications[1].msg:lower():find("already in progress"))
+			end
+		)
 	end)
 
 	describe("register", function()
@@ -485,5 +521,64 @@ describe("commands (MCPAuth target resolution + completion)", function()
 
 			vim.api.nvim_create_user_command = real_create
 		end)
+
+		--- Captures the real callback register() hands to nvim_create_user_command,
+		--- so these specs exercise on_mcpauth itself (not just resolve_target in
+		--- isolation) -- the callback is the only path a real `:MCPAuth` invocation
+		--- actually goes through.
+		local function captured_callback()
+			local created
+			local real_create = vim.api.nvim_create_user_command
+			vim.api.nvim_create_user_command = function(_name, callback, _opts)
+				created = callback
+			end
+			commands.register()
+			vim.api.nvim_create_user_command = real_create
+			return created
+		end
+
+		it(
+			"invoking the registered callback with no args reports resolve_target's error when nothing is configured",
+			function()
+				local callback = captured_callback()
+
+				local notifications = {}
+				local real_notify = vim.notify
+				vim.notify = function(msg, level)
+					table.insert(notifications, { msg = msg, level = level })
+				end
+				local ok, err = pcall(callback, { args = "" })
+				vim.notify = real_notify
+				assert.is_true(ok, err)
+
+				assert.are.equal(1, #notifications)
+				assert.is_not_nil(notifications[1].msg:lower():find("nothing to authenticate"))
+			end
+		)
+
+		it(
+			"invoking the registered callback with an explicit name dispatches straight to authenticate (dcr.run_flow fires)",
+			function()
+				config._record_hub("registered_target", {
+					url = "https://server.example.com/mcp",
+					token_store = fake_store({ has_token = false, expired = false }),
+					connect_config = { url = "https://server.example.com/mcp", name = "registered_target" },
+				})
+
+				local run_flow_calls = {}
+				local real_run_flow = dcr.run_flow
+				dcr.run_flow = function(opts, _callback)
+					table.insert(run_flow_calls, opts)
+				end
+
+				local callback = captured_callback()
+				local ok, err = pcall(callback, { args = "registered_target" })
+				dcr.run_flow = real_run_flow
+				assert.is_true(ok, err)
+
+				assert.are.equal(1, #run_flow_calls)
+				assert.are.equal("https://server.example.com/mcp", run_flow_calls[1].server_url)
+			end
+		)
 	end)
 end)

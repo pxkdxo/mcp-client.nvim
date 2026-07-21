@@ -203,8 +203,18 @@ left untouched. `:MCPAuth` discovers the server's authorization server,
 registers a client, opens your browser to authorize, and completes on a
 loopback redirect.
 
-For authenticating before ever calling `setup()`, or scripting outside an Ex
-command, the underlying flow is also directly callable:
+For scripting outside an Ex command (after `setup()` has already run), call the
+same action `:MCPAuth` itself dispatches to:
+
+```lua
+require("mcp-client.commands").authenticate("remote_server")
+```
+
+This reuses the server's existing store (never a reconstructed key) and its
+retained connection settings, exactly like `:MCPAuth remote_server` would.
+
+Before ever calling `setup()`, there is no registered server state yet to
+reuse, so the underlying OAuth flow is directly callable instead:
 
 ```lua
 local dcr   = require("mcp-client.auth.dcr")

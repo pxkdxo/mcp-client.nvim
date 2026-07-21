@@ -5,7 +5,7 @@
 --- definite target server name or a clear, `vim.notify`-reported reason why
 --- none was chosen. It reads `config.state().servers` (the same record
 --- `health.lua` reads back from `config.setup()`/`config._record_hub`) and
---- never triggers the OAuth flow itself -- see `M._authenticate` below.
+--- never triggers the OAuth flow itself -- see `M.authenticate` below.
 ---
 --- "Needs authentication" (the no-argument auto-resolve/list predicate) means
 --- a server has a non-nil `token_store` whose `status().has_token` is false,
@@ -35,9 +35,23 @@ end
 
 local M = {}
 
+--- Names with an authenticate() call currently in flight (dcr.run_flow
+--- dispatched, no terminal callback fired yet). Guards against two
+--- concurrent `:MCPAuth <name>` invocations for the same server racing each
+--- other's token save and registry teardown/reconnect.
+local in_flight = {}
+
 --- The actual OAuth-flow-triggering + reconnect action, given a resolved
 --- server name. `register()`'s command callback calls this after
---- `resolve_target` returns a definite name.
+--- `resolve_target` returns a definite name. Public (not test-only, despite
+--- this module's other underscore-prefixed helpers being internal seams) --
+--- it is the one thing a human typing `:MCPAuth` actually causes to happen,
+--- and the supported way to trigger it non-interactively/from a script.
+---
+--- A name with a call already in flight is rejected with a notification
+--- instead of starting a second `dcr.run_flow` -- otherwise two overlapping
+--- calls could both tear down and reconnect the same registry entry, or race
+--- each other's token save.
 ---
 --- Runs `dcr.run_flow` unconditionally (no short-circuit on an already-valid
 --- token -- explicit-name resolution never applies the validity filter, R5,
@@ -57,8 +71,9 @@ local M = {}
 --- This makes re-authenticating an already-connected server replace rather
 --- than duplicate the registry entry (KTD7) -- a no-op when there is no live
 --- client yet, the common case. Finally reconnects using the exact retained
---- `connect_config` (never a freshly-built minimal one), reporting the
---- reconnect's own success/failure distinctly from an OAuth failure.
+--- `connect_config` (fetched via `config()._connect_config(name)`, the
+--- internal-only accessor -- never a freshly-built minimal one), reporting
+--- the reconnect's own success/failure distinctly from an OAuth failure.
 ---
 --- Failure notifications reuse `dcr.run_flow`'s returned error string as-is
 --- (that module's error strings are secret-free by construction) rather than
@@ -66,12 +81,22 @@ local M = {}
 --- interpolates `connect_config` or `connect_config.headers` wholesale
 --- (KTD2) -- only the server name and error strings.
 --- @param name string  a server name already validated by resolve_target
-function M._authenticate(name)
+function M.authenticate(name)
+	if in_flight[name] then
+		vim.notify(
+			string.format("mcp-client: authentication for %q is already in progress.", name),
+			vim.log.levels.WARN
+		)
+		return
+	end
+	in_flight[name] = true
+
 	local record = config().get_hub(name)
-	local connect_config = record.connect_config
+	local connect_config = config()._connect_config(name)
 
 	dcr().run_flow({ server_url = connect_config.url }, function(token, err)
 		if err then
+			in_flight[name] = nil
 			vim.notify(string.format("mcp-client: authentication for %q failed: %s", name, err), vim.log.levels.WARN)
 			return
 		end
@@ -85,6 +110,7 @@ function M._authenticate(name)
 
 		mcp_client().connect(connect_config, {
 			on_connect = function(_client_object, connect_err)
+				in_flight[name] = nil
 				if connect_err then
 					vim.notify(
 						string.format(
@@ -207,9 +233,9 @@ function M.complete(_arg_lead, _cmd_line, _cursor_pos)
 end
 
 --- `:MCPAuth [server-name]` callback: resolves the target and, on a definite
---- target, hands it to `M._authenticate` (U3's seam). On no definite target,
---- reports `resolve_target`'s error the same way the plugin already reports
---- connect errors (KTD4: `vim.notify`, no interactive picker).
+--- target, hands it to `M.authenticate`. On no definite target, reports
+--- `resolve_target`'s error the same way the plugin already reports connect
+--- errors (KTD4: `vim.notify`, no interactive picker).
 --- @param cmd_opts table  the table `nvim_create_user_command`'s callback receives
 local function on_mcpauth(cmd_opts)
 	local name = cmd_opts.args
@@ -221,7 +247,7 @@ local function on_mcpauth(cmd_opts)
 		vim.notify(err, vim.log.levels.WARN)
 		return
 	end
-	M._authenticate(target)
+	M.authenticate(target)
 end
 
 --- Register the `:MCPAuth [server-name]` Ex command. Called once from
@@ -234,6 +260,14 @@ function M.register()
 		complete = M.complete,
 		desc = "Run the OAuth authorization flow for a configured MCP server",
 	})
+end
+
+--- Clear the in-flight guard. Test-only -- lets specs isolate scenarios that
+--- deliberately leave a name "in flight" (an authenticate() call whose
+--- dcr.run_flow callback never fires) without leaking that state into later
+--- tests reusing the same server name.
+function M._reset()
+	in_flight = {}
 end
 
 return M

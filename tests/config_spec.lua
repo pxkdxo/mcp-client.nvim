@@ -169,12 +169,11 @@ describe("config.setup (orchestration)", function()
 					},
 					token_store = { backend = "file", data_home = vim.fn.tempname() },
 				})
-				local record = config.get_hub("remote")
-				assert.is_not_nil(record)
-				assert.is_not_nil(record.connect_config)
-				assert.are.same(calls[1], record.connect_config)
-				assert.are.same({ ["X-API-Key"] = "s3cr3t" }, record.connect_config.headers)
-				assert.are.same({ max_attempts = 5, backoff_ms = 250 }, record.connect_config.reconnect)
+				local connect_config = config._connect_config("remote")
+				assert.is_not_nil(connect_config)
+				assert.are.same(calls[1], connect_config)
+				assert.are.same({ ["X-API-Key"] = "s3cr3t" }, connect_config.headers)
+				assert.are.same({ max_attempts = 5, backoff_ms = 250 }, connect_config.reconnect)
 			end
 		)
 
@@ -185,11 +184,11 @@ describe("config.setup (orchestration)", function()
 				token_store = { backend = "file", data_home = vim.fn.tempname() },
 			})
 			local record = config.get_hub("remote")
-			assert.is_not_nil(record.connect_config)
-			assert.is_not_nil(record.connect_config.auth)
-			assert.are.equal(record.token_store, record.connect_config.auth.token_store)
+			local connect_config = config._connect_config("remote")
+			assert.is_not_nil(connect_config.auth)
+			assert.are.equal(record.token_store, connect_config.auth.token_store)
 			-- Also matches what was actually handed to client.connect.
-			assert.are.equal(calls[1].auth.token_store, record.connect_config.auth.token_store)
+			assert.are.equal(calls[1].auth.token_store, connect_config.auth.token_store)
 		end)
 
 		it("carries no auth sub-table in connect_config for a localhost server (no token store)", function()
@@ -197,9 +196,35 @@ describe("config.setup (orchestration)", function()
 			config.setup({
 				servers = { local_hub = { url = "http://localhost:9999" } },
 			})
-			local record = config.get_hub("local_hub")
-			assert.is_not_nil(record.connect_config)
-			assert.is_nil(record.connect_config.auth)
+			local connect_config = config._connect_config("local_hub")
+			assert.is_not_nil(connect_config)
+			assert.is_nil(connect_config.auth)
+		end)
+
+		it("get_hub/state never expose connect_config -- only _connect_config does", function()
+			stub_connect()
+			config.setup({
+				servers = {
+					remote = {
+						url = "https://server.example.com/mcp",
+						headers = { ["Authorization"] = "Bearer super-secret-value" },
+					},
+				},
+				token_store = { backend = "file", data_home = vim.fn.tempname() },
+			})
+
+			local record = config.get_hub("remote")
+			assert.is_nil(record.connect_config)
+
+			local state = config.state()
+			assert.is_nil(state.servers.remote.connect_config)
+
+			-- The sensitive field is reachable only through the internal accessor.
+			assert.is_not_nil(config._connect_config("remote"))
+			assert.are.same(
+				{ ["Authorization"] = "Bearer super-secret-value" },
+				config._connect_config("remote").headers
+			)
 		end)
 
 		it("auto-constructs a TokenStore for a non-localhost server with none supplied", function()
@@ -280,6 +305,26 @@ describe("config.setup (orchestration)", function()
 			})
 			assert.are.equal(mine, calls[1].auth.token_store)
 			assert.are.equal(mine, config.get_hub("remote").token_store)
+		end)
+	end)
+
+	describe("MCPAuth command registration", function()
+		it("setup() registers :MCPAuth via commands.register()", function()
+			local created = {}
+			local real_create = vim.api.nvim_create_user_command
+			vim.api.nvim_create_user_command = function(name, callback, opts)
+				table.insert(created, { name = name, callback = callback, opts = opts })
+			end
+
+			stub_connect()
+			local ok, err = pcall(config.setup, {
+				servers = { remote = { url = "https://server.example.com/mcp" } },
+			})
+			vim.api.nvim_create_user_command = real_create
+			assert.is_true(ok, err)
+
+			assert.are.equal(1, #created)
+			assert.are.equal("MCPAuth", created[1].name)
 		end)
 	end)
 

@@ -29,21 +29,47 @@ local state = {
 	native_servers = {}, ---@type string[]
 }
 
---- Public, read-only view of the setup record for health.lua.
---- @return table { servers = table<string, {url, token_store, connect_config}>, native_servers = string[] }
+--- Public, read-only view of the setup record for health.lua. Per-server
+--- entries expose only `{url, token_store}` -- never `connect_config`, which
+--- can carry a plaintext credential in `.headers`. Returns a fresh table
+--- (never the live internal one) so a caller cannot reach the withheld field
+--- by walking the returned object's metatable/internals either.
+--- @return table { servers = table<string, {url, token_store}>, native_servers = string[] }
 function M.state()
-	return state
+	local servers = {}
+	for name, record in pairs(state.servers) do
+		servers[name] = { url = record.url, token_store = record.token_store }
+	end
+	return { servers = servers, native_servers = state.native_servers }
 end
 
 --- Convenience accessor for one server's record (nil if not configured).
+--- Never exposes `connect_config` -- see `M._connect_config` below for the
+--- internal-only accessor that does.
 --- @param name string
---- @return table|nil { url, token_store, connect_config }
----   `connect_config` is the exact table `connect_server` built and passed to
----   `mcp_client.connect` -- retained so a later caller can reconnect this one
----   server exactly as `setup()` originally did. Its `auth.token_store` (when
----   present) is the same object as `token_store`, not a copy.
+--- @return table|nil { url, token_store }
 function M.get_hub(name)
-	return state.servers[name]
+	local record = state.servers[name]
+	if record == nil then
+		return nil
+	end
+	return { url = record.url, token_store = record.token_store }
+end
+
+--- Internal-only accessor for the exact table `connect_server` built and
+--- passed to `mcp_client.connect`, so `commands.lua`'s `authenticate` action
+--- can reconnect a server exactly as `setup()` originally did (including its
+--- `auth.token_store`, the same object as `get_hub(name).token_store`, not a
+--- copy). Deliberately **not** exposed via `get_hub`/`state()`: unlike
+--- `token_store` (an opaque object whose only read surface, `:status()`, is
+--- already redacted), `connect_config` is a plain table whose `.headers` can
+--- carry a plaintext credential (e.g. a custom `X-API-Key` header) -- so it
+--- must never be reachable through this module's public accessors.
+--- @param name string
+--- @return table|nil
+function M._connect_config(name)
+	local record = state.servers[name]
+	return record and record.connect_config or nil
 end
 
 --- Reset the setup record. Called by tests between specs, and internally at the
