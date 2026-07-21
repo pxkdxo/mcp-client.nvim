@@ -867,4 +867,20 @@ function M._reset_registry()
 	end
 end
 
+--- Fully remove one already-disconnected entry from the registry by id, so
+--- `get_clients()` no longer returns it at all.
+---
+--- `intentional_close()`/`obj:disconnect()` alone deliberately leave a
+--- stopped entry queryable -- see the doc comment above and
+--- `_reset_registry` above it -- so a caller that disconnects and replaces a
+--- single *named* client (rather than every client, like `_reset_registry`
+--- does on a repeated `setup()`) needs this to avoid `get_clients({name=...})`
+--- returning both the stale, already-disconnected entry and the freshly-
+--- connected replacement -- which pick order between the two would be
+--- undefined to a caller like `health.lua`'s `matches[1]`.
+--- @param id string  a client id already disconnected via `:disconnect()`
+function M._forget(id)
+	registry[id] = nil
+end
+
 return M

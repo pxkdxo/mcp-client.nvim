@@ -13,6 +13,7 @@
 --- server with no stored token fails closed at the transport gate (tls.lua)
 --- with an actionable error pointing at how to authenticate manually.
 
+local commands = require("mcp-client.commands")
 local mcp_client = require("mcp-client.client")
 local native = require("mcp-client.native")
 local tls = require("mcp-client.transport.tls")
@@ -24,21 +25,51 @@ local M = {}
 --- reporting record -- the live client roster is always re-read from
 --- `client.get_clients()`, never cached here.
 local state = {
-	servers = {}, ---@type table<string, { url: string, token_store: table|nil }>
+	servers = {}, ---@type table<string, { url: string, token_store: table|nil, connect_config: table|nil }>
 	native_servers = {}, ---@type string[]
 }
 
---- Public, read-only view of the setup record for health.lua.
+--- Public, read-only view of the setup record for health.lua. Per-server
+--- entries expose only `{url, token_store}` -- never `connect_config`, which
+--- can carry a plaintext credential in `.headers`. Returns a fresh table
+--- (never the live internal one) so a caller cannot reach the withheld field
+--- by walking the returned object's metatable/internals either.
 --- @return table { servers = table<string, {url, token_store}>, native_servers = string[] }
 function M.state()
-	return state
+	local servers = {}
+	for name, record in pairs(state.servers) do
+		servers[name] = { url = record.url, token_store = record.token_store }
+	end
+	return { servers = servers, native_servers = state.native_servers }
 end
 
 --- Convenience accessor for one server's record (nil if not configured).
+--- Never exposes `connect_config` -- see `M._connect_config` below for the
+--- internal-only accessor that does.
 --- @param name string
 --- @return table|nil { url, token_store }
 function M.get_hub(name)
-	return state.servers[name]
+	local record = state.servers[name]
+	if record == nil then
+		return nil
+	end
+	return { url = record.url, token_store = record.token_store }
+end
+
+--- Internal-only accessor for the exact table `connect_server` built and
+--- passed to `mcp_client.connect`, so `commands.lua`'s `authenticate` action
+--- can reconnect a server exactly as `setup()` originally did (including its
+--- `auth.token_store`, the same object as `get_hub(name).token_store`, not a
+--- copy). Deliberately **not** exposed via `get_hub`/`state()`: unlike
+--- `token_store` (an opaque object whose only read surface, `:status()`, is
+--- already redacted), `connect_config` is a plain table whose `.headers` can
+--- carry a plaintext credential (e.g. a custom `X-API-Key` header) -- so it
+--- must never be reachable through this module's public accessors.
+--- @param name string
+--- @return table|nil
+function M._connect_config(name)
+	local record = state.servers[name]
+	return record and record.connect_config or nil
 end
 
 --- Reset the setup record. Called by tests between specs, and internally at the
@@ -138,7 +169,7 @@ local function connect_server(name, server_config, store_opts)
 		connect_config.auth = vim.tbl_extend("force", server_config.auth or {}, { token_store = store })
 	end
 
-	state.servers[name] = { url = server_config.url, token_store = store }
+	state.servers[name] = { url = server_config.url, token_store = store, connect_config = connect_config }
 
 	mcp_client.connect(connect_config, {
 		on_connect = function(_client_object, err)
@@ -242,6 +273,12 @@ function M.setup(opts)
 	for name, server_config in pairs(collect_servers(opts)) do
 		connect_server(name, server_config, opts.token_store)
 	end
+
+	-- Register :MCPAuth once state is populated so its no-argument
+	-- resolution/completion see this setup()'s servers immediately.
+	-- nvim_create_user_command overwrites an already-defined command of the
+	-- same name, so a repeated setup() call is safe here.
+	commands.register()
 end
 
 return M

@@ -180,10 +180,41 @@ require("mcp-client").setup({
 
 The plugin **does not** auto-open a browser login flow on startup — that would
 prompt on every launch and is an undesigned UX surface for v1. When a
-non-localhost server has no stored token yet, the connection fails closed with a
-clear message, and you authenticate **once, manually**, using the OAuth 2.1
-Dynamic-Client-Registration flow (RFC 7591 + PKCE), then re-run `setup()` (or
-restart Neovim):
+non-localhost server has no stored token yet, the connection fails closed with
+a clear message, and you authenticate **explicitly**, using the OAuth 2.1
+Dynamic-Client-Registration flow (RFC 7591 + PKCE), via `:MCPAuth`:
+
+```vim
+:MCPAuth
+:MCPAuth remote_server
+```
+
+Run `:MCPAuth` with no argument and it resolves the target for you: if exactly
+one configured server currently needs authentication, it authenticates that
+one; if none do, it tells you there's nothing to do; if more than one does, it
+lists the candidates and asks you to re-invoke with an explicit name instead of
+guessing. Naming a server directly (`:MCPAuth remote_server`, tab-completable)
+always runs the flow for that server, even if it already has a valid,
+unexpired token — useful for rotating credentials early.
+
+On success, the new token is saved under the same store key `setup()` itself
+resolves, and only that server is reconnected — other configured servers are
+left untouched. `:MCPAuth` discovers the server's authorization server,
+registers a client, opens your browser to authorize, and completes on a
+loopback redirect.
+
+For scripting outside an Ex command (after `setup()` has already run), call the
+same action `:MCPAuth` itself dispatches to:
+
+```lua
+require("mcp-client.commands").authenticate("remote_server")
+```
+
+This reuses the server's existing store (never a reconstructed key) and its
+retained connection settings, exactly like `:MCPAuth remote_server` would.
+
+Before ever calling `setup()`, there is no registered server state yet to
+reuse, so the underlying OAuth flow is directly callable instead:
 
 ```lua
 local dcr   = require("mcp-client.auth.dcr")
@@ -199,14 +230,6 @@ dcr.run_flow({ server_url = "https://your-server.example.com/mcp" }, function(to
   vim.notify("MCP server authenticated; re-run setup() or restart Neovim.")
 end)
 ```
-
-`run_flow` discovers the server's authorization server, registers a client,
-opens your browser to authorize, and completes on a loopback redirect.
-
-> **Known gap (flagged for a future unit):** there is no `:MCPAuth`-style
-> command wrapping the snippet above yet — authentication is manual for now.
-> The fail-closed error message and this section point you at the working
-> mechanism in the meantime.
 
 ---
 
