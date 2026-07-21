@@ -25,22 +25,81 @@ local function config()
 	return require("mcp-client.config")
 end
 
+local function dcr()
+	return require("mcp-client.auth.dcr")
+end
+
+local function mcp_client()
+	return require("mcp-client.client")
+end
+
 local M = {}
 
---- Seam for U3: the actual OAuth-flow-triggering + reconnect action, given a
---- resolved server name. `register()`'s command callback calls this after
---- `resolve_target` returns a definite name; U2 leaves it as a stub that
---- reports the target it would have acted on, so `:MCPAuth` is inert (but not
---- broken) until U3 fills it in.
+--- The actual OAuth-flow-triggering + reconnect action, given a resolved
+--- server name. `register()`'s command callback calls this after
+--- `resolve_target` returns a definite name.
+---
+--- Runs `dcr.run_flow` unconditionally (no short-circuit on an already-valid
+--- token -- explicit-name resolution never applies the validity filter, R5,
+--- and this action mirrors that: naming a server always re-authenticates
+--- it). On a flow error, notifies and stops -- no save, no reconnect
+--- attempted.
+---
+--- On success, saves the token directly onto this server's existing
+--- TokenStore object (`config().get_hub(name).token_store`) -- never a
+--- freshly-constructed store with a reconstructed key (KTD3). Then, before
+--- dialing the reconnect, tears down any existing live client for this name:
+--- `:disconnect()` (so no two transports for this name are live at once),
+--- then `mcp_client()._forget(id)` (so the now-dead entry doesn't linger in
+--- the registry -- `disconnect()` alone leaves it queryable, by design, so
+--- without `_forget` a caller like `health.lua`'s `get_clients({name=...})[1]`
+--- could non-deterministically pick the stale entry over the fresh one).
+--- This makes re-authenticating an already-connected server replace rather
+--- than duplicate the registry entry (KTD7) -- a no-op when there is no live
+--- client yet, the common case. Finally reconnects using the exact retained
+--- `connect_config` (never a freshly-built minimal one), reporting the
+--- reconnect's own success/failure distinctly from an OAuth failure.
+---
+--- Failure notifications reuse `dcr.run_flow`'s returned error string as-is
+--- (that module's error strings are secret-free by construction) rather than
+--- wrapping it with additional context. No notification here ever
+--- interpolates `connect_config` or `connect_config.headers` wholesale
+--- (KTD2) -- only the server name and error strings.
 --- @param name string  a server name already validated by resolve_target
 function M._authenticate(name)
-	vim.notify(
-		string.format(
-			"mcp-client: MCPAuth resolved target %q, but the authenticate-and-reconnect action is not implemented yet.",
-			name
-		),
-		vim.log.levels.WARN
-	)
+	local record = config().get_hub(name)
+	local connect_config = record.connect_config
+
+	dcr().run_flow({ server_url = connect_config.url }, function(token, err)
+		if err then
+			vim.notify(string.format("mcp-client: authentication for %q failed: %s", name, err), vim.log.levels.WARN)
+			return
+		end
+
+		record.token_store:save(token)
+
+		for _, live_client in ipairs(mcp_client().get_clients({ name = name })) do
+			live_client:disconnect()
+			mcp_client()._forget(live_client.id)
+		end
+
+		mcp_client().connect(connect_config, {
+			on_connect = function(_client_object, connect_err)
+				if connect_err then
+					vim.notify(
+						string.format(
+							"mcp-client: authenticated %q and saved the new token, but reconnecting failed: %s",
+							name,
+							connect_err
+						),
+						vim.log.levels.WARN
+					)
+					return
+				end
+				vim.notify(string.format("mcp-client: authenticated and reconnected %q.", name), vim.log.levels.INFO)
+			end,
+		})
+	end)
 end
 
 --- Whether a server record has a token_store at all (KTD5's completion

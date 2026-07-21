@@ -108,6 +108,45 @@ describe("client (session + reconnect + event API)", function()
 		got.client:disconnect()
 	end)
 
+	it("_forget(id) removes a specific disconnected entry so get_clients() no longer returns it", function()
+		double = HttpDouble.new({
+			on_request = function(method, path)
+				if method == "POST" and path == "/mcp" then
+					return {
+						status = 200,
+						headers = { ["Content-Type"] = "application/json", ["Mcp-Session-Id"] = "sess-1" },
+						body = initialize_result_body("sess-1"),
+					}
+				end
+				return { status = 404, body = "" }
+			end,
+		})
+
+		local got
+		client.connect({ url = double.url .. "/mcp", name = "serverA" }, {
+			on_connect = function(c, err)
+				got = { client = c, err = err }
+			end,
+		})
+		assert.is_true(wait_for(function()
+			return got ~= nil
+		end))
+
+		got.client:disconnect()
+		-- intentional_close() alone leaves the entry queryable, by design:
+		-- get_clients() must keep reflecting a disconnected-not-orphaned entry
+		-- so callers can observe is_stopped() == true (see config_spec.lua's
+		-- native-server "disconnected, not orphaned" regression test).
+		assert.are.equal(1, #client.get_clients({ name = "serverA" }))
+		assert.is_true(client.get_clients({ name = "serverA" })[1]:is_stopped())
+
+		-- _forget is the explicit opt-in a caller uses when it wants the dead
+		-- entry actually gone, e.g. a per-name reconnect that must not leave a
+		-- stale entry sharing a name with the freshly-connected replacement.
+		client._forget(got.client.id)
+		assert.are.equal(0, #client.get_clients({ name = "serverA" }))
+	end)
+
 	it("does a real request/response round-trip over the legacy SSE transport", function()
 		local sse = ControllableSse.new()
 		double = HttpDouble.new({
