@@ -5,11 +5,9 @@ local wait_for = require("tests.helpers.wait")
 local client = require("mcp-client.client")
 
 --- Client-layer specs. These exercise the composed session + reconnect +
---- transport stack end to end against a real socket-level test double,
---- driving the client through the state transitions the brief enumerates.
---- Every "no hang" assertion is proven by `wait_for`'s bounded timeout: if
---- the machine ever left a caller hanging, these would time out and fail
---- rather than pass.
+--- transport stack end to end against a real socket-level test double.
+--- "No hang" assertions rely on `wait_for`'s bounded timeout: a stuck
+--- state machine times out and fails rather than passing silently.
 
 local function initialize_result_body(session_id)
 	return vim.json.encode({
@@ -310,11 +308,10 @@ describe("client (session + reconnect + event API)", function()
 	end)
 
 	it("kills the legacy stream via vim.uv.kill with the intentional-close flag set first", function()
-		-- Proves the KTD mechanism itself, not just its effects: the client
-		-- must (a) set job.user_data.intentional_close = true and (b) call
-		-- vim.uv.kill(job:pid(), "sigterm"), in that order, so the exit handler
-		-- recognises the teardown. This guards against a regression where the
-		-- transport's own close() shutdown masks a broken kill path.
+		-- The exit handler distinguishes an intentional close from a dropped
+		-- connection via job.user_data.intentional_close, which must be set
+		-- before vim.uv.kill() runs, or the exit handler treats the kill as an
+		-- unexpected drop and reconnects.
 		local sse = ControllableSse.new()
 		double = HttpDouble.new({
 			on_request = function(method, path)
@@ -526,13 +523,10 @@ describe("client (session + reconnect + event API)", function()
 	end)
 
 	describe("the exposed client object's .config never leaks the live bearer token", function()
-		-- token_store.apply_to_headers mutates entry.config.headers in place,
-		-- writing headers["Authorization"] = "Bearer " .. access_token. Before
-		-- this fix, make_client_object aliased obj.config = entry.config
-		-- directly, so any reader of the public client object's .config.headers
-		-- saw the real, live secret -- the one surface in this codebase that did
-		-- NOT follow the "never expose the raw token, only redacted status"
-		-- convention TokenStore:status()/health.lua establish everywhere else.
+		-- token_store.apply_to_headers mutates entry.config.headers in place to
+		-- write the real Authorization header. The exposed client object must
+		-- not alias that live table, or its .config.headers would leak the
+		-- real secret to any caller of get_clients()/on_connect.
 		local token_store = require("mcp-client.auth.token_store")
 
 		local double

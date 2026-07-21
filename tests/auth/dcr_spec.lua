@@ -1,11 +1,5 @@
 -- Covers RFC 7591 Dynamic Client Registration, the token-exchange POST, and
--- the orchestrated discovery-through-token-exchange flow that produces the
--- typed result handed off to U7.
---
--- (The plan named three spec files -- discovery/pkce/redirect_listener -- but
--- placed DCR, token exchange, and the full-flow orchestration in dcr.lua
--- without a named spec. This file covers those required test scenarios; see
--- the task report's "concerns" section.)
+-- the orchestrated discovery-through-token-exchange flow.
 local HttpDouble = require("tests.helpers.http_double")
 local http_get = require("tests.helpers.http_client")
 local wait_for = require("tests.helpers.wait")
@@ -124,11 +118,10 @@ describe("auth.dcr", function()
 			assert.are.equal("the-refresh-token", result.refresh_token)
 			assert.are.equal("Bearer", result.token_type)
 			assert.is_number(result.expires_at)
-			-- Metadata U7 needs to refresh later.
+			-- Endpoint and client metadata needed to refresh later.
 			assert.are.equal(double.url .. "/token", result.token_endpoint)
 			assert.are.equal("the-client", result.client_id)
 			assert.are.equal("https://server.example/mcp", result.resource)
-			-- The exchange must send grant_type, code, and code_verifier.
 			assert.matches("grant_type=authorization_code", received_body, 1, true)
 			assert.matches("code_verifier=the%-verifier", received_body)
 		end)
@@ -386,11 +379,9 @@ describe("auth.dcr", function()
 			local result, err
 			dcr.run_flow({
 				server_url = double.url .. "/mcp",
-				-- No open_url succeeds.
 				open_url = function()
 					return false
 				end,
-				-- Manual fallback: surface the URL and prompt for the code.
 				prompt_for_code = function(url)
 					manual_url = url
 					prompted = true

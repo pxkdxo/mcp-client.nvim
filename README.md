@@ -56,7 +56,7 @@ require("mcp-client").setup({
   -- A single server (shorthand). Its name defaults to "default".
   server = { url = "http://localhost:PORT" },
 
-  -- Or one or more named servers (a name -> server-config map). R7's "server list".
+  -- Or one or more named servers (a name -> server-config map).
   -- Use `servers` instead of `server` when you connect to more than one.
   servers = {
     local_server  = { url = "http://localhost:PORT" },
@@ -143,7 +143,7 @@ plugin sees their tools uniformly.
 
 ## Server authentication
 
-`mcp-client` enforces a **fail-closed transport-security policy** (R12):
+`mcp-client` enforces a **fail-closed transport-security policy**:
 
 - A **localhost** server (`localhost`, `127.0.0.1`, `::1`, `0.0.0.0`) may be plain
   `http://` with no credential.

@@ -1,11 +1,8 @@
 local Session = require("mcp-client.session")
 
---- The session unit owns the Mcp-Session-Id / MCP-Protocol-Version header
---- lifecycle and the single special case the brief calls out: a
---- session-scoped 404 must be handled by transparently reinitializing a new
---- session and retrying the caller's original request, rather than surfacing
---- an error for that one status. It is tested against a transport double so
---- the reinitialize-and-retry dance is deterministic and network-free.
+--- The session owns the Mcp-Session-Id / MCP-Protocol-Version header
+--- lifecycle, including transparently reinitializing and retrying the
+--- caller's original request on a session-scoped 404.
 
 --- A transport double: `request(msg, cb)` returns whatever the scripted
 --- `responder` yields for that call. `responder(msg, call_index)` returns
@@ -57,9 +54,6 @@ describe("session (id/protocol lifecycle + 404 reinitialize)", function()
 	end)
 
 	it("transparently reinitializes on a session 404 and retries the request", function()
-		-- Call 1 is the original ping -> 404. reinitialize() then hands back a
-		-- fresh transport whose call resolves normally; the caller sees only
-		-- the successful retry, never the 404.
 		local original_transport = transport_double(function()
 			return "server returned status 404: session expired", nil, { status = 404 }
 		end)
@@ -72,8 +66,6 @@ describe("session (id/protocol lifecycle + 404 reinitialize)", function()
 			transport = original_transport,
 			reinitialize = function(on_done)
 				reinit_count = reinit_count + 1
-				-- Simulate a successful re-handshake yielding a new transport
-				-- and session id.
 				on_done(nil, { transport = retry_transport, session_id = "sess-2" })
 			end,
 		})

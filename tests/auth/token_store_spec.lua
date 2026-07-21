@@ -1,14 +1,11 @@
--- Covers U7 token persistence and the bearer-header attachment helper.
---
 -- Persistence has two backends: an OS keychain (macOS `security` CLI) where a
 -- binding is available, and a 0600-permissioned file under $XDG_DATA_HOME as a
--- fallback. These tests exercise the *file* backend against a temp
--- $XDG_DATA_HOME (real file I/O, real permissions -- never the developer's real
--- login keychain), and exercise the keychain backend through an injected
--- command runner so the invocation shape is verified without side effects.
+-- fallback. The file backend is tested against a real temp $XDG_DATA_HOME;
+-- the keychain backend is tested through an injected command runner so the
+-- invocation shape is verified without touching the real login keychain.
 --
--- Security invariant under test throughout: no secret (access token, refresh
--- token) ever appears in a status string or an error message.
+-- Invariant checked throughout: no secret (access token, refresh token) ever
+-- appears in a status string or an error message.
 
 local token_store = require("mcp-client.auth.token_store")
 
@@ -116,7 +113,7 @@ describe("auth.token_store", function()
 		end)
 	end)
 
-	describe("status (for :checkhealth, U8) never leaks secrets", function()
+	describe("status (for :checkhealth) never leaks secrets", function()
 		it("reports presence and expiry without the token values", function()
 			local store = file_store()
 			store:save(sample_token())

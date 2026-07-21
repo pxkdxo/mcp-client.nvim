@@ -1,15 +1,7 @@
 local Reconnect = require("mcp-client.reconnect")
 
---- The reconnect state machine is deliberately pure and clock-injectable:
---- it never touches the network or a real timer, so its backoff arithmetic
---- and the three-state transitions can be exercised deterministically. The
---- unit under test schedules a `retry` callback after a computed delay; the
---- specs drive time forward with an injected scheduler double instead of
---- waiting on wall-clock ms.
-
---- A scheduler double capturing (delay_ms, callback) pairs so a test can
---- fire them synchronously. Mirrors the (delay, fn) -> handle shape the
---- machine expects from an injected `schedule` function.
+--- Fake scheduler capturing (delay_ms, callback) pairs so a test can fire
+--- them synchronously instead of waiting on a real timer.
 local function scheduler_double()
 	local scheduled = {}
 	return {
@@ -23,7 +15,6 @@ local function scheduler_double()
 				entry.cancelled = true
 			end
 		end,
-		--- Fire the most recently scheduled, not-yet-fired, not-cancelled entry.
 		fire_next = function(scheduled_list)
 			for _, entry in ipairs(scheduled_list) do
 				if not entry.fired and not entry.cancelled then

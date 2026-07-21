@@ -1,23 +1,18 @@
 --- OAuth 2.1 loopback redirect listener (RFC 8252 §7.3).
 ---
---- This is the *one* component in the whole plugin that hand-rolls HTTP on
---- vim.uv rather than going through plenary.curl. That is deliberate and
---- correct: the authorization-code redirect leg is plaintext-loopback by
---- design (the authorization server redirects the user's browser to
---- http://127.0.0.1:<port>/callback), so there is no TLS to implement here
---- and thus no reason to reach for curl. Every other HTTP(S) call this unit
---- makes (PRM/AS metadata, DCR, token exchange) still goes through curl.
+--- Hand-rolls HTTP on vim.uv instead of going through plenary.curl: the
+--- authorization-code redirect leg is plaintext loopback by design (the
+--- authorization server redirects the browser to
+--- http://127.0.0.1:<port>/callback), so there is no TLS involved and no
+--- need for curl. Every other HTTP(S) call in this plugin still uses curl.
 ---
 --- Security invariants (do not weaken):
----   * Binds to 127.0.0.1 explicitly, never 0.0.0.0 -- only the local
----     browser may reach it (RFC 8252 loopback interface redirection).
----   * `state` is validated BEFORE the authorization `code` is accepted. A
----     callback whose state does not match the per-flow value is rejected
----     outright; its code is never handed to the token-exchange stage.
----   * Single-shot and short-lived: the listener fires `on_result` exactly
----     once (success, mismatch, error, or timeout) and closes immediately
----     after -- it does not stay open across multiple navigations or accept
----     a second callback.
+---   * Binds to 127.0.0.1 explicitly, never 0.0.0.0.
+---   * `state` is validated BEFORE the authorization `code` is accepted;
+---     a mismatched callback is rejected outright and its code is never
+---     handed to the token-exchange stage.
+---   * Single-shot and short-lived: fires `on_result` exactly once
+---     (success, mismatch, error, or timeout), then closes immediately.
 ---   * No secrets in error text: a rejected callback's `code` is never
 ---     interpolated into an error message.
 local uv = vim.uv or vim.loop
@@ -185,18 +180,15 @@ function RedirectListener:_handle_callback(path)
 	local query = path and path:match("%?(.*)$") or ""
 	local params = parse_query(query)
 
-	-- State is validated FIRST, before either the code or an error field is
-	-- read. A callback whose state does not match this flow's value is rejected
-	-- outright and its code is never touched -- the security invariant. A
+	-- State must be validated before the code or error field is read; a
 	-- missing state (nil) also fails this equality check.
 	if params.state ~= self._expected_state then
-		-- Reject outright. Never echo params.code into the error.
 		return self:_finish({ err = "authorization redirect rejected: state parameter did not match" })
 	end
 
-	-- Only past the state gate: an authorization server may redirect back with
-	-- an OAuth error instead of a code (RFC 6749 §4.1.2.1). The error *code* is
-	-- safe to surface; it carries no secret.
+	-- Past the state gate, an AS may redirect back with an OAuth error
+	-- instead of a code (RFC 6749 §4.1.2.1). The error code is safe to
+	-- surface -- it carries no secret.
 	if params.error and params.error ~= "" then
 		return self:_finish({
 			err = "authorization server returned error: " .. params.error,

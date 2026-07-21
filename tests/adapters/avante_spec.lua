@@ -2,25 +2,11 @@ local client = require("mcp-client.client")
 local native = require("mcp-client.native")
 local avante = require("mcp-client.adapters.avante")
 
---- Avante adapter specs (U4). The adapter is a thin translation layer: it
---- turns `client.get_clients()`'s tool/resource/prompt surface into
---- Avante's real `custom_tools` integration point (a list of tool-spec
---- tables, each with `name`/`description`/`param`/`func(input, opts)`,
---- verified against the actual `yetone/avante.nvim` source at
---- `~/.local/share/nvim/lazy/avante.nvim/lua/avante/llm_tools/init.lua` and
---- `types.lua`). It must hold no direct server or transport logic of its own
---- (R6): every one of these specs only ever touches client objects through
---- `client.register_native`/`native.register` and the public `request()`/
---- `notify()` shape U2 established -- never a transport or Job object.
-
---- Build a fake *remote-shaped* client object: unlike a native server,
---- its `request()` callback fires asynchronously (deferred via
---- `vim.schedule`), exactly like a real remote transport's curl callback
---- would. Registered through `client.register_native` -- which is just a
---- registry insertion, not remote-specific -- so the test can exercise the
---- adapter against "remote-like async" semantics without spinning up any
---- real transport/socket, keeping the adapter itself innocent of transport
---- concerns while still proving it handles async callbacks correctly.
+--- Build a fake remote-shaped client: its `request()` callback fires
+--- asynchronously (deferred via `vim.schedule`), like a real remote
+--- transport's curl callback would. Registered through
+--- `client.register_native`, which is just a registry insertion, so the
+--- adapter under test never touches transport/socket concerns directly.
 local function make_async_client(opts)
 	local stopped = false
 	local obj = {
@@ -44,8 +30,7 @@ local function make_async_client(opts)
 	return client.register_native(obj)
 end
 
---- A minimal remote-shaped double answering the standard MCP methods this
---- adapter needs: tools/list and tools/call.
+--- A remote-shaped double answering tools/list and tools/call.
 local function make_remote_double(name, tools_listing, on_call)
 	return make_async_client({
 		name = name,
@@ -60,19 +45,14 @@ local function make_remote_double(name, tools_listing, on_call)
 	})
 end
 
---- A remote-shaped double answering only prompts/list and prompts/get --
---- deliberately separate from make_remote_double (which only answers
---- tools/*) so prompt-bridging specs don't have to thread unrelated tool
---- fixtures through, and to independently prove the adapter's prompt path
---- also unwraps a remote client's JSON-RPC envelope (unwrap_result), not
---- just its tool path.
+--- A remote-shaped double answering only prompts/list and prompts/get.
 local function make_remote_prompt_double(name, prompts_listing, on_get)
 	return make_async_client({
 		name = name,
 		handle = function(rpc_message, callback)
 			if rpc_message.method == "prompts/list" then
-				-- Envelope-shaped reply, like a real remote server -- proves
-				-- unwrap_result() is exercised for prompts too.
+				-- Envelope-shaped reply, like a real remote server, so the
+				-- prompt path is proven to unwrap the JSON-RPC envelope too.
 				return callback(nil, { jsonrpc = "2.0", id = 1, result = { prompts = prompts_listing } }, nil)
 			elseif rpc_message.method == "prompts/get" then
 				return on_get(rpc_message.params, callback)
@@ -84,13 +64,9 @@ end
 
 --- A pathological client double whose `request()` throws synchronously
 --- instead of reporting failure through the `(err, result, response)`
---- callback -- neither of this codebase's real client implementations
---- (native, U3; remote, U1/U2) behaves this way today, but the adapter must
---- still be hardened against a hypothetical future client that does, per
---- the U4 review finding: a synchronous throw from one client's
---- `request()` must not abort `M.custom_tools()`'s iteration over any other
---- registered clients, and must not crash whatever in Avante calls a tool's
---- `func`.
+--- callback. The adapter must stay hardened against this: a synchronous
+--- throw from one client's `request()` must not abort `M.custom_tools()`'s
+--- iteration over other clients, nor crash whatever calls a tool's `func`.
 local function make_throwing_client(name)
 	local stopped = false
 	local obj = { name = name }
@@ -112,7 +88,7 @@ describe("adapters.avante (custom_tools translation)", function()
 		client._reset_registry()
 	end)
 
-	it("has zero direct server or transport knowledge (R6): does not require transport/* modules", function()
+	it("has zero direct server or transport knowledge: does not require transport/* modules", function()
 		-- A crude but effective static check: the adapter module's own source
 		-- must never `require` the transport package or touch a Job object
 		-- directly -- only the public client API (require("mcp-client.client")).
@@ -163,12 +139,8 @@ describe("adapters.avante (custom_tools translation)", function()
 		assert.is_true(completed)
 		assert.is_nil(got_err)
 		assert.is_not_nil(got_result)
-		-- The echo tool returns exactly { text = "hello" } (a single key, so
-		-- ordering is unambiguous); func()'s payload-is-a-table branch
-		-- (avante.lua) always runs it through vim.json.encode, so the
-		-- deterministic result is exactly this JSON string -- assert exact
-		-- equality, not a substring match that a broken JSON-producing
-		-- renderer could still satisfy.
+		-- func()'s payload-is-a-table branch always runs it through
+		-- vim.json.encode, so assert exact equality of the resulting JSON.
 		assert.are.equal('{"text":"hello"}', got_result)
 	end)
 
@@ -227,12 +199,9 @@ describe("adapters.avante (custom_tools translation)", function()
 			callback(nil, { text = params.arguments.text }, nil)
 		end)
 
-		-- Avante's real custom_tools() contract is itself synchronous
-		-- (llm_tools/init.lua:683-684: called with no callback, return
-		-- value used immediately) -- it cannot block for a remote round
-		-- trip. So the first call only kicks off the tools/list refresh;
-		-- the listing catches up on the next call, once the remote
-		-- double's deferred reply has landed.
+		-- custom_tools() is itself synchronous and cannot block for a remote
+		-- round trip, so the first call only kicks off the tools/list
+		-- refresh; the listing catches up on the next call.
 		local tools = avante.custom_tools()
 		local remote_tool
 		for _, t in ipairs(tools) do
@@ -255,8 +224,8 @@ describe("adapters.avante (custom_tools translation)", function()
 		assert.are.equal("Echo via a remote server", remote_tool.description)
 
 		-- The remote double's request() defers its callback via
-		-- vim.schedule -- proving the adapter's func() genuinely supports
-		-- Avante's async on_complete path, not just a synchronous return.
+		-- vim.schedule -- proving func() genuinely supports Avante's async
+		-- on_complete path, not just a synchronous return.
 		local got_result, got_err
 		local completed = false
 		local result, err = remote_tool.func({ text = "remote-hello" }, {
@@ -277,10 +246,6 @@ describe("adapters.avante (custom_tools translation)", function()
 		assert.is_true(completed)
 		assert.is_nil(got_err)
 		assert.is_not_nil(got_result)
-		-- The remote double replies { text = params.arguments.text } for
-		-- tools/call, i.e. { text = "remote-hello" }; unwrapped from the
-		-- JSON-RPC envelope and run through vim.json.encode, the
-		-- deterministic result is exactly this JSON string.
 		assert.are.equal('{"text":"remote-hello"}', got_result)
 	end)
 
@@ -352,14 +317,10 @@ describe("adapters.avante (custom_tools translation)", function()
 
 	it("resilience: func() on a throwing client does not crash the caller, and reports via on_complete", function()
 		-- build_tool_spec() is a private local, not exported by the
-		-- adapter, so the realistic way to get a hold of a real tool spec
-		-- built around a client object is the same path M.custom_tools()
-		-- itself uses: register a real (well-behaved) native client so its
-		-- tools/list succeeds and a spec is built, then make that same
-		-- client's request() throw synchronously for the tools/call this
-		-- test actually exercises -- simulating the hypothetical future
-		-- client the review finding is concerned with, without needing a
-		-- separate throwing double wired all the way through tools/list.
+		-- adapter, so get a real tool spec the same way M.custom_tools()
+		-- does: register a well-behaved native client so tools/list
+		-- succeeds and a spec is built, then make that client's request()
+		-- throw synchronously for the tools/call this test exercises.
 		local example = require("tests.fixtures.example_native_server")
 		local server = native.register(example)
 
@@ -372,10 +333,6 @@ describe("adapters.avante (custom_tools translation)", function()
 		end
 		assert.is_not_nil(echo_tool)
 
-		-- Monkey-patch this registered client's request() to throw
-		-- synchronously, simulating the hypothetical future client the
-		-- review finding is concerned with, without needing a second
-		-- tools/list round trip.
 		function server:request(_rpc_message, _callback)
 			error("synchronous throw from request(): tools/call")
 		end
@@ -404,43 +361,33 @@ describe("adapters.avante (custom_tools translation)", function()
 	end)
 end)
 
---- Avante adapter specs (U11): prompt/slash-command bridging. Verified
---- against the real, installed `yetone/avante.nvim` source --
---- `Config.slash_commands` (`avante/config.lua:348,1111`) is a plain
---- `AvanteSlashCommand[]` array (unlike `custom_tools`, it has no function
---- form), read fresh on every `avante.utils.get_commands()` call
---- (`avante/utils/init.lua:1559-1579`, itself invoked on every chat
---- submission via `Sidebar:handle_submit` at `avante/sidebar.lua:2814` and
---- on every `/`-completion via `cmp_avante/commands.lua:33,56`) but never
---- re-invoked as a function -- so, like Avante's own ACP integration
---- (`avante/llm.lua:1188-1211`, which does
---- `table.insert(Config.slash_commands, {...})` at runtime to register
---- agent-defined commands), this adapter's contract is to hand callers a
---- table (`M.slash_commands`) whose *contents* are refreshed in place, not
---- a table that is replaced wholesale.
+--- Avante adapter specs: prompt/slash-command bridging.
 ---
---- `AvanteSlashCommand` (`avante/types.lua:555-560`): `name`, `description`,
+--- `Config.slash_commands` (`avante/config.lua`) is a plain array (unlike
+--- `custom_tools`, it has no function form), read fresh on every
+--- `avante.utils.get_commands()` call but never re-invoked as a function --
+--- so this adapter's contract is to hand callers a table (`M.slash_commands`)
+--- whose *contents* are refreshed in place, not a table that is replaced
+--- wholesale.
+---
+--- `AvanteSlashCommand` (`avante/types.lua`): `name`, `description`,
 --- `details`, optional `shorthelp`, optional `callback` typed
 --- `fun(self: avante.Sidebar, args: string, cb?: fun(args: string): nil)`.
---- Critically, `Sidebar:handle_submit` (`avante/sidebar.lua:2808-2834`) only
---- forwards a callback's `cb`-rewritten text into the normal LLM turn for
---- the two hardcoded names `"lines"` and `"commit"` -- every other command
---- (built-in or custom) just runs `cmd.callback(self, args); return`, i.e.
---- the callback is solely responsible for rendering its own output. The
---- only generic, publicly-referenced rendering primitive available to an
---- external command (confirmed via the old `mcphub.nvim`'s own
---- `extensions/avante/slash_commands.lua`, which this adapter replaces, and
---- still present in the installed source) is
---- `Sidebar:add_chat_history(messages, opts)` (`avante/sidebar.lua:2481`).
---- So a prompt's rendered content is appended as a chat message via
---- `sidebar:add_chat_history(...)`, exactly like the old extension did.
+--- `Sidebar:handle_submit` only forwards a callback's `cb`-rewritten text
+--- into the normal LLM turn for the two hardcoded names `"lines"` and
+--- `"commit"` -- every other command just runs `cmd.callback(self, args);
+--- return`, i.e. the callback is solely responsible for rendering its own
+--- output. The generic, publicly-referenced rendering primitive available to
+--- an external command is `Sidebar:add_chat_history(messages, opts)`. So a
+--- prompt's rendered content is appended as a chat message via
+--- `sidebar:add_chat_history(...)`.
 ---
 --- `M.custom_tools()`'s dual sync/async and cache-per-client-id/`pcall`/
 --- `unwrap_result` conventions all carry over unchanged for prompts: a
---- native client's `prompts/get` callback fires synchronously (U3); a
---- remote client's is always async (U1/U2); a remote reply is enveloped
+--- native client's `prompts/get` callback fires synchronously; a remote
+--- client's is always async; a remote reply is enveloped
 --- (`{jsonrpc, id, result = {...}}`) while a native one is the bare payload.
-describe("adapters.avante (prompt/slash-command translation, U11)", function()
+describe("adapters.avante (prompt/slash-command translation)", function()
 	after_each(function()
 		client._reset_registry()
 	end)
@@ -492,8 +439,6 @@ describe("adapters.avante (prompt/slash-command translation, U11)", function()
 			},
 		}, function(params, callback)
 			local who = (params.arguments and params.arguments.who) or "world"
-			-- Remote reply is also enveloped, like the real server U9 validated
-			-- against.
 			callback(nil, {
 				jsonrpc = "2.0",
 				id = 1,
@@ -593,41 +538,29 @@ describe("adapters.avante (prompt/slash-command translation, U11)", function()
 	)
 end)
 
---- Avante adapter specs (fix: real Avante config wiring). The Critical
---- finding from the U11 review: handing `require("avante").setup({
---- slash_commands = M.slash_commands })` a table reference and mutating its
---- *contents* afterward does NOT work against the real, installed
---- avante.nvim -- `M.setup`/`M.override` (`avante/config.lua:1231,1347`)
---- merge the caller's `opts` via `vim.tbl_deep_extend("force", ...)`, which
---- (unlike the shallow `vim.tbl_extend`) deep-*copies* nested table values
---- rather than preserving reference identity. So `Config.slash_commands`
---- becomes a different table object than `M.slash_commands` the instant
---- `setup()` runs; mutating `M.slash_commands` afterward is a no-op as far
---- as Avante is concerned. Reproduced independently by the reviewer against
---- a real headless `nvim 0.12.4` session with the installed avante.nvim.
+--- Avante adapter specs: real Avante config wiring.
 ---
---- The real, working precedent (verified in the installed source):
---- `avante/llm.lua:1188-1213` (`available_commands_update`, the ACP session
---- handler) does `table.insert(Config.slash_commands, {...})` where `Config
---- = require("avante.config")` -- mutating the *live, already-merged*
---- config module's own array, obtained via `require()` AFTER `setup()` has
---- already run, not a separately-created table handed into `setup()`'s
---- `opts` and hoped to survive the merge by reference. This adapter now
---- does the same thing.
+--- Handing `require("avante").setup({ slash_commands = M.slash_commands })`
+--- a table reference and mutating its *contents* afterward does not work
+--- against the real avante.nvim: `M.setup`/`M.override` merge the caller's
+--- `opts` via `vim.tbl_deep_extend("force", ...)`, which deep-copies nested
+--- table values rather than preserving reference identity. So
+--- `Config.slash_commands` becomes a different table object than
+--- `M.slash_commands` the instant `setup()` runs; mutating `M.slash_commands`
+--- afterward is a no-op as far as Avante is concerned.
 ---
---- Since avante.nvim is not a vendored dependency of this repo (only
---- locally installed for reference, same situation `codecompanion_spec.lua`
---- documents for codecompanion.nvim), this fakes the one real module the
---- adapter now actually `require()`s (`avante.config`) via `package.loaded`,
---- built to the real, verified shape (`slash_commands = {}`,
---- `config.lua:1111`) -- exactly `codecompanion_spec.lua`'s
---- `fresh_codecompanion_config()` convention, applied to Avante. This is the
---- test that would have caught the original bug: it asserts on the STUBBED
---- CONFIG MODULE'S OWN `slash_commands` table, not the adapter's internal
---- cache/bookkeeping -- i.e. it verifies data actually lands in the thing
---- Avante reads (`Utils.get_commands()`, `avante/utils/init.lua:1559-1579`
---- iterates `Config.slash_commands` directly), not just in some adapter-side
---- table that merely *claims* to be kept in sync.
+--- Instead, mutate the live, already-merged config module's own array,
+--- obtained via `require("avante.config")` after `setup()` has already run
+--- (the same pattern Avante's own ACP session handler uses internally).
+---
+--- Since avante.nvim is not a vendored dependency of this repo, this fakes
+--- the one real module the adapter `require()`s (`avante.config`) via
+--- `package.loaded`, built to the real shape (`slash_commands = {}`). These
+--- specs assert on the STUBBED CONFIG MODULE'S OWN `slash_commands` table,
+--- not the adapter's internal cache/bookkeeping -- i.e. they verify data
+--- actually lands in the thing Avante reads (`Utils.get_commands()` iterates
+--- `Config.slash_commands` directly), not just in some adapter-side table
+--- that merely claims to be kept in sync.
 describe("adapters.avante (fix: real Avante config wiring)", function()
 	local fake_avante_config
 
@@ -639,8 +572,7 @@ describe("adapters.avante (fix: real Avante config wiring)", function()
 		fake_avante_config = fresh_avante_config()
 		package.loaded["avante.config"] = fake_avante_config
 		-- Force a clean reload of the adapter module itself so module-level
-		-- caches (prompts_cache etc.) never leak between specs, same
-		-- discipline codecompanion_spec.lua applies to its own adapter.
+		-- caches (prompts_cache etc.) never leak between specs.
 		package.loaded["mcp-client.adapters.avante"] = nil
 	end)
 
@@ -662,10 +594,7 @@ describe("adapters.avante (fix: real Avante config wiring)", function()
 			-- The load-bearing assertion: the STUBBED avante.config MODULE's
 			-- own slash_commands array (not fresh_avante's return value, not
 			-- any adapter-internal cache) must contain the MCP-derived
-			-- command. Mutating a table the adapter merely hands to
-			-- setup()'s opts would never reach here, since this is the
-			-- module require("avante.config") resolves to independently of
-			-- whatever was passed into any setup()/opts table.
+			-- command.
 			local found = false
 			for _, cmd in ipairs(fake_avante_config.slash_commands) do
 				if cmd.name:match("greet$") then
@@ -712,11 +641,10 @@ describe("adapters.avante (fix: real Avante config wiring)", function()
 			local example = require("tests.fixtures.example_native_server")
 			native.register(example)
 
-			-- Simulate a user who configured their own slash command directly,
-			-- e.g. `require("avante").setup({ slash_commands = { { name =
-			-- "my-command", ... } } })` -- which, after a real setup() merge,
-			-- would live right here in Config.slash_commands alongside whatever
-			-- this adapter owns.
+			-- Simulate a user who configured their own slash command
+			-- directly, which after a real setup() merge would live right
+			-- here in Config.slash_commands alongside whatever this adapter
+			-- owns.
 			table.insert(fake_avante_config.slash_commands, {
 				name = "my-command",
 				description = "A user-defined command, not owned by this adapter",
@@ -741,8 +669,8 @@ describe("adapters.avante (fix: real Avante config wiring)", function()
 			assert.is_true(found_mcp_command, "the MCP-derived command must still be present")
 
 			-- Refresh again (simulating a second LLM turn / cmp completion) --
-			-- the user's own command must still be untouched, not duplicated or
-			-- dropped.
+			-- the user's own command must still be untouched, not duplicated
+			-- or dropped.
 			fresh_avante.custom_slash_commands()
 			local user_command_count = 0
 			for _, cmd in ipairs(fake_avante_config.slash_commands) do

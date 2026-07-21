@@ -1,16 +1,13 @@
 --- Minimal raw-socket HTTP GET client, for specs only.
 ---
---- The companion to tests/helpers/http_double.lua: where that stands in for
---- a remote server, this stands in for "the browser" navigating to the
---- OAuth loopback redirect URI, so redirect_listener_spec can drive a real
---- callback against the real listener over a real 127.0.0.1 socket. Built on
---- vim.uv for the same reason the double is: test-fixture code has no TLS
---- constraint, and the loopback redirect leg is plaintext-localhost by
---- design (RFC 8252) anyway.
+--- Stands in for a browser hitting the OAuth loopback redirect URI, so specs
+--- can drive a real callback against a real listener over 127.0.0.1. Plain
+--- TCP is fine here: the loopback redirect leg is plaintext-localhost by
+--- design (RFC 8252).
 ---
---- Fire-and-forget: it opens a connection to 127.0.0.1:<port>, writes a bare
---- GET request line, and closes. It does not parse or return the response;
---- the spec observes the listener's behavior through its on_result callback.
+--- Fire-and-forget: opens a connection, writes a bare GET request line, and
+--- closes without parsing the response. The spec observes listener behavior
+--- via its on_result callback.
 local uv = vim.uv or vim.loop
 
 --- @param port number the loopback port to connect to
@@ -29,8 +26,8 @@ return function(port, path)
 		connected = true
 		local request = string.format("GET %s HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n", path)
 		client:write(request, function()
-			-- Read (and discard) the response so the listener can finish
-			-- writing before we tear the connection down.
+			-- Drain the response so the listener finishes writing before
+			-- the connection is torn down.
 			client:read_start(function(read_err, chunk)
 				if read_err or not chunk then
 					if not client:is_closing() then
@@ -41,8 +38,7 @@ return function(port, path)
 		end)
 	end)
 
-	-- Let the event loop flush the connect + write. Short bound; the listener
-	-- is local so this resolves near-instantly in practice.
+	-- Block until connect + write complete; loopback resolves near-instantly.
 	vim.wait(1000, function()
 		return connected
 	end)

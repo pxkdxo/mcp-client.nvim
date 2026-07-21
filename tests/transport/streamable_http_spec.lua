@@ -14,7 +14,7 @@ describe("transport.streamable_http", function()
 	end)
 
 	it("sends requests as POST and decodes a JSON-RPC result", function()
-		local received_body, received_session_header
+		local received_body
 		double = HttpDouble.new({
 			on_request = function(method, path, rest)
 				if method == "POST" and path == "/mcp" then
@@ -50,9 +50,8 @@ describe("transport.streamable_http", function()
 	end)
 
 	it("sends an Accept header naming both response shapes the spec allows", function()
-		-- A real server (samanhappy/mcphub) rejects any Streamable HTTP request
-		-- missing this header with 406 Not Acceptable -- confirmed against
-		-- the live server during U9 validation.
+		-- Streamable HTTP servers may reject requests missing this header with
+		-- 406 Not Acceptable.
 		local received_head
 		double = HttpDouble.new({
 			on_request = function(method, path, rest, head)
@@ -82,15 +81,8 @@ describe("transport.streamable_http", function()
 	end)
 
 	it("decodes a JSON-RPC result delivered as a single-event SSE response", function()
-		-- The Streamable HTTP spec sanctions this response mode as an
-		-- alternative to a direct JSON body -- a real server may choose either.
-		-- Reproduces the exact shape samanhappy/mcphub sent during U9's live
-		-- validation: status 200, Content-Type: text/event-stream, a
-		-- Content-Length-framed (not left-open/chunked) body containing one
-		-- `event: message` frame with the JSON-RPC envelope as `data:`. Built
-		-- as a plain `body` string (not the double's `sse` field, which is
-		-- for the legacy transport's deliberately-left-open long-lived
-		-- stream -- the wrong shape for this single-shot response).
+		-- The spec allows a single-shot response to arrive as one
+		-- Content-Length-framed SSE event instead of a direct JSON body.
 		double = HttpDouble.new({
 			on_request = function(method, path)
 				if method == "POST" and path == "/mcp" then

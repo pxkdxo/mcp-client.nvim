@@ -115,9 +115,8 @@ describe("transport.detect", function()
 	end
 
 	it("sends an Accept header naming both response shapes the spec allows", function()
-		-- A real server (samanhappy/mcphub) rejects the initial InitializeRequest
-		-- with 406 Not Acceptable if this header is missing -- confirmed
-		-- against the live server during U9 validation.
+		-- Some servers reject the initial InitializeRequest with 406 Not
+		-- Acceptable if this header is missing.
 		local received_head
 		double = HttpDouble.new({
 			on_request = function(method, path, rest, head)
@@ -153,14 +152,9 @@ describe("transport.detect", function()
 	end)
 
 	it("uses the streamable_http transport when POST initialize's response is a single-event SSE stream", function()
-		-- The Streamable HTTP spec sanctions this response mode as an
-		-- alternative to a direct JSON body -- a real server may choose either.
-		-- Reproduces the exact shape samanhappy/mcphub sent during U9's live
-		-- validation for the initialize handshake itself: a Content-Length-
-		-- framed (not left-open) body containing one `event: message` frame.
-		-- Built as a plain `body` string, not the double's `sse` field (that
-		-- field is for the legacy transport's deliberately-left-open
-		-- long-lived stream -- the wrong shape for this single-shot response).
+		-- The Streamable HTTP spec allows this as an alternative to a direct
+		-- JSON body. Uses a Content-Length-framed body (not the double's
+		-- `sse` field, which models a deliberately-left-open stream).
 		double = HttpDouble.new({
 			on_request = function(method, path)
 				if method == "POST" and path == "/mcp" then

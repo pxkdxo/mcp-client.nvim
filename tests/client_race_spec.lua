@@ -1,8 +1,6 @@
---- Client-layer concurrency specs (Task 15).
----
---- These exercise the two handshake-dialing paths -- `attempt_reconnect`
---- (stream-drop -> reconnect machine) and `make_reinitializer` (session 404 ->
---- session.lua) -- when they fire concurrently against the same client entry,
+--- Client-layer concurrency specs: the `attempt_reconnect` (stream-drop ->
+--- reconnect machine) and `make_reinitializer` (session 404 -> session.lua)
+--- handshake-dialing paths firing concurrently against the same client entry,
 --- plus the request-settling double-invoke guard. Unlike client_spec.lua these
 --- do NOT go over a real socket: they inject a fully controllable
 --- `mcp-client.transport.detect` double so a handshake can be held pending
@@ -17,8 +15,8 @@
 --- interface the client layer hooks (request/notify/close/get_stream_job/
 --- set_on_notification/get_retry_hint). `request` routes to a per-instance
 --- `responder(msg)` returning (err, result, response); if no responder is set
---- it never replies (a hung request), which we use to model an in-flight
---- request that outlives a reconnect exhaustion.
+--- it never replies, modeling an in-flight request that outlives a reconnect
+--- exhaustion.
 local function transport_double(opts)
 	opts = opts or {}
 	local self
@@ -26,7 +24,6 @@ local function transport_double(opts)
 		label = opts.label,
 		closed = false,
 		hook_count = 0, -- how many times hook_stream_job registered an exit hook on us
-		_exit_callbacks = {},
 		_responder = opts.responder,
 		set_responder = function(_, fn)
 			self._responder = fn
@@ -37,10 +34,7 @@ local function transport_double(opts)
 				if err ~= nil or result ~= nil or response ~= nil then
 					return cb(err, result, response)
 				end
-				-- responder returned all-nil: model a request that never replies.
-				return
 			end
-			-- No responder: never reply (a hung request).
 		end,
 		notify = function() end,
 		close = function()
@@ -95,9 +89,6 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 				assert(p, "no pending dial at index " .. tostring(index))
 				p.on_done(result, err)
 			end,
-			latest = function()
-				return #pending
-			end,
 		}
 		package.loaded["mcp-client.transport.detect"] = detect_stub
 		-- Reload the client so its module-top require binds to the stub.
@@ -131,20 +122,17 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 	end
 
 	it("coalesces a concurrent reconnect + reinitialize onto a single handshake dial", function()
-		-- A short reconnect backoff so the reconnect attempt's handshake dial
-		-- fires within the same brief window as the reinitialize handshake --
-		-- i.e. they are genuinely concurrent (the real server-restart race), not
-		-- serialized far apart by the default 1000ms backoff.
+		-- Short backoff so the reconnect attempt's handshake dial fires within
+		-- the same brief window as the reinitialize handshake, making the two
+		-- genuinely concurrent instead of serialized apart.
 		local obj, initial = connect_client({ reconnect = { initial_delay = 5, max_attempts = 3 } })
 
 		-- The initial connect consumed dial #1. Baseline the counter.
 		local dials_after_connect = detect_stub.dials
 
-		-- Trigger BOTH handshake paths close together, before either resolves:
-		--   (1) reinitialize path: an in-flight request 404s -> session.lua ->
-		--       make_reinitializer's dial.
-		--   (2) reconnect path: the stream drops (untagged exit) -> on_drop ->
-		--       reconnect machine schedules attempt_reconnect's dial.
+		-- Trigger both handshake paths close together, before either resolves:
+		-- an in-flight request 404s into make_reinitializer's dial, and the
+		-- stream drop below schedules attempt_reconnect's dial.
 		local reply
 		initial:set_responder(function()
 			return "server returned status 404: session expired", nil, { status = 404 }
@@ -153,18 +141,17 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 			reply = { err = err, result = result }
 		end)
 
-		-- Now fire the stream drop; on_drop + the reconnect schedule are deferred,
+		-- Fire the stream drop; on_drop + the reconnect schedule are deferred,
 		-- so wait long enough for the (short-backoff) reconnect attempt to run.
 		initial.fire_exit()
 		vim.wait(150, function()
-			-- Stop early only once a *second* new dial appears (the bug), so a
-			-- correctly-coalescing implementation still waits the full window.
+			-- Stop early only if a second new dial appears, so a correctly
+			-- coalescing implementation still waits the full window.
 			return detect_stub.dials >= dials_after_connect + 2
 		end)
 
-		-- CORE ASSERTION: exactly ONE new handshake dial for the two concurrent
-		-- triggers. Pre-fix this is 2 (reinit dial + reconnect dial racing
-		-- independently); post-fix the second trigger coalesces onto the first.
+		-- Exactly one new handshake dial for the two concurrent triggers: the
+		-- reconnect trigger must coalesce onto the reinitialize dial.
 		assert.are.equal(
 			dials_after_connect + 1,
 			detect_stub.dials,
@@ -182,45 +169,30 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 		end)
 
 		-- The stream-exit hook was registered on the single fresh transport
-		-- EXACTLY ONCE -- proving adopt_transport ran once for the coalesced
-		-- result, not once per waiter (which would double-register the hook).
+		-- exactly once: adoption ran once for the coalesced result, not once
+		-- per waiter.
 		assert.are.equal(
 			1,
 			fresh.hook_count,
 			"stream-exit hook must be registered exactly once on the adopted transport"
 		)
-		-- No orphaned/leaked transport: the single adopted transport stays open
-		-- (and there is no second transport, since there was only one dial).
 		assert.is_false(fresh.closed, "the adopted transport must stay open")
 
-		-- Consistent final state, observed behaviorally: the entry adopted `fresh`
-		-- (both the session's transport, via _adopt, and the reconnect follow-up
-		-- converged onto it), so the reinitialize retry of the original request
-		-- ran against `fresh` and the caller saw its `pong` reply exactly once.
 		assert.is_not_nil(reply, "the reinitialize retry must resolve the original request")
 		assert.is_nil(reply.err)
 		assert.are.same({ pong = true }, reply.result)
 
-		-- And the client is back in the steady connected state (the reconnect
-		-- waiter's on_connected fired), not stuck reconnecting or disconnected.
 		assert.is_false(obj:is_stopped())
 	end)
 
 	it("invokes a request callback exactly once when reconnect-exhaust and a reinitialize retry race", function()
-		-- Scenario (brief item 5): a request is in flight; the reconnect machine
-		-- exhausts to disconnected -> fail_in_flight resolves the callback with a
-		-- disconnect error (invocation #1). Meanwhile a reinitialize handshake for
-		-- the SAME original request is still pending and later completes -> its
-		-- retry settles the request again (invocation #2, ABSENT the guard). The
-		-- caller's callback must fire EXACTLY ONCE.
-		--
-		-- This targets obj:request's settle idempotency guard directly. It is
-		-- written to reach the exactly-once assertion regardless of the coalescing
-		-- fix: whether the reconnect attempt opens its OWN dial (pre-fix -- which
-		-- we then fail to drive exhaustion) or COALESCES onto the pending reinit
-		-- dial and exhausts via its bounded per-attempt timeout (post-fix). Either
-		-- way fail_in_flight fires while the reinit handshake is still pending,
-		-- and completing it afterward must not re-invoke the caller's callback.
+		-- A request is in flight; the reconnect machine exhausts to disconnected
+		-- and fail_in_flight resolves the callback with a disconnect error.
+		-- Meanwhile a reinitialize handshake for the same original request is
+		-- still pending and later completes, driving a retry against the same
+		-- callback. This targets obj:request's settle idempotency guard: the
+		-- caller's callback must fire exactly once even though two independent
+		-- paths race to settle it.
 		local obj, initial = connect_client({
 			reconnect = { initial_delay = 5, max_attempts = 1 },
 			attempt_timeout = 30,
@@ -243,15 +215,13 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 		assert.is_true(detect_stub.dials >= 2, "reinitialize should have started a handshake dial")
 		local reinit_index = #detect_stub.pending
 
-		-- Drop the stream: on_drop -> reconnecting -> attempt_reconnect. Pre-fix
-		-- this opens a distinct reconnect dial; post-fix it coalesces onto the
-		-- pending reinit dial and relies on its bounded 30ms timeout. Drive the
-		-- machine to exhaustion either way, WITHOUT resolving the reinit dial.
+		-- Drop the stream: on_drop -> reconnecting -> attempt_reconnect. Drive
+		-- the machine to exhaustion without ever resolving the held reinit dial.
 		initial.fire_exit()
 		vim.wait(400, function()
-			-- Pre-fix: a separate reconnect dial appears; fail it to count the
-			-- attempt so the machine (max_attempts=1) exhausts. Never touch the
-			-- held reinit dial at reinit_index.
+			-- If a distinct reconnect dial appears, fail it to count the attempt
+			-- so the machine (max_attempts=1) exhausts. Never touch the held
+			-- reinit dial at reinit_index.
 			if #detect_stub.pending > reinit_index then
 				detect_stub.resolve(#detect_stub.pending, nil, "reconnect handshake failed")
 			end
@@ -261,8 +231,7 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 		assert.is_true(obj:is_stopped(), "reconnect should have exhausted to disconnected")
 
 		-- Now complete the still-pending reinitialize handshake with a success,
-		-- which drives session.lua's retry of the ORIGINAL request. Pre-fix, this
-		-- calls settle() again for the same callback -> a SECOND invocation.
+		-- which drives session.lua's retry of the original request.
 		local retry_transport = transport_double({ label = "retry" })
 		retry_transport:set_responder(function()
 			return nil, { pong = true }
@@ -272,24 +241,22 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 			return false
 		end)
 
-		-- CORE ASSERTION: the caller's callback fired EXACTLY once. Pre-fix this
-		-- is 2 (fail_in_flight + the reinit retry's contradictory late success).
 		assert.are.equal(
 			1,
 			reply_count,
 			"the caller's callback must fire EXACTLY once, never twice with contradictory results"
 		)
-		-- The single invocation is the disconnect error from fail_in_flight, not a
-		-- late success -- the caller acted on the first result and must not be
-		-- handed a contradictory second one.
+		-- The single invocation is the disconnect error from fail_in_flight, not
+		-- the late reinit success -- the caller must not be handed a second,
+		-- contradictory result.
 		assert.is_not_nil(seen[1] and seen[1].err, "the single resolution is the disconnect error")
 	end)
 
 	it("closes a handshake that resolves after the client was intentionally closed", function()
 		-- A reinitialize handshake is in flight when the caller disconnects the
 		-- client. When that now-superseded handshake resolves successfully, its
-		-- freshly-opened transport must be CLOSED (cleaned up), never adopted into
-		-- the torn-down client nor left leaked -- item 2 of the fix.
+		-- freshly-opened transport must be closed, never adopted into the
+		-- torn-down client nor left leaked.
 		local obj, initial = connect_client()
 
 		-- Start a reinitialize handshake (404 request) and hold it pending.
@@ -324,29 +291,18 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 	end)
 
 	it("closes a handshake that resolves after its own attempt timed out and a later attempt superseded it", function()
-		-- Scenario (c), the intermediate-timeout supersede leak: a reconnect
-		-- attempt's handshake dial (D1) times out MID-BACKOFF -- the reconnect
-		-- machine is still `reconnecting` (more bounded attempts remain), NOT
-		-- `disconnected`. The machine schedules the NEXT attempt. Then D1 resolves
-		-- LATE (after its own attempt-timeout, but before the next attempt dials):
-		-- perform_handshake sees a non-terminal client and adopts D1's transport
-		-- (T1). The machine's next attempt (D2) then fires, resolves, and adopts a
-		-- DIFFERENT transport (T2) -- overwriting entry.transport_client but never
-		-- closing T1. T1 leaks: a live transport whose stream-exit hook is still
-		-- registered, so its own eventual exit spuriously drives reconnect against
-		-- a client that has moved on to T2.
+		-- A reconnect attempt's handshake dial (D1) times out mid-backoff while
+		-- the machine is still `reconnecting` (more attempts remain), so it
+		-- schedules the next attempt. D1 then resolves late, before attempt #2
+		-- dials: since the client is non-terminal, its transport (T1) would be
+		-- adopted. Attempt #2 (D2) then fires and adopts a different transport
+		-- (T2), superseding T1. T1 must be closed, not left leaked with a live
+		-- stream-exit hook that could spuriously drive reconnect later.
 		--
-		-- This is distinct from the coalesced-waiter case (multiple callers on the
-		-- SAME dial, all seeing ONE adopted result -- none closes it): here D1's own
-		-- caller (attempt #1) already gave up on D1 (its attempt timed out), and a
-		-- DIFFERENT, LATER dial (D2) has since been adopted in its place. D1's late
-		-- result is stale and must be closed, not adopted.
-		--
-		-- Determinism: a small per-attempt timeout (10ms) fires D1's timeout, which
-		-- schedules attempt #2 on a longer backoff (initial_delay=80ms). We resolve
-		-- D1 inside that window (after its timeout, before attempt #2 dials), then
-		-- let attempt #2 fire and resolve D2. No wall-clock racing -- the ordering
-		-- is forced by construction.
+		-- A small per-attempt timeout (10ms) fires D1's timeout, which schedules
+		-- attempt #2 on a longer backoff (initial_delay=80ms); we resolve D1
+		-- inside that window, then let attempt #2 fire and resolve D2 -- the
+		-- ordering is forced by construction, not wall-clock racing.
 		local obj, initial = connect_client({
 			reconnect = { initial_delay = 80, max_attempts = 3 },
 			attempt_timeout = 10,
@@ -380,8 +336,8 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 			"attempt #2 must not have dialed yet -- D1 is the only handshake dial so far"
 		)
 
-		-- Now D1 resolves LATE (after its own attempt timed out, before attempt #2
-		-- dials). The client is NON-terminal (still reconnecting), so pre-fix
+		-- Now D1 resolves late (after its own attempt timed out, before attempt
+		-- #2 dials). The client is non-terminal (still reconnecting), so
 		-- perform_handshake adopts T1 as the live transport.
 		local t1 = transport_double({ label = "t1-late" })
 		detect_stub.resolve(d1_index, { transport = "legacy_sse", client = t1, session_id = "sess-t1" })
@@ -403,10 +359,9 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 			return not obj:is_stopped() and t1.closed
 		end)
 
-		-- CORE ASSERTION: T1 -- adopted by the intermediate, already-abandoned
-		-- attempt and then superseded by T2 -- must have been CLOSED, not leaked.
-		-- Pre-fix this is false: T1 is silently overwritten and its live curl
-		-- process (and stale stream-exit hook) leak.
+		-- T1, adopted by the intermediate already-abandoned attempt and then
+		-- superseded by T2, must be closed rather than silently overwritten
+		-- and leaked (with its live process and stale stream-exit hook).
 		assert.is_true(
 			t1.closed,
 			"a handshake adopted by a timed-out attempt and then superseded by a later attempt must be closed, not leaked"
@@ -418,11 +373,9 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 		-- The client converged back to connected on the surviving transport.
 		assert.is_false(obj:is_stopped(), "the client should be connected again on the surviving transport")
 
-		-- T1's stream-exit hook was registered when it was (transiently) adopted.
-		-- Its eventual, unrelated exit must NOT spuriously drive the reconnect
-		-- machine: reaping T1 tagged its job intentional_close, so firing its exit
-		-- is a no-op and the client stays connected on T2 -- it does not fall back
-		-- into reconnecting/disconnected on a stream that the client has abandoned.
+		-- Reaping T1 tags its job intentional_close, so its stale stream-exit
+		-- hook firing later is a no-op and must not drive the client back into
+		-- reconnecting/disconnected on a stream it has already abandoned.
 		t1.fire_exit()
 		vim.wait(60, function()
 			return obj:is_stopped()
@@ -434,29 +387,23 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 	end)
 
 	it("abandons a wedged reconnect dial: frees the slot, times out coalesced waiters, closes a late result", function()
-		-- Scenario (round 3), the wedged-dial starvation: a reconnect attempt's
-		-- handshake dial (D1) is dispatched but its underlying detect.connect NEVER
-		-- calls back (a server that accepts the connection but hangs the MCP handshake
-		-- with no response and no clean exit -- exactly what ATTEMPT_TIMEOUT_MS
-		-- exists to bound). A reinitialize (a 404 request) COALESCES onto D1 before
-		-- the guard fires, joining its waiter list.
+		-- regression: a reconnect attempt's handshake dial (D1) is dispatched but
+		-- its underlying detect.connect never calls back (a server that accepts
+		-- the connection but hangs the MCP handshake with no response and no
+		-- clean exit -- exactly what ATTEMPT_TIMEOUT_MS exists to bound). A
+		-- reinitialize (a 404 request) coalesces onto D1 before the guard fires,
+		-- joining its waiter list.
 		--
-		-- Pre-fix: the attempt's guard timeout calls reconnect:on_drop() but does
-		-- NOTHING to entry._handshake. D1's waiter list stays populated forever, so
-		-- (a) attempt #2 sees entry._handshake still non-nil and JOINS the dead list
-		-- instead of dialing fresh, and (b) the coalesced reinitialize's on_done
-		-- (session.lua's Session:request retry callback) never fires.
-		--
-		-- Post-fix: on the guard timeout, because D1 is still the current dial
-		-- (generation unchanged), attempt_reconnect actively ABANDONS it -- drains
-		-- and clears entry._handshake's waiter list (freeing the slot), bumps
+		-- On the guard timeout, because D1 is still the current dial,
+		-- attempt_reconnect must actively abandon it: drain and clear
+		-- entry._handshake's waiter list (freeing the slot), bump
 		-- entry._handshake_gen (so a late D1 result is recognized as stale), and
-		-- notifies every drained waiter with a clear timeout error. Then attempt #2
-		-- dials FRESH (D2), and if D1's detect.connect ever DOES resolve, its result
-		-- is closed, not adopted.
+		-- notify every drained waiter with a clear timeout error. Attempt #2 then
+		-- dials fresh (D2), and if D1's detect.connect ever does resolve, its
+		-- result must be closed, not adopted.
 		--
-		-- Determinism: a small per-attempt timeout (10ms) fires D1's guard while D1
-		-- is held pending; attempt #2 fires after a longer backoff (initial_delay=80).
+		-- A small per-attempt timeout (10ms) fires D1's guard while D1 is held
+		-- pending; attempt #2 fires after a longer backoff (initial_delay=80).
 		-- The reinitialize is issued before the guard fires so it coalesces onto D1.
 		local obj, initial = connect_client({
 			reconnect = { initial_delay = 80, max_attempts = 3 },
@@ -496,20 +443,16 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 		)
 
 		-- Attempt #1's per-attempt guard timeout (10ms) fires while D1 is still
-		-- pending and unresolved. Post-fix this ABANDONS D1: the slot frees, the
+		-- pending and unresolved. This must abandon D1: the slot frees, the
 		-- coalesced reinitialize waiter is notified with a timeout error, and the
 		-- machine (max_attempts=3, still reconnecting) schedules attempt #2.
 		vim.wait(200, function()
-			-- Early-exit only once the coalesced reinitialize was notified AND a
-			-- second, distinct dial (D2) has appeared -- both are the post-fix
-			-- behavior. A correctly-behaving impl still waits until attempt #2 dials.
 			return reinit_reply ~= nil and detect_stub.dials >= dials_after_connect + 2
 		end)
 		assert.is_false(obj:is_stopped(), "the machine must still be reconnecting, not disconnected")
 
-		-- ASSERTION 1: the coalesced reinitialize waiter got its own callback with a
-		-- clear timeout error -- it did NOT hang waiting for the wedged dial or the
-		-- reconnect machine's unrelated exhaustion sweep.
+		-- The coalesced reinitialize waiter got its own callback with a clear
+		-- timeout error, not a hang.
 		assert.is_not_nil(
 			reinit_reply,
 			"a caller coalesced onto the wedged dial must be notified when the dial is abandoned, not hang forever"
@@ -519,8 +462,7 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 			"the coalesced waiter's notification must carry a timeout error, not a phantom success"
 		)
 
-		-- ASSERTION 2: the slot is genuinely freed -- attempt #2 dialed FRESH (a new,
-		-- distinct dial at a higher index), not joining the abandoned D1.
+		-- The slot is genuinely freed: attempt #2 dialed fresh, not joining D1.
 		assert.are.equal(
 			dials_after_connect + 2,
 			detect_stub.dials,
@@ -538,10 +480,10 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 		assert.is_false(obj:is_stopped(), "the client should be connected again on the fresh D2 transport")
 		assert.are.equal(1, t2.hook_count, "the fresh D2 transport must be adopted/hooked exactly once")
 
-		-- ASSERTION 3: NOW the originally-wedged D1's detect.connect finally calls
-		-- back, very late -- after D1 was abandoned and after D2 was adopted. Its
-		-- result must be recognized as stale (generation was bumped on abandon) and
-		-- CLOSED, never adopted into the client that has moved on to D2.
+		-- The originally-wedged D1's detect.connect finally calls back, very
+		-- late, after D1 was abandoned and D2 adopted. Its result must be
+		-- recognized as stale (generation bumped on abandon) and closed, never
+		-- adopted into the client that has moved on to D2.
 		local t1_late = transport_double({ label = "t1-late" })
 		detect_stub.resolve(d1_index, { transport = "legacy_sse", client = t1_late, session_id = "sess-t1" })
 		vim.wait(60, function()
@@ -558,25 +500,18 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 	end)
 
 	it("times out a reinitialize-only wedged dial with no concurrent reconnect activity", function()
-		-- Scenario (round 4), the reinit-only wedge: `entry.reconnect:state()` stays
-		-- "connected" throughout (no stream drop observed at all -- untagged exit
-		-- never fires), so `attempt_reconnect`'s guard -- the ONLY existing timeout on
-		-- a handshake dial -- never runs. A 404 request drives `make_reinitializer`
-		-- straight into `perform_handshake` as the sole, first caller; it dispatches
-		-- the one physical dial and that dial NEVER calls back (a server that accepts the
-		-- TCP connection but hangs the MCP handshake forever, exactly the pathology
-		-- ATTEMPT_TIMEOUT_MS exists to bound elsewhere).
+		-- regression: `entry.reconnect:state()` stays "connected" throughout (no
+		-- stream drop, so attempt_reconnect's guard never runs). A 404 request
+		-- drives make_reinitializer straight into perform_handshake as the sole
+		-- caller; it dispatches one dial that never calls back (a server that
+		-- accepts the TCP connection but hangs the MCP handshake forever).
 		--
-		-- Pre-fix: make_reinitializer is a thin wrapper with no timer, no timeout
-		-- config, no guard of its own -- nothing ever resolves `on_done`, so the
-		-- original request's callback hangs forever: an unconditional R11 violation.
-		--
-		-- Post-fix: make_reinitializer owns its own guard (default ATTEMPT_TIMEOUT_MS,
-		-- overridable via `entry.config.reinit_timeout`). On timeout it abandons the
-		-- wedged dial (freeing entry._handshake for a future caller) and resolves the
-		-- original request's callback with a clear timeout error -- WITHOUT touching
-		-- entry.reconnect (a 404-reinitialize is session-scoped, not connection-scoped,
-		-- so the reconnect attempt counter/state must be untouched).
+		-- make_reinitializer must own its own guard (default ATTEMPT_TIMEOUT_MS,
+		-- overridable via `entry.config.reinit_timeout`). On timeout it abandons
+		-- the wedged dial (freeing entry._handshake for a future caller) and
+		-- resolves the original request's callback with a clear timeout error,
+		-- without touching entry.reconnect -- a 404-reinitialize is
+		-- session-scoped, not connection-scoped.
 		local obj, initial = connect_client({ reinit_timeout = 10 })
 		local dials_after_connect = detect_stub.dials
 
@@ -597,16 +532,15 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 		)
 		local d1_index = #detect_stub.pending
 
-		-- Bounded wait: this is the core regression check. Pre-fix, `reply` never
-		-- becomes non-nil (nothing resolves make_reinitializer's on_done), so this
-		-- wait always times out at its bound rather than hanging the test suite
-		-- itself -- the bound is the point, not a race to shrink.
+		-- Bounded wait: without a guard, `reply` never becomes non-nil, so this
+		-- wait times out at its bound rather than hanging the test suite -- the
+		-- bound itself is the point, not a race to shrink.
 		vim.wait(200, function()
 			return reply ~= nil
 		end)
 
-		-- CORE ASSERTION: the caller's request callback resolves within the bound,
-		-- with a clear timeout error -- never silently, never with a phantom success.
+		-- The caller's request callback resolves within the bound, with a clear
+		-- timeout error -- never silently, never with a phantom success.
 		assert.is_not_nil(
 			reply,
 			"a reinit-only wedged dial with no concurrent reconnect activity must still resolve the caller, not hang forever"

@@ -1,23 +1,17 @@
---- Fail-closed transport-security gate for R12.
+--- Fail-closed transport-security gate.
 ---
---- This module does NOT implement TLS. plenary.curl's underlying curl process
---- performs the handshake and certificate verification (the same
---- networking-library discipline U1/U6 follow: never hand-roll TLS on vim.uv).
---- Its sole job is a pre-connection policy check: before a connection to a
---- non-localhost server is opened, refuse it outright unless the URL uses https://
---- AND a credential (bearer token) is configured. A localhost server is exempt and
---- proceeds exactly as before.
----
---- R12 (verbatim): "The client refuses (fails closed) a non-localhost
---- connection that lacks configured authentication or TLS, rather than warning
---- and proceeding unauthenticated."
+--- This module does not implement TLS itself; plenary.curl's underlying curl
+--- process performs the handshake and certificate verification. Its sole job
+--- is a pre-connection policy check: before a connection to a non-localhost
+--- server is opened, refuse it outright unless the URL uses https:// AND a
+--- credential (bearer token) is configured. A localhost server is exempt.
 ---
 --- The check is a pure function of the URL and a small, non-secret token-status
 --- table; it never receives, echoes, or logs any token value.
 
 local M = {}
 
---- The canonical loopback host identifiers exempt from the R12 gate. Only these
+--- The canonical loopback host identifiers exempt from the gate. Only these
 --- exact forms are treated as localhost; any other 127.0.0.0/8 alias (e.g.
 --- 127.0.0.2) is a real network address for policy purposes.
 local LOCALHOST_HOSTS = {
@@ -58,7 +52,7 @@ function M.is_localhost(url)
 	return LOCALHOST_HOSTS[host] == true
 end
 
---- Decide whether a connection to `url` is allowed under R12.
+--- Decide whether a connection to `url` is allowed.
 ---
 --- localhost: always allowed (no auth/TLS requirement).
 --- non-localhost: allowed only if the scheme is https:// AND a token is present.
@@ -91,7 +85,7 @@ function M.check_connection_allowed(url, token_status)
 	end
 
 	return false,
-		"refusing to connect (fail closed, R12): a non-localhost server connection requires " .. table.concat(
+		"refusing to connect (fail closed): a non-localhost server connection requires " .. table.concat(
 			missing,
 			" and "
 		) .. "; refusing rather than connecting unauthenticated"

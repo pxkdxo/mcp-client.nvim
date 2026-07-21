@@ -1,24 +1,16 @@
---- MCP session lifecycle: the `Mcp-Session-Id` / `MCP-Protocol-Version`
---- header pair, and the one status the brief singles out for special
---- handling -- a session-scoped 404.
+--- MCP session lifecycle: tracks the `Mcp-Session-Id` / `MCP-Protocol-Version`
+--- header pair and recovers transparently from a session-scoped 404.
 ---
 --- Per the MCP spec, once a server has assigned a session id, a later 404 on a
 --- request means "that session no longer exists" (the server was restarted,
---- the session was GC'd, etc.). The correct behavior is not to surface an
---- error to the caller but to transparently reinitialize a fresh session and
---- retry the original request against it -- the caller only ever observes
---- the successful retry. Every other non-2xx status is a genuine error and
---- is surfaced unchanged.
+--- the session was GC'd, etc.). Instead of surfacing an error, we
+--- reinitialize a fresh session and retry the original request against it --
+--- the caller only ever observes the successful retry. Every other non-2xx
+--- status is a genuine error and is surfaced unchanged.
 ---
---- The transport's `request(msg, cb)` reports errors as `cb(err_string,
---- nil, response)`, where `response` (when present) carries `.status`. We
---- key the 404 detection on that status when available and fall back to the
---- error string otherwise, so the special case fires regardless of which
---- transport produced it.
----
---- Reinitialization is injected (`reinitialize(on_done)`), not performed
---- here: the actual re-handshake belongs to the connect layer. This keeps
---- the session unit pure and testable without the network.
+--- Reinitialization is injected (`reinitialize(on_done)`) rather than
+--- performed here: the actual re-handshake belongs to the connect layer,
+--- keeping this unit pure and testable without the network.
 
 local Session = {}
 Session.__index = Session

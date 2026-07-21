@@ -10,11 +10,11 @@
 ---      `authorization_endpoint`, `token_endpoint`, and optionally a
 ---      `registration_endpoint` (RFC 7591 DCR).
 ---
---- Every network call here goes through plenary.curl -- exactly like U1's
---- transport code -- because these are ordinary HTTPS requests to the server
---- and its authorization server (vim.uv has no TLS). Each failure is
---- surfaced with a stage label ("protected resource metadata", "authorization
---- server metadata") so a caller never sees a generic "auth failed".
+--- Every network call here goes through plenary.curl because these are
+--- ordinary HTTPS requests to the server and its authorization server
+--- (vim.uv has no TLS). Each failure is surfaced with a stage label
+--- ("protected resource metadata", "authorization server metadata") so a
+--- caller never sees a generic "auth failed".
 local curl = require("plenary.curl")
 
 local M = {}

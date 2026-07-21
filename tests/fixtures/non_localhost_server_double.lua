@@ -1,54 +1,32 @@
---- Synthetic non-localhost HTTPS server double, for the R12 auth/TLS validation.
+--- Synthetic non-localhost HTTPS server double.
 ---
---- R12 (verbatim): "The client supports standard authentication (e.g. a bearer
---- token) and transport security (TLS) for server connections that are not on
---- localhost. The client refuses (fails closed) a non-localhost connection
---- lacking configured authentication or TLS."
+--- Stands in for a real non-localhost MCP server: a real HTTPS server bound to
+--- a loopback alias other than localhost (e.g. 127.0.0.2), presenting a
+--- self-signed certificate. Supports both the fail-closed path (a non-localhost
+--- URL with no TLS/token, refused before any socket opens -- needs no running
+--- server) and the successful-auth path (https:// + bearer token completes a
+--- real TLS handshake against the self-signed cert, trusted via
+--- CURL_CA_BUNDLE, with the bearer header observable via the request capture).
 ---
---- Neither real reference server (ravitemer/mcp-hub on :40032, samanhappy/mcphub on
---- :3000) is non-localhost, so per the plan's Risks & Dependencies section the
---- R12/TLS surface is validated against THIS synthetic double: a real HTTPS
---- server bound to a loopback *alias other than localhost* (e.g. 127.0.0.2),
---- presenting a self-signed certificate, standing in for a real non-localhost
---- server. It exercises both R12 paths:
----   * fail-closed  -- a non-localhost URL with no TLS and/or no token is refused
----                     by client.connect BEFORE any socket is opened (this needs
----                     no running server -- the gate is a pure policy check);
----   * successful   -- https:// + a configured bearer token passes the gate,
----     auth path      completes a real TLS handshake against the self-signed cert
----                     (trusted via CURL_CA_BUNDLE), and the bearer header reaches
----                     the wire (observable via the double's request capture).
----
---- PORTABILITY (binding requirement): the double must not hard-fail the suite on
---- a machine that cannot support it. Two real-world constraints make the live TLS
---- server best-effort:
----   1. A bindable non-localhost loopback alias. On Linux the whole 127.0.0.0/8
----      is loopback and binds freely; on macOS only 127.0.0.1 is configured on
----      lo0 by default, so 127.0.0.2 does NOT bind without `ifconfig lo0 alias`
----      (a privileged change this fixture will never make). We probe a small
----      candidate list and use the first that binds.
----   2. A TLS-terminating server. vim.uv has no TLS, and the plugin's transport
----      (correctly) does not pass curl's --insecure, so we terminate TLS in a
----      tiny Node https server (test-fixture code has no transport constraint;
----      only client-side server I/O must go through plenary.curl). If Node is not
----      available, the live server simply isn't started.
---- When the live server can't be brought up, `:available()` returns false and
---- the pure-gate (fail-closed) assertions still run against the chosen
---- non-localhost URL -- the successful-auth assertions skip gracefully.
----
---- SAFETY: this fixture only binds loopback aliases it has proven bindable, on
---- ephemeral ports. It never touches any real server or port (37373/40032/3000).
+--- The live server is best-effort so it never hard-fails the suite:
+---   1. Only 127.0.0.1 is guaranteed bound to loopback on macOS by default
+---      (Linux binds all of 127.0.0.0/8 freely); a small candidate list of
+---      aliases is probed and the first bindable one is used.
+---   2. vim.uv has no TLS and the plugin's transport must not pass curl's
+---      --insecure, so TLS is terminated by a small Node https server instead.
+--- When the live server can't be brought up, `:available()` returns false;
+--- fail-closed assertions still run against the chosen non-localhost URL, and
+--- successful-auth assertions should skip.
 
 local uv = vim.uv or vim.loop
 
 local M = {}
 
 --- Candidate non-localhost loopback hosts to try to bind, in order. All are in
---- 127.0.0.0/8 (loopback) but are NOT the canonical localhost identifiers the
---- R12 gate exempts, so from the gate's perspective they are "non-localhost".
---- 127.0.0.2/3 work out-of-the-box on Linux; the 127.10.x / 127.50.x entries
---- cover common macOS `lo0 alias` setups so a developer who has configured one
---- still gets live coverage.
+--- 127.0.0.0/8 (loopback) but are not canonical localhost identifiers, so the
+--- auth/TLS gate treats them as non-localhost. 127.0.0.2/3 work out-of-the-box
+--- on Linux; the 127.10.x / 127.50.x entries cover common macOS `lo0 alias`
+--- setups for developers who have configured one.
 local CANDIDATE_HOSTS = {
 	"127.0.0.2",
 	"127.0.0.3",
@@ -57,9 +35,7 @@ local CANDIDATE_HOSTS = {
 	"127.50.100.1",
 }
 
---- Can we actually bind `host` on an ephemeral port right now? Uses vim.uv --
---- the same loopback-bind mechanism the other test doubles use -- and cleans up
---- the probe socket immediately.
+--- Whether `host` can be bound on an ephemeral port right now.
 --- @param host string
 --- @return boolean
 local function can_bind(host)
@@ -85,8 +61,8 @@ local function pick_bindable_host()
 end
 
 --- Reserve a free ephemeral port on `host` (bind :0, read the assigned port,
---- release). There is an unavoidable tiny race between releasing and the Node
---- server re-binding it; acceptable for a local test fixture.
+--- release). There is an unavoidable tiny race before the Node server rebinds
+--- it, acceptable for a local test fixture.
 --- @param host string
 --- @return number
 local function reserve_port(host)
@@ -97,7 +73,7 @@ local function reserve_port(host)
 	return port
 end
 
---- Generate a self-signed cert (+key) for `host` into `dir`. Uses the system
+--- Generate a self-signed cert (+key) for `host` into `dir` via the system
 --- openssl. Returns cert_path, key_path on success or nil, err.
 local function generate_self_signed(dir, host)
 	local cert = dir .. "/cert.pem"
@@ -127,11 +103,11 @@ local function generate_self_signed(dir, host)
 	return cert, key
 end
 
---- The Node HTTPS server source. Kept inline (written to a temp file at start)
---- so the fixture is self-contained. It captures each request's method/url and
---- Authorization header to a capture file (one JSON line per request) and
---- replies with a minimal, valid MCP InitializeResult so the plugin's
---- Streamable-HTTP detection succeeds. Args: <host> <port> <cert> <key> <capture>.
+--- Node HTTPS server source, written to a temp file at start so the fixture is
+--- self-contained. Captures each request's method/url and Authorization header
+--- to a capture file (one JSON line per request) and replies with a minimal,
+--- valid MCP InitializeResult so the plugin's Streamable-HTTP detection
+--- succeeds. Args: <host> <port> <cert> <key> <capture>.
 local NODE_SERVER = [[
 const https = require('https');
 const fs = require('fs');

@@ -6,15 +6,11 @@
 --- (`request(rpc_message, callback)`, `notify(rpc_message)`, `close()`)
 --- so the rest of the core never needs to know which one it is talking to.
 ---
---- Detection algorithm (MCP spec, transport revision negotiation):
----   1. POST the InitializeRequest to the configured URL.
----   2. A 2xx response means the server speaks Streamable HTTP: use it,
----      remembering any Mcp-Session-Id the server assigned.
----   3. A 400/404/405 response means the server doesn't recognize POST on
----      that URL: fall back to legacy discovery -- GET the same URL and
----      expect an `endpoint` SSE event naming the URL to POST against.
----   4. Any other status is a genuine error, surfaced as such -- never
----      silently treated as "must be legacy."
+--- Algorithm: POST the InitializeRequest to the configured URL. A 2xx
+--- response means Streamable HTTP. A 400/404/405 means the server doesn't
+--- recognize POST there, so fall back to legacy discovery (GET the same
+--- URL, expect an `endpoint` SSE event). Any other status is a genuine
+--- error.
 local curl = require("plenary.curl")
 
 local StreamableHttp = require("mcp-client.transport.streamable_http")
@@ -45,11 +41,11 @@ local function describe_curl_error(curl_err)
 end
 
 --- Legacy discovery: GET the configured URL and expect an `endpoint` SSE
---- event naming the URL to POST JSON-RPC messages against. The GET is a
---- single long-lived plenary.curl job (raw = {"-N"}, fed incrementally via
---- `stream`), held open for the life of the connection rather than
---- re-invoked per message; LegacySse:feed() parses it into SSE events
---- once the endpoint has been discovered and ownership is handed off.
+--- event naming the URL to POST JSON-RPC messages against. The GET stays
+--- open as a single long-lived job (raw = {"-N"} disables curl's response
+--- buffering so SSE lines arrive as they're written) for the life of the
+--- connection; once the endpoint is discovered, feed ownership passes to
+--- the legacy client's own parser.
 local function discover_legacy(url, headers, on_done)
 	local resolved = false
 	local job -- assigned below; captured by the stream callback's closure
@@ -100,11 +96,10 @@ local function discover_legacy(url, headers, on_done)
 end
 
 local function finalize_streamable_http(response, url, headers, on_done)
-	-- The Streamable HTTP spec sanctions two response shapes for a POST: a
-	-- direct `application/json` body, or a single-event `text/event-stream`
-	-- response carrying the JSON-RPC message in its `data:` field. Try the
-	-- direct-JSON case first (the common/simple case), then fall back to
-	-- unwrapping a single SSE event -- a real server may choose either.
+	-- A POST response may be a direct `application/json` body, or a
+	-- single-event `text/event-stream` carrying the JSON-RPC message in
+	-- its `data:` field -- both are spec-legal, so try JSON first and
+	-- fall back to unwrapping SSE.
 	local ok, decoded = pcall(vim.json.decode, response.body)
 	if not ok then
 		local sse_decoded, sse_err = transport_util.decode_json_from_sse_body(response.body)

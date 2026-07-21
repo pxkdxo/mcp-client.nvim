@@ -1,58 +1,26 @@
 local client = require("mcp-client.client")
 local native = require("mcp-client.native")
 
---- CodeCompanion adapter specs (U5). The real `codecompanion.nvim` plugin is
---- not a dependency of this repo (only locally installed on the author's
---- machine for reference, per the task brief) -- vendoring its ~13MB tree
---- purely to run these specs would be a heavyweight, out-of-scope test
---- infrastructure change the plan never asked for. Instead, this file fakes
---- the exact two modules the adapter genuinely `require()`s
---- (`codecompanion.mcp`, `codecompanion.config`) via `package.loaded`, built
---- to the *real, verified* shapes documented at the top of
---- `lua/mcp-client/adapters/codecompanion.lua` (each cited against the
---- actual installed source at
---- `~/.local/share/nvim/lazy/codecompanion.nvim`):
+--- The real `codecompanion.nvim` plugin is not a dependency of this repo, so
+--- this file fakes the two modules the adapter requires
+--- (`codecompanion.mcp`, `codecompanion.config`) via `package.loaded`,
+--- matching the shapes documented at the top of
+--- `lua/mcp-client/adapters/codecompanion.lua`:
 ---   - `codecompanion.mcp.register_tools(server_name, tools, group)` /
----     `.unregister_tools(server_name)` / `.get_registered_tools()` --
----     `mcp/init.lua:44-56`, a plain module-local registry with no
----     dependency on CodeCompanion's own MCP `Client` class.
+---     `.unregister_tools(server_name)` / `.get_registered_tools()` -- a
+---     plain module-local registry.
 ---   - `codecompanion.config.interactions.shared.editor_context` -- a plain
 ---     table of `{ description, callback(self) }` entries, resolved
----     synchronously by `editor_context/user.lua:18-30`
----     (`self.config.callback(self)`, return value used immediately as
----     message content -- no async completion path exists in this
----     subsystem, confirmed by grepping both `editor_context/init.lua` and
----     `editor_context/user.lua`). NOTE (U13): this used to be
----     `interactions.chat.editor_context` (U5's original, since-stale
----     assumption); the real installed `config.setup()`
----     (`config.lua:1376-1381`) now migrates a caller's
----     `args.interactions.chat.editor_context` into
----     `M.config.interactions.shared.editor_context` and nils out the old
----     `chat.editor_context` key entirely, and every real reader
----     (`interactions/chat/keymaps/init.lua:97`,
----     `providers/completion/init.lua:281`,
----     `interactions/shared/editor_context/init.lua:90`) reads only the
----     `shared` path -- confirmed empirically against the real installed
----     plugin before this fix (see U13's task report).
----   - `codecompanion.config.interactions.chat.slash_commands` (U12) -- a
----     plain, live module table of `{ description, callback(chat) }`
----     entries, read directly by `pairs()` on every completion/action-palette
----     resolution pass (`providers/completion/init.lua:98-101`,
----     `interactions/chat/action_palette.lua:95-99`, `keymaps.lua:6`) and
----     invoked via `SlashCommands:execute`
----     (`interactions/chat/slash_commands/init.lua:80-108`), which calls
----     `item.config.callback(chat)` directly when present (line 85-87) rather
----     than requiring a full `SlashCommand.new/execute/output` class -- the
----     exact same "plain table read live by pairs()" shape `editor_context`
----     already has, empirically verified against the real installed plugin
----     (mutating this table after `codecompanion.setup()` runs is picked up
----     by the real `completion.slash_commands()` and a real chat buffer's
----     `SlashCommands.run`, both exercised headlessly against
----     `~/.local/share/nvim/lazy/codecompanion.nvim` before writing this
----     adapter code).
---- This keeps the fake honest to the real API shape (each field asserted
---- against was independently confirmed against the installed source, not
---- invented for the test) while keeping the test suite self-contained.
+---     synchronously (`self.config.callback(self)`, return value used
+---     immediately as message content -- no async completion path exists in
+---     this subsystem). `interactions.chat.editor_context` is a dead path:
+---     `config.setup()` migrates any caller-supplied value into
+---     `interactions.shared.editor_context` and nils out the old key.
+---   - `codecompanion.config.interactions.chat.slash_commands` -- a plain,
+---     live module table of `{ description, callback(chat) }` entries, read
+---     directly by `pairs()` on every completion/action-palette resolution
+---     pass and invoked via `SlashCommands:execute`, which calls
+---     `item.config.callback(chat)` directly when present.
 
 local function fresh_codecompanion_mcp()
 	local registry = {}
@@ -88,25 +56,21 @@ local function fresh_codecompanion_config()
 		},
 		interactions = {
 			chat = {
-				-- Real config no longer carries editor_context here at all --
-				-- config.setup() (config.lua:1376-1381) nils this out after
-				-- migrating any caller-supplied value into
-				-- interactions.shared.editor_context. Deliberately absent (not
-				-- even `{}`) so a regression that writes back to this dead path
-				-- is caught (see the "does not resurrect the dead old path"
-				-- regression test below).
+				-- editor_context is deliberately absent here (not even `{}`):
+				-- the real config nils it out after migrating to
+				-- interactions.shared.editor_context, and a regression that
+				-- writes back to this dead path must be caught.
 				slash_commands = {
 					-- Real config always carries this sub-key alongside per-command
-					-- entries (config.lua:539-545); present here so the adapter's
-					-- additions can never accidentally clobber it.
+					-- entries; present here so the adapter's additions can never
+					-- accidentally clobber it.
 					opts = { acp = { enabled = true } },
 				},
 			},
 			shared = {
 				-- Real config always carries this sub-key alongside per-context
-				-- entries (config.lua:841-855); present here so the adapter's
-				-- additions can never accidentally clobber it, mirroring
-				-- interactions.chat.slash_commands.opts above.
+				-- entries; present here so the adapter's additions can never
+				-- accidentally clobber it.
 				editor_context = {
 					opts = {
 						excluded = { buftypes = {}, fts = {} },
@@ -138,7 +102,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 		package.loaded["mcp-client.adapters.codecompanion"] = nil
 	end)
 
-	it("has zero direct server or transport knowledge (R6): does not require transport/* modules", function()
+	it("has zero direct server or transport knowledge: does not require transport/* modules", function()
 		local codecompanion_adapter = require("mcp-client.adapters.codecompanion")
 		local path = debug.getinfo(codecompanion_adapter.setup, "S").source:sub(2)
 		local f = assert(io.open(path, "r"))
@@ -184,7 +148,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 		assert.is_function(resolved.cmds[1])
 
 		-- A group entry is also published, same shape as the internal MCP
-		-- bridge's own tool_bridge.setup_tools output (mcp/tool_bridge.lua:172-177).
+		-- bridge's own tool_bridge.setup_tools output.
 		local found_group = false
 		for _, group in pairs(all_groups) do
 			for _, name in ipairs(group.tools) do
@@ -195,10 +159,9 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 		end
 		assert.is_true(found_group)
 
-		-- Exercise the tool the way CodeCompanion's real Runner:run_tool
-		-- actually calls a resolved tool's cmds[1]
-		-- (tools/runtime/runner.lua:100-108): fun(tools, args, opts),
-		-- completion reported via opts.output_cb.
+		-- Exercise the tool the way CodeCompanion's real Runner:run_tool calls
+		-- a resolved tool's cmds[1]: fun(tools, args, opts), completion
+		-- reported via opts.output_cb.
 		local got_output
 		resolved.cmds[1]({}, { text = "hello" }, {
 			output_cb = function(output)
@@ -208,13 +171,9 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 
 		assert.is_not_nil(got_output)
 		assert.are.equal("success", got_output.status)
-		-- The echo tool returns exactly { text = "hello" } (a single key, so
-		-- ordering is unambiguous). render_result() has no .content key to
-		-- match here, so it falls through to vim.json.encode(result) -- the
-		-- deterministic output is exactly this JSON string. Assert exact
-		-- equality, not a substring match a broken JSON-producing renderer
-		-- could still satisfy (see the prompt-bridging tests below, added
-		-- for the same reason after a real bug slipped past assert.matches).
+		-- render_result() has no .content key to match here, so it falls
+		-- through to vim.json.encode(result); assert exact equality rather
+		-- than a substring match.
 		assert.are.equal('{"text":"hello"}', got_output.data)
 	end)
 
@@ -347,10 +306,8 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 
 		assert.is_true(completed)
 		assert.are.equal("success", got_output.status)
-		-- The remote double replies content = {{ type = "text", text =
-		-- "remote-hello" }}; render_result()'s single-text-content-item
-		-- branch returns that bare string directly (not JSON-encoded), so
-		-- the deterministic output is exactly this plain string.
+		-- render_result()'s single-text-content-item branch returns the bare
+		-- string directly, not JSON-encoded.
 		assert.are.equal("remote-hello", got_output.data)
 	end)
 
@@ -373,11 +330,10 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 		local entry = editor_context[entry_key]
 		assert.is_function(entry.callback)
 
-		-- editor_context/user.lua:18-30 calls this synchronously and uses
-		-- the return value immediately as chat message content -- no
-		-- callback/opts argument, no async completion path. A native
-		-- client's request() fires synchronously (U3), so this resolves to
-		-- real, current resource content on the very first call.
+		-- editor_context's callback is called synchronously and its return
+		-- value used immediately as message content. A native client's
+		-- request() also fires synchronously, so this resolves to real,
+		-- current resource content on the very first call.
 		local content = entry.callback({})
 		assert.is_string(content)
 		assert.matches("example://greeting", content)
@@ -425,24 +381,17 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 			assert.is_not_nil(entry_key)
 			local entry = editor_context[entry_key]
 
-			-- CodeCompanion's editor_context.callback contract is
-			-- synchronous-only (verified: editor_context/user.lua has no
-			-- deferred/async completion path at all). The remote client's
-			-- resources/list reply has not landed yet (setup() just ran;
-			-- vim.schedule has not fired), so this MUST resolve to the "no
-			-- resources currently available" placeholder -- not an error,
-			-- not a hang (R11), and not some invented parallel async
-			-- mechanism -- exactly the documented, honest degradation this
-			-- adapter is required to expose rather than hide.
+			-- editor_context's callback contract is synchronous-only. The
+			-- remote client's resources/list reply has not landed yet, so
+			-- this must resolve to the "no resources currently available"
+			-- placeholder rather than error or hang.
 			local content = entry.callback({})
 			assert.is_string(content)
 			assert.matches("No resources currently available", content)
 
-			-- Once the deferred resources/list reply lands and a refresh
-			-- is triggered, the same synchronous callback contract now
-			-- serves cached-but-real content -- still synchronous, still
-			-- no async completion path, just backed by a cache a
-			-- background refresh populated.
+			-- Once the deferred resources/list reply lands and a refresh is
+			-- triggered, the same synchronous callback now serves
+			-- cached-but-real content.
 			vim.wait(200, function()
 				codecompanion_adapter.exports.refresh()
 				local refreshed = fake_config.interactions.shared.editor_context[entry_key].callback({})
@@ -535,7 +484,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 	end)
 
 	it(
-		"regression (U13): editor_context entries land under interactions.shared.editor_context, "
+		"regression: editor_context entries land under interactions.shared.editor_context, "
 			.. "never resurrecting the dead interactions.chat.editor_context path",
 		function()
 			local example = require("tests.fixtures.example_native_server")
@@ -544,9 +493,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 			local codecompanion_adapter = require("mcp-client.adapters.codecompanion")
 			codecompanion_adapter.setup({})
 
-			-- The real, live path (confirmed against the installed
-			-- codecompanion.nvim: config.lua:1376-1381 migrates and nils out
-			-- the old key on setup()) must receive the entry.
+			-- The real, live path must receive the entry.
 			local entry_key
 			for key in pairs(fake_config.interactions.shared.editor_context) do
 				if key ~= "opts" and key:match("example%-native$") then
@@ -559,10 +506,8 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 			)
 
 			-- The old path must stay exactly as the real config leaves it
-			-- after setup() (nil / absent) -- this is the fake's initial
-			-- state (see fresh_codecompanion_config), and the adapter must
-			-- never (re-)create interactions.chat.editor_context. This is
-			-- the assertion that would have caught U5's original bug.
+			-- after setup() (nil/absent): the adapter must never
+			-- (re-)create interactions.chat.editor_context.
 			assert.is_nil(
 				fake_config.interactions.chat.editor_context,
 				"the adapter must never write to the dead interactions.chat.editor_context path"
@@ -600,16 +545,12 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 		assert.is_true(found_echo)
 	end)
 
-	describe("prompt/slash-command bridging (U12)", function()
+	describe("prompt/slash-command bridging", function()
 		--- A minimal chat double: just enough of `CodeCompanion.Chat` for a
 		--- slash command's `callback(chat)` to add a real message via
-		--- `chat:add_message({role, content}, opts)` -- the real
-		--- content-bearing call `fetch.lua`/`file.lua`/`symbols.lua`/`help.lua`
-		--- all use (verified: `add_buf_message` explicitly does NOT enter the
-		--- LLM message stack, per its own doc comment in
-		--- `interactions/chat/init.lua:1811-1812`, so a prompt's whole point --
-		--- seeding real conversational context -- requires `add_message`, not
-		--- `add_buf_message`).
+		--- `chat:add_message({role, content}, opts)`. `add_buf_message` does
+		--- not enter the LLM message stack, so seeding real conversational
+		--- context requires `add_message`.
 		local function fake_chat()
 			local messages = {}
 			return {
@@ -642,8 +583,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 				assert.is_string(entry.description)
 				assert.is_function(entry.callback)
 
-				-- The declared prompt argument (`prompt_meta.greet.arguments = {
-				-- {name="who", required=false}}`) is collected via vim.ui.input;
+				-- The declared prompt argument is collected via vim.ui.input;
 				-- stub it to answer deterministically instead of driving real UI.
 				local original_input = vim.ui.input
 				vim.ui.input = function(_opts, on_confirm)
@@ -658,13 +598,8 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 				assert.are.equal(1, #chat.messages)
 				local msg = chat.messages[1]
 				assert.are.equal("user", msg.data.role)
-				-- Matches prompts/get's actual result for prompts.greet({who="Ada"}):
-				-- { messages = { { role = "user", content = { type = "text", text =
-				-- "Hello, Ada!" } } } } -- the rendered content must be exactly that
-				-- plain text, not a JSON-encoded blob that merely contains this
-				-- substring (render_result's list-shaped fallback would produce
-				-- '{"text":"Hello, Ada!","type":"text"}', which `assert.matches`
-				-- would wrongly accept -- assert exact equality instead).
+				-- The rendered content must be exactly this plain text, not a
+				-- JSON-encoded blob that merely contains it as a substring.
 				assert.are.equal("Hello, Ada!", msg.data.content)
 			end
 		)
@@ -683,9 +618,8 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 					end
 					vim.schedule(function()
 						if rpc_message.method == "prompts/list" then
-							-- Envelope-shaped reply, like a real remote server -- jsonrpc/id
-							-- are what unwrap_result actually keys on (mirrors
-							-- avante_spec.lua's make_remote_prompt_double).
+							-- Envelope-shaped reply, like a real remote server:
+							-- jsonrpc/id are what unwrap_result keys on.
 							return callback(nil, {
 								jsonrpc = "2.0",
 								id = 1,
@@ -773,18 +707,12 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 			end
 		)
 
-		--- Regression: `vim.ui.input`'s `on_confirm` callback is NOT guaranteed
-		--- to run synchronously before `vim.ui.input()` returns -- confirmed
-		--- against the real installed `snacks.nvim`
-		--- (`~/.local/share/nvim/lazy/snacks.nvim/lua/snacks/input.lua:122-136`,
-		--- `confirm()` wraps `on_confirm(value)` in `vim.schedule(...)`) --
-		--- which the user's own real dotfiles config enables
-		--- (`nvim/lua/plugins/snacks.lua:10`, `input = { enabled = true }`).
-		--- This stub mirrors that: it captures `on_confirm` and returns
-		--- immediately without calling it, so a caller that (bug) reads a
-		--- variable right after `vim.ui.input()` returns sees only the
-		--- pre-call initial state, and a caller that (fix) continues from
-		--- inside the eventually-fired callback sees the real answer.
+		--- `vim.ui.input`'s `on_confirm` callback is not guaranteed to run
+		--- synchronously before `vim.ui.input()` returns (e.g. snacks.nvim's
+		--- input provider defers it via `vim.schedule`). This stub mirrors
+		--- that: it captures `on_confirm` and returns immediately without
+		--- calling it, so callers must resume from inside the eventually-fired
+		--- callback rather than reading state right after the call returns.
 		local function deferred_input_stub()
 			local pending = {}
 			local stub = {}
@@ -865,10 +793,8 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 				entry.callback(chat)
 
 				-- The callback() call has returned, but the deferred on_confirm
-				-- has NOT fired yet -- under the old (buggy) code, this is exactly
-				-- the moment it read `cancelled`/`value` at their unset initial
-				-- values and proceeded regardless. No request must have gone out,
-				-- and no message must have landed, yet.
+				-- has NOT fired yet. No request must have gone out, and no
+				-- message must have landed, yet.
 				assert.are.equal(1, input_stub.pending_count())
 				assert.are.equal(0, #chat.messages)
 

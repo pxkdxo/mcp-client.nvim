@@ -1,24 +1,15 @@
---- OAuth 2.1 refresh-token grant for U7.
+--- OAuth 2.1 refresh-token grant (RFC 6749 §6).
 ---
---- U6's dcr.exchange_code_for_token handles the authorization-code grant (the
---- initial token acquisition). This module handles the *refresh* grant
---- (RFC 6749 §6): a distinct request shape --
----   grant_type=refresh_token & refresh_token=<stored> & client_id & resource
---- -- POSTed to the token endpoint recorded on the stored token, exchanging an
---- expired access token for a fresh one WITHOUT a new browser round-trip.
+--- POSTs grant_type=refresh_token & refresh_token=<stored> & client_id &
+--- resource to the token endpoint recorded on the stored token, exchanging an
+--- expired access token for a fresh one without a new browser round-trip.
 ---
---- Public-client refresh-token rotation (per the OAuth 2.1 draft's guidance for
---- public clients): if the AS returns a new refresh_token, it replaces the
---- stored one; if it omits one, the previous refresh_token is retained.
+--- A revoked/invalid refresh token (or the absence of one) surfaces a
+--- distinct "re-authentication required" error so the caller stops and
+--- re-runs the full OAuth flow rather than retrying the refresh indefinitely.
 ---
---- Terminal case: a revoked/invalid refresh token (or the absence of any
---- refresh token to begin with) surfaces a distinct "re-authentication
---- required" error so the caller stops and re-runs the full OAuth flow rather
---- than retrying the refresh indefinitely.
----
---- Networking goes through plenary.curl (never raw vim.uv -- HTTPS). Secrets
---- (access token, refresh token) never appear in a log line or error message;
---- error paths report the token endpoint's OAuth error *code* only.
+--- Secrets (access token, refresh token) never appear in a log line or error
+--- message; error paths report the token endpoint's OAuth error *code* only.
 
 local curl = require("plenary.curl")
 
@@ -55,16 +46,15 @@ end
 ---   client_id      (string)  -- public client id to re-send
 ---   resource       (string|nil) -- RFC 8707 resource indicator to re-send
 --- @param callback fun(result: table|nil, err: string|nil)
----   On success, result is a fresh typed token result of the same shape U6's
----   exchange produces (access_token, refresh_token, token_type, expires_at,
----   scope, token_endpoint, client_id, resource, raw), with the refresh token
----   rotated (or retained) and the refresh metadata carried forward. On a
----   revoked/absent refresh token, result is nil and err is a "re-authentication
----   required" message (secret-free).
+---   On success, result is a fresh typed token result (access_token,
+---   refresh_token, token_type, expires_at, scope, token_endpoint, client_id,
+---   resource, raw), with the refresh token rotated (or retained) and the
+---   refresh metadata carried forward. On a revoked/absent refresh token,
+---   result is nil and err is a "re-authentication required" message
+---   (secret-free).
 function M.refresh(token, callback)
 	assert(type(token) == "table", "refresh: token table is required")
 
-	-- No refresh token to present: nothing to exchange. This is terminal.
 	if type(token.refresh_token) ~= "string" or token.refresh_token == "" then
 		return callback(nil, "token refresh: re-authentication required (no refresh token available)")
 	end
@@ -81,8 +71,6 @@ function M.refresh(token, callback)
 	if token.resource then
 		params.resource = token.resource
 	end
-	-- Some AS's want the original scope narrowed/echoed on refresh; re-send it
-	-- when present (RFC 6749 §6 allows scope on the refresh request).
 	if token.scope then
 		params.scope = token.scope
 	end
@@ -102,10 +90,8 @@ function M.refresh(token, callback)
 			local ok, decoded = pcall(vim.json.decode, response.body)
 			if response.status < 200 or response.status >= 300 then
 				local code = ok and oauth_error(decoded)
-				-- invalid_grant on a refresh means the refresh token is expired or
-				-- revoked: terminal, re-auth required. Other errors are also
-				-- terminal for the refresh path (we do not loop), but we surface the
-				-- code so the caller can diagnose. Never echo the token.
+				-- Any error status on the refresh grant is terminal (no retry loop);
+				-- surface the OAuth error code, never the token.
 				return callback(
 					nil,
 					string.format(
@@ -127,8 +113,8 @@ function M.refresh(token, callback)
 
 			return callback({
 				access_token = decoded.access_token,
-				-- Rotation: prefer a newly-issued refresh token; otherwise keep the
-				-- one we presented (RFC 6749 §6 -- the AS MAY omit a new one).
+				-- RFC 6749 §6: the AS MAY omit a new refresh_token, in which case the
+				-- previously presented one remains valid.
 				refresh_token = decoded.refresh_token or token.refresh_token,
 				token_type = decoded.token_type or token.token_type or "Bearer",
 				expires_at = expires_at,
@@ -141,9 +127,8 @@ function M.refresh(token, callback)
 			}, nil)
 		end),
 		on_error = vim.schedule_wrap(function(err)
-			-- A network-level failure is NOT terminal re-auth (the token may still
-			-- be valid) -- surface it distinctly so a caller can retry the refresh
-			-- rather than force a full re-authorization.
+			-- Network failure, not a rejected grant: distinct from re-auth-required
+			-- so the caller can retry rather than forcing a full re-authorization.
 			callback(nil, "token refresh: request failed: " .. (err.message or "unknown error"))
 		end),
 	})

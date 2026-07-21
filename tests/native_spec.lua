@@ -1,12 +1,10 @@
 local client = require("mcp-client.client")
 local native = require("mcp-client.native")
 
---- Native-server specs (U3). A native server is an in-process, Lua-function
---- backed "client" that registers into the exact same registry `client.lua`
---- backs `get_clients()` with, wearing the exact same object shape (`id`,
---- `name`, `is_stopped()`, `request`, `notify`) as a remote server connection,
---- so adapters built against that shape (later tasks) cannot tell native
---- from remote apart.
+--- A native server is an in-process, Lua-function-backed "client" that
+--- registers into the same registry `get_clients()` reads, with the same
+--- object shape (`id`, `name`, `is_stopped()`, `request`, `notify`) as a
+--- remote server connection, so adapters can't tell native from remote apart.
 
 describe("native (in-process server registration)", function()
 	after_each(function()
@@ -17,7 +15,6 @@ describe("native (in-process server registration)", function()
 		local example = require("tests.fixtures.example_native_server")
 		local server = native.register(example)
 
-		-- Same shape as a remote client object.
 		assert.is_not_nil(server.id)
 		assert.are.equal("example-native", server.name)
 		assert.is_function(server.is_stopped)
@@ -25,16 +22,12 @@ describe("native (in-process server registration)", function()
 		assert.is_function(server.notify)
 		assert.is_false(server:is_stopped())
 
-		-- Appears in the shared registry, indistinguishable from a remote client.
 		local all = client.get_clients()
 		assert.are.equal(1, #all)
 		assert.are.equal(server.id, all[1].id)
 		local by_name = client.get_clients({ name = "example-native" })
 		assert.are.equal(1, #by_name)
 
-		-- The tool is callable via the exact same request() path a remote
-		-- server's tool would use: a JSON-RPC "tools/call" message with an
-		-- (err, result, response) callback.
 		local got
 		server:request({
 			jsonrpc = "2.0",
@@ -89,9 +82,7 @@ describe("native (in-process server registration)", function()
 			end)
 		end)
 
-		-- The call into request() itself must never throw -- the error is
-		-- reported through the callback, exactly like a remote server's
-		-- tool-call failure would be.
+		-- request() must never throw; errors surface via the callback.
 		assert.is_true(ok)
 		assert.is_not_nil(got)
 		assert.is_not_nil(got.err)

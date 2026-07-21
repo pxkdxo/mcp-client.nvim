@@ -1,20 +1,15 @@
 --- Bounded-backoff reconnection state machine.
 ---
---- This is the single most correctness-critical piece of the plugin: the
---- original mcphub.nvim daemon crash-looped on reconnect because a real
---- failure and its own intentional teardown were indistinguishable, so a
---- teardown re-triggered a connect which tore down again, ad infinitum. The
---- fix lives in the shape of this machine: an intentional close is a
---- terminal transition to `disconnected` that can never be undone by a
---- subsequently-observed stream-end, and every reconnect path is guarded on
---- the current state so a late drop cannot resurrect a torn-down client.
+--- An intentional close is a terminal transition to `disconnected` that can
+--- never be undone by a subsequently-observed stream-end, and every
+--- reconnect path is guarded on the current state so a late drop cannot
+--- resurrect a torn-down client.
 ---
---- The machine is deliberately pure -- no network, no real timer, no
---- autocmds. Time is injected via `schedule`/`cancel`, the actual connect
---- work via `attempt`, and side effects on state transitions via
---- `on_connected`/`on_disconnected`. `client.lua` wires those to
---- plenary.curl, vim.uv, and Neovim autocmds; the machine itself only ever
---- decides *what* should happen and *when*.
+--- Pure state machine -- no network, no real timer, no autocmds. Time is
+--- injected via `schedule`/`cancel`, the actual connect work via `attempt`,
+--- and side effects on state transitions via `on_connected`/
+--- `on_disconnected`. `client.lua` wires those to plenary.curl, vim.uv, and
+--- Neovim autocmds.
 ---
 --- Three states:
 ---   connected     -- a live session; the steady state.
@@ -22,11 +17,9 @@
 ---                    flight; bounded by `max_attempts`.
 ---   disconnected  -- terminal: attempts exhausted, or an intentional close.
 ---
---- Backoff (bound exactly by the plan's Key Technical Decisions): initial
---- 1000ms, 1.5x growth, cap 30000ms; a server-sent SSE `retry:` hint
---- overrides the computed delay for the next attempt; `max_attempts`
---- defaults to 2 (matching the MCP reference TypeScript SDK) before the
---- machine gives up and transitions to `disconnected`.
+--- A server-sent SSE `retry:` hint overrides the computed backoff delay for
+--- the next attempt. `max_attempts` defaults to 2, matching the MCP
+--- reference TypeScript SDK.
 
 local Reconnect = {}
 Reconnect.__index = Reconnect
@@ -146,8 +139,8 @@ end
 
 --- The caller (or this unit's own teardown) intentionally closed the
 --- connection. Terminal: transition straight to `disconnected` and cancel
---- any pending attempt, without scheduling a retry. This is the crash-loop
---- fix -- after this, `on_drop` is a no-op.
+--- any pending attempt, without scheduling a retry. After this, `on_drop`
+--- is a no-op.
 function Reconnect:on_intentional_close()
 	if self._state == "disconnected" then
 		return

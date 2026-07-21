@@ -1,4 +1,4 @@
---- Persistent OAuth token storage for U7.
+--- Persistent OAuth token storage.
 ---
 --- A token result (the typed table dcr.exchange_code_for_token / refresh.refresh
 --- produce -- access_token, refresh_token, expires_at, token_endpoint,
@@ -14,9 +14,9 @@
 ---     outside the repository checkout, and (living under $XDG_DATA_HOME) never
 ---     committed to version control.
 ---
---- Security invariants (held as strictly as U6):
+--- Security invariants:
 ---   * No secret (access token, refresh token) ever appears in a log line, an
----     error message, or the status table exposed for :checkhealth (U8).
+---     error message, or the status table exposed for :checkhealth.
 ---   * The file backend chmods to 0600 immediately after writing.
 
 local M = {}
@@ -33,9 +33,8 @@ end
 
 --- Which backend is available on this host? macOS with the `security` CLI on
 --- PATH gets the keychain; everything else falls back to the file backend.
---- (No Linux Secret Service / libsecret binding is wired up here; that would be
---- a future addition -- until then Linux uses the 0600 file, which still meets
---- the "never world-readable, never committed" bar.)
+--- (No Linux Secret Service / libsecret binding is wired up here yet; the file
+--- backend still meets the "never world-readable, never committed" bar.)
 local function detect_backend()
 	if vim.fn.has("mac") == 1 and vim.fn.executable("security") == 1 then
 		return "keychain"
@@ -266,7 +265,7 @@ function TokenStore:clear()
 	end
 end
 
---- Non-secret status for :checkhealth (U8) and error messages. Reports presence
+--- Non-secret status for :checkhealth and error messages. Reports presence
 --- and expiry state ONLY -- never the token, refresh token, or any secret.
 --- @return table {
 ---   backend           = "keychain"|"file",
@@ -302,16 +301,11 @@ end
 -- ---------------------------------------------------------------------------
 -- Bearer-header attachment (module-level; no store instance needed).
 --
--- This is U7's answer to the bearer-header-attachment integration point. Reading
--- client.lua + the transports: `entry.config.headers` is threaded VERBATIM into
--- every transport (re)construction (detect.connect / attempt_reconnect /
--- make_reinitializer all pass `entry.config.headers`), and each transport stores
--- `opts.headers or {}` and re-merges it via vim.tbl_extend("force", ...) on
--- EVERY request. The same table reference therefore survives a reconnect. So the
--- cleanest way to keep the Authorization header current -- including after a
--- token refresh -- is to mutate that one shared `config.headers` table in place:
--- every current and future transport reads the updated value on its next
--- request, with no reach into transport internals.
+-- `entry.config.headers` is the same table reference reused across transport
+-- (re)constructions and re-merged into every request, including after a
+-- reconnect. Mutating it in place here keeps the Authorization header current
+-- for every current and future transport without reaching into transport
+-- internals.
 -- ---------------------------------------------------------------------------
 
 --- Set (or clear) the Authorization header on a headers table IN PLACE.

@@ -18,9 +18,9 @@ local M = {}
 --   ALPHA / DIGIT / "-" / "." / "_" / "~"
 local VERIFIER_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
 
--- 96 random bytes base64url-encode to 128 characters, the RFC 7636 maximum
--- verifier length -- we instead draw directly from the unreserved alphabet,
--- so pick a length comfortably inside the [43, 128] range with ample entropy.
+-- Verifier characters are drawn directly from the unreserved alphabet rather
+-- than base64url-encoded bytes, so length is independent of byte count.
+-- 64 sits comfortably inside the RFC 7636 [43, 128] range with ample entropy.
 local VERIFIER_LENGTH = 64
 
 -- 32 random bytes = 256 bits of entropy for the CSRF state parameter.
@@ -28,10 +28,9 @@ local STATE_BYTES = 32
 
 --- Draw `n` cryptographically-unpredictable bytes as a Lua string.
 ---
---- Prefers the OS CSPRNG via /dev/urandom (present on macOS and Linux, the
---- two platforms this plugin targets). Falls back to a seeded math.random
---- only if that read fails, so generation never hard-errors -- but the
---- urandom path is the expected one.
+--- Reads the OS CSPRNG via /dev/urandom (present on macOS and Linux). Falls
+--- back to a seeded math.random if that read fails, so generation never
+--- hard-errors.
 local function random_bytes(n)
 	local uv = vim.uv or vim.loop
 	local fd = uv.fs_open("/dev/urandom", "r", tonumber("400", 8))
@@ -43,8 +42,8 @@ local function random_bytes(n)
 		end
 	end
 
-	-- Fallback: seed from high-resolution time and PID so repeated calls in
-	-- the same process still diverge. Not the primary path.
+	-- Seed from high-resolution time so repeated calls in the same process
+	-- still diverge.
 	math.randomseed(uv.hrtime() % 2147483647)
 	local bytes = {}
 	for i = 1, n do
@@ -67,8 +66,7 @@ local function hex_to_bytes(hex)
 end
 
 --- Compute the S256 code challenge for a given verifier:
---- base64url(SHA-256(ASCII(verifier))). Exposed for both internal use and
---- test verification against the RFC 7636 vectors.
+--- base64url(SHA-256(ASCII(verifier))).
 --- @param code_verifier string
 --- @return string code_challenge
 function M.s256_challenge(code_verifier)

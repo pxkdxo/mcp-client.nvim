@@ -68,9 +68,8 @@ function StreamableHttp:request(rpc_message, callback)
 				)
 			end
 
-			-- Same dual response-shape handling as detect.lua's initialize
-			-- parsing: a real server may answer with a direct JSON body or a
-			-- single-event `text/event-stream` response.
+			-- A server may answer with a plain JSON body or a single-event
+			-- text/event-stream response; try both decodings.
 			local ok, decoded = pcall(vim.json.decode, response.body)
 			if not ok then
 				local sse_decoded, sse_err = transport_util.decode_json_from_sse_body(response.body)
@@ -110,18 +109,15 @@ function StreamableHttp:notify(rpc_message)
 	})
 end
 
---- The streamable_http transport POSTs per request and holds no long-lived
---- stream Job (U1 does not open the optional server-push GET stream), so
+--- This transport POSTs per request and holds no long-lived stream job, so
 --- there is nothing for the session/reconnect layer to hook or kill here.
---- Returns nil; the reconnect-on-stream-end path only applies to the legacy
---- transport's persistent GET.
 function StreamableHttp:get_stream_job()
 	return nil
 end
 
---- Interface parity with the legacy transport's notification hook. U1 does
---- not open the optional server-push stream, so no unsolicited messages
---- arrive on this transport; the handler is accepted and simply never fired.
+--- Interface parity with the legacy transport's notification hook. No
+--- unsolicited messages arrive on this transport, so the handler is
+--- accepted but never fired.
 function StreamableHttp:set_on_notification(_)
 	-- no-op
 end

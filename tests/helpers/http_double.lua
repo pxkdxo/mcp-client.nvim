@@ -1,10 +1,6 @@
---- Minimal raw-socket HTTP test double, for specs only.
----
---- This is test-fixture code standing in for a remote MCP server; it is not
---- part of the plugin's own server-communication path (which must always go
---- through plenary.curl per the project's transport constraints). Built
---- directly on vim.uv because a test double playing "the server" has no
---- such constraint -- only client-side server I/O does.
+--- Minimal raw-socket HTTP test double standing in for a remote MCP server.
+--- Built on vim.uv directly since it plays the server side, not the client
+--- (the plugin itself always talks to servers through plenary.curl).
 local uv = vim.uv or vim.loop
 
 local HttpDouble = {}
@@ -23,20 +19,13 @@ local function parse_request_head(buf)
 	return method, path, rest, head
 end
 
---- opts.on_request(method, path, rest, head) -> a "handler" table describing
---- the response. `rest` is any body bytes already read; `head` is the raw
---- request head (request line + headers, no trailing CRLFCRLF) so a fixture can
---- assert on request headers (e.g. Authorization) it received:
+--- opts.on_request(method, path, rest, head) -> a handler table describing
+--- the response:
 ---   { status = 200, headers = {...}, body = "..." }
 ---   or { status = 200, headers = {...}, sse = { {event=..., data=...}, ... } }
----     -- sse entries are written one at a time, flushed immediately, and the
----     -- connection is left open (never closed by the double) so callers can
----     -- exercise a long-lived stream; test cleanup happens via double:stop().
---- An SSE handler may also carry `on_stream = fun(socket)`, invoked with the
---- live client socket right after the initial `sse` entries are flushed, so a
---- fixture can push further frames or drop the connection mid-stream on
---- demand -- the raw-socket equivalent of a server that keeps talking after
---- the handshake.
+--- For sse, the connection is left open after the entries are flushed (only
+--- double:stop() closes it), so an optional `on_stream = fun(socket)` can push
+--- further frames or drop the connection mid-stream.
 function HttpDouble.new(opts)
 	local self = setmetatable({}, HttpDouble)
 	self._on_request = assert(opts.on_request, "on_request is required")
@@ -100,7 +89,6 @@ function HttpDouble.new(opts)
 				if handler.on_stream then
 					handler.on_stream(client)
 				end
-			-- Connection intentionally left open; double:stop() tears it down.
 			else
 				local body = handler.body or ""
 				headers["Content-Type"] = headers["Content-Type"] or "application/json"

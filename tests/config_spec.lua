@@ -1,15 +1,12 @@
--- Configuration/orchestration specs (U8). `config.setup(opts)` is the single
--- glue call a real user's config makes: it validates and normalizes the
--- externally-supplied configuration (R7 -- nothing personal baked into the
--- plugin source), registers native servers via `native.register`, connects
--- each configured server via `client.connect`, and threads an auto-constructed
--- TokenStore into any non-localhost server that did not bring its own (design
--- question 3). It never triggers an interactive OAuth flow.
+-- `config.setup(opts)` validates and normalizes user-supplied configuration,
+-- registers native servers via `native.register`, connects each configured
+-- server via `client.connect`, and threads an auto-constructed TokenStore
+-- into any non-localhost server that did not bring its own. It never
+-- triggers an interactive OAuth flow.
 --
--- These specs drive the orchestration through the same public seams every
--- adapter uses (`client.get_clients()`, `native.register`) and inject a fake
--- `client.connect` so no real transport/socket is ever opened -- the same
--- discipline the adapter specs follow.
+-- These specs drive setup through the same public seams adapters use
+-- (`client.get_clients()`, `native.register`) and inject a fake
+-- `client.connect` so no real transport/socket is ever opened.
 
 local client = require("mcp-client.client")
 local config = require("mcp-client.config")
@@ -27,9 +24,9 @@ describe("config.setup (orchestration)", function()
 		config._reset()
 	end)
 
-	--- Replace client.connect with a double that records the config it was
-	--- handed and immediately reports a connected, remote-shaped client object
-	--- registered into the real registry (so get_clients() sees it).
+	--- Replaces client.connect with a double that records the config it was
+	--- handed and reports a connected client object registered into the real
+	--- registry, so get_clients() sees it.
 	local function stub_connect(opts)
 		opts = opts or {}
 		local calls = {}
@@ -100,7 +97,7 @@ describe("config.setup (orchestration)", function()
 			assert.are.equal("local_hub", calls[1].name)
 		end)
 
-		it("connects multiple servers (R7's plural server list)", function()
+		it("connects multiple configured servers", function()
 			local calls = stub_connect()
 			config.setup({
 				servers = {
@@ -134,15 +131,15 @@ describe("config.setup (orchestration)", function()
 			local calls = stub_connect()
 			config.setup({
 				servers = { remote = { url = "https://server.example.com/mcp" } },
-				-- Keep the store on the file backend under a temp dir so the spec
-				-- never touches a real keychain or the developer's data home.
+				-- Use the file backend under a temp dir so the spec never touches
+				-- a real keychain or the developer's data home.
 				token_store = { backend = "file", data_home = vim.fn.tempname() },
 			})
 			local record = config.get_hub("remote")
 			assert.is_not_nil(record)
 			assert.is_not_nil(record.token_store)
 			-- The store is threaded into the connect config's auth sub-table so
-			-- client.connect consults it (U7).
+			-- client.connect consults it.
 			assert.are.equal(record.token_store, calls[1].auth.token_store)
 		end)
 

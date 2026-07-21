@@ -1,21 +1,10 @@
--- Health-check specs (U8). `health.check(reporter?)` implements the body of
--- `:checkhealth mcp-client`. It reports, purely by reading the public APIs
--- other units already expose (`config.state()`, `client.get_clients()` /
--- `is_stopped()`, `TokenStore:status()`):
---   * server connection status, per configured server;
---   * registered native servers;
---   * auth status for any server that has a TokenStore (redacted fields only --
---     never the token itself).
---
--- The two brief scenarios under test:
---   * happy path: a connected server with valid auth reports `ok`;
---   * edge case: a disconnected server / failed auth reports `warn`/`error`
---     rather than crashing.
+-- `health.check(reporter?)` implements the body of `:checkhealth mcp-client`:
+-- server connection status, registered native servers, and auth status for
+-- any server with a TokenStore (redacted fields only, never the token).
 --
 -- `health.check` takes an injected reporter (defaulting to `vim.health`) so a
--- spec can capture every start/ok/warn/error/info call without needing a real
--- `:checkhealth` buffer -- the same test-seam discipline token_store.lua uses
--- for its command runner.
+-- spec can capture every start/ok/warn/error/info call without a real
+-- `:checkhealth` buffer.
 
 local client = require("mcp-client.client")
 local config = require("mcp-client.config")

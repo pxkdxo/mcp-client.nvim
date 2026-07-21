@@ -1,14 +1,8 @@
---- A controllable legacy-SSE stream fixture, layered on HttpDouble.
+--- A live, controllable legacy-SSE stream fixture, layered on HttpDouble.
 ---
---- HttpDouble can serve a static list of SSE frames, but the reconnect and
---- round-trip specs need a *live* stream: one they can push JSON-RPC
---- responses onto after the handshake, and drop on demand to simulate a
---- server-side connection loss. This wraps that: `sse_handler(endpoint)`
---- returns an HttpDouble handler whose `on_stream` captures the live socket,
---- `push_message(msg)` writes a `message` SSE event carrying `msg` as JSON,
---- and `drop()` closes the socket the way a real server drop would (curl
---- then exits 0, i.e. a silent stream-end -- exactly the case the client's
---- reconnect path must catch).
+--- Unlike a static HttpDouble frame list, this exposes the open socket so a
+--- test can push JSON-RPC messages after the handshake and drop the
+--- connection on demand to simulate a server-side loss.
 local ControllableSse = {}
 ControllableSse.__index = ControllableSse
 
@@ -53,9 +47,9 @@ function ControllableSse:push_retry(ms)
 	self._socket:write("retry: " .. tostring(ms) .. "\r\n\r\n")
 end
 
---- Drop the stream from the server side: closing the socket makes the
---- client's long-lived curl GET exit, which the client observes as a
---- stream-end (no error) -- the reconnect trigger.
+--- Drop the stream from the server side. Closing the socket makes curl's
+--- long-lived GET exit 0 (silent stream-end, not an error) -- the case the
+--- client's reconnect path must detect and act on.
 function ControllableSse:drop()
 	self._closed = true
 	if self._socket and not self._socket:is_closing() then

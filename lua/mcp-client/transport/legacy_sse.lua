@@ -3,23 +3,21 @@
 --- A long-lived GET request opens an SSE stream that first delivers an
 --- `endpoint` event naming the URL to POST JSON-RPC messages to; further
 --- JSON-RPC responses/notifications arrive asynchronously over that same
---- stream rather than in the POST's own response body. All server network
---- I/O goes through plenary.curl: the GET stream is one long-lived curl
---- process (raw = {"-N"} to disable curl's buffering, fed incrementally
---- via the `stream` callback), never re-invoked per message.
+--- stream rather than in the POST's own response body. The GET stream is
+--- one long-lived curl process (raw = {"-N"} to disable curl's buffering),
+--- fed incrementally via the `stream` callback rather than re-invoked per
+--- message.
 local curl = require("plenary.curl")
 local transport_util = require("mcp-client.transport.util")
 
 local LegacySse = {}
 LegacySse.__index = LegacySse
 
---- Incrementally parse Server-Sent Events delivered one line at a time --
---- matching plenary.job's `on_stdout`/`stream` callback contract, which
---- already splits on "\n" and strips "\r" before invoking the callback.
---- Feed each line via :feed_line(line); it calls
---- on_event({event=..., data=...}) for each complete event as soon as its
---- terminating blank line arrives. Shared with the Streamable HTTP
---- transport's single-shot SSE-framed response parsing (transport/util.lua).
+--- Incrementally parses SSE lines matching plenary.job's `on_stdout`/
+--- `stream` contract (already split on "\n", "\r" stripped). Feed lines via
+--- :feed_line(line); it invokes on_event({event=..., data=...}) once each
+--- event's terminating blank line arrives. Shared with the Streamable HTTP
+--- transport (transport/util.lua).
 local SseParser = transport_util.SseParser
 
 --- @param opts table

@@ -1,4 +1,4 @@
---- Native, in-process MCP server registration (U3).
+--- Native, in-process MCP server registration.
 ---
 --- A native server is a config table styled after `mcphub.nvim`'s existing
 --- `native_servers` shape: `name` plus `tools`/`resources`/`prompts` tables
@@ -9,20 +9,15 @@
 --- so adapters built against that shape cannot tell a native server from a
 --- remote one.
 ---
---- No concrete native servers ship here -- this module is only the general
---- mechanism (R3/F3); see `tests/fixtures/example_native_server.lua` for the
---- minimal test-only example that proves it.
+--- No concrete native servers ship here -- see
+--- `tests/fixtures/example_native_server.lua` for a minimal example.
 ---
---- Request routing: `request(rpc_message, callback)` short-circuits straight
---- to a direct Lua function call instead of any network round-trip.
---- Supported MCP methods mirror the three capability tables:
+--- `request(rpc_message, callback)` short-circuits straight to a direct Lua
+--- function call instead of any network round-trip. Supported MCP methods
+--- mirror the three capability tables:
 ---   tools/call      params = { name, arguments } -> tools[name](arguments)
 ---   resources/read  params = { uri }             -> resources[uri](params)
 ---   prompts/get     params = { name, arguments }  -> prompts[name](arguments)
---- A Lua error raised inside a handler is caught (`pcall`) and reported
---- through the same `(err, result, response)` callback shape a remote
---- server's tool-call failure would use -- it never escapes as an uncaught
---- exception back to the caller of `request()`.
 
 local client = require("mcp-client.client")
 
@@ -52,13 +47,11 @@ local function build_listing(capability_table, meta_table, id_field)
 	return listing
 end
 
---- Look up the handler for an MCP method against a native server's
---- capability tables, returning the handler function plus the key used to
---- look it up (for error messages) or nil, err if the method/key is
---- unsupported or missing. The three `*/list` methods have no single
---- "handler function" to call -- they return the listing table directly
---- via a synthetic zero-argument handler, so the shared call site in
---- `request()` doesn't need a separate code path for them.
+--- Resolve an MCP method to a handler against a native server's capability
+--- tables. Returns handler, args, nil on success or nil, nil, err if the
+--- method or key is unsupported/missing. The `*/list` methods return a
+--- synthetic zero-argument handler wrapping the listing table, so the call
+--- site in `request()` doesn't need a separate code path for them.
 local function resolve_handler(entry, method, params)
 	params = params or {}
 	if method == "tools/call" then
@@ -137,12 +130,8 @@ function M.register(config)
 		return entry._stopped
 	end
 
-	--- Short-circuit straight to a direct Lua function call -- no network,
-	--- no transport, no session. `pcall` is the load-bearing piece: it is
-	--- what turns a Lua error raised inside a tool/resource/prompt function
-	--- into an `(err, result, response)` callback invocation instead of an
-	--- uncaught exception unwinding through the caller of `request()`,
-	--- exactly like a remote server's tool-call failure would surface.
+	--- `pcall` turns a Lua error raised inside a handler into an
+	--- `(err, result, response)` callback instead of an uncaught exception.
 	function obj:request(rpc_message, callback)
 		assert(type(callback) == "function", "callback is required")
 		rpc_message = rpc_message or {}
@@ -163,17 +152,14 @@ function M.register(config)
 		return callback(nil, result_or_err, nil)
 	end
 
-	--- Native servers have nothing to notify (no persistent connection to
-	--- push a server-initiated message down); accept and discard so callers
-	--- generic over the client shape never have to special-case native
-	--- servers.
+	--- Native servers have no persistent connection to push messages down;
+	--- accept and discard so callers generic over the client shape never
+	--- have to special-case native servers.
 	function obj:notify(_rpc_message)
 		return nil
 	end
 
-	--- Mark the native server inert. Idempotent, mirroring the remote
-	--- client's `disconnect()` -- called by `client._reset_registry()` in
-	--- tests via the registry's `intentional_close` hook.
+	--- Mark the native server inert. Idempotent.
 	function obj:disconnect()
 		entry._stopped = true
 	end

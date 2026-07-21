@@ -1,11 +1,10 @@
 local LegacySse = require("mcp-client.transport.legacy_sse")
 
---- Unit coverage for the pieces of the legacy transport U2 leans on that
---- U1's specs did not exercise: server-notification routing and the SSE
---- `retry:` reconnection hint. Both are driven by feeding raw SSE lines to
---- the parser -- no socket, no network.
+--- Covers server-notification routing and the SSE `retry:` reconnection
+--- hint by feeding raw SSE lines to the parser directly -- no socket, no
+--- network.
 
-describe("transport.legacy_sse (U2 hooks)", function()
+describe("transport.legacy_sse", function()
 	local function client_with_lines(lines)
 		local c = LegacySse.new({ stream_url = "http://x/mcp", endpoint = "http://x/messages" })
 		c:attach_parser()

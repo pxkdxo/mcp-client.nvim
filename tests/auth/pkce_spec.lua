@@ -28,7 +28,6 @@ describe("auth.pkce", function()
 
 		it("produces a URL-safe base64 challenge with no padding", function()
 			local pair = pkce.generate()
-			-- base64url alphabet only: A-Z a-z 0-9 - _  (no +, /, or = padding)
 			assert.matches("^[A-Za-z0-9%-_]+$", pair.code_challenge)
 			assert.is_nil(pair.code_challenge:find("="))
 			assert.is_nil(pair.code_challenge:find("+", 1, true))

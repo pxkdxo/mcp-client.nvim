@@ -56,7 +56,7 @@ function SseParser:feed_line(line)
 		table.insert(self._data_lines, value)
 	elseif field == "retry" then
 		-- Reconnection hint: the server's requested delay, in ms, for the
-		-- next reconnect attempt (U2). Ignore a malformed non-integer value.
+		-- next reconnect attempt. Ignore a malformed non-integer value.
 		local ms = tonumber(value)
 		if ms then
 			self._retry = math.floor(ms)

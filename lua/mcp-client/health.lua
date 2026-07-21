@@ -1,11 +1,10 @@
---- `:checkhealth mcp-client` (U8) -- the status view that replaces the
---- rejected dashboard UI.
+--- `:checkhealth mcp-client` status view.
 ---
---- This module is purely a reporting layer. It duplicates none of `config.lua`'s
---- wiring: it reads what setup recorded (`config.state()`) and correlates it
---- with the live client roster (`client.get_clients()` / `is_stopped()`) and,
---- for any server with a TokenStore, that store's redacted `:status()`. It never
---- opens a connection, constructs a store, or touches a transport.
+--- This module is purely a reporting layer: it reads what setup recorded
+--- (`config.state()`) and correlates it with the live client roster
+--- (`client.get_clients()` / `is_stopped()`) and, for any server with a
+--- TokenStore, that store's redacted `:status()`. It never opens a connection,
+--- constructs a store, or touches a transport.
 ---
 --- Neovim's health framework calls `require("mcp-client.health").check()`
 --- for `:checkhealth mcp-client` (the function is discovered by name; see
@@ -13,10 +12,9 @@
 --- capture every start/ok/warn/error/info call without a real checkhealth
 --- buffer -- it defaults to `vim.health`.
 ---
---- Absolute no-secrets invariant (held as strictly as U6/U7): auth status is
---- surfaced ONLY through `TokenStore:status()`, whose fields are presence/expiry
---- booleans and a non-secret absolute expiry time -- never the access token,
---- the refresh token, or any header value.
+--- Auth status is surfaced ONLY through `TokenStore:status()`, whose fields
+--- are presence/expiry booleans and a non-secret absolute expiry time --
+--- never the access token, the refresh token, or any header value.
 
 local mcp_client = require("mcp-client.client")
 local config = require("mcp-client.config")
@@ -44,17 +42,13 @@ end
 --- warning -- so the caller can factor it into the server's overall verdict.
 ---
 --- @param connected boolean  whether this server currently has a live, connected
----   client object. An expired-but-refreshable token behaves differently
----   depending on this: with a live client, the NEXT request transparently
----   refreshes it (`ensure_fresh_token`); with no live client, `M.connect`
----   itself now refreshes proactively before dialing, so the fix is "retry
----   the connection", not "the next request" -- there is no live client to
----   send one.
+---   client object. With a live client, an expired-but-refreshable token is
+---   refreshed transparently on the next request (`ensure_fresh_token`); with
+---   no live client, refreshing requires retrying the connection instead.
 local function report_auth(reporter, name, record, connected)
 	local store = record.token_store
 	if not store then
-		-- A localhost server, or one the user connects without auth: nothing to
-		-- report. The R12 gate (tls.lua) exempts localhost, so this is expected.
+		-- tls.lua exempts localhost from requiring authentication.
 		if tls.is_localhost(record.url) then
 			reporter.info(string.format("server %q: localhost, no authentication required", name))
 		end
@@ -186,9 +180,6 @@ function M.check(reporter)
 
 	reporter.start("mcp-client")
 
-	-- Trust-model reminder: native servers run with full Neovim/Lua privilege
-	-- (R8). Surface it in the health view so an operator auditing their setup is
-	-- reminded of it right where they see the server list.
 	reporter.info(
 		"Native servers run in-process with full Neovim/Lua privilege (no sandboxing). "
 			.. "Only register native servers you trust as first-party code."

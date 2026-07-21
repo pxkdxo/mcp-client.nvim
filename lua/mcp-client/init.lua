@@ -1,23 +1,16 @@
 --- mcp-client: an MCP (Model Context Protocol) client for Neovim.
 ---
---- Exposed as `require("mcp-client")`, deliberately not
---- `require("mcphub")`, to avoid colliding with `mcphub.nvim`'s own
---- module name while both may be present in a dev/test environment
---- before cutover.
----
---- This module is the thinnest possible entrypoint for U1's scope: it
---- builds the InitializeRequest and hands off to transport.detect to
---- pick and connect the right transport. Session lifecycle, reconnection,
---- and the Neovim-native client/event API (get_clients(), MCPAttach/
---- MCPDetach autocmds, etc.) are Task 2's job, not built here.
+--- Exposed as `require("mcp-client")`, deliberately not `require("mcphub")`,
+--- to avoid colliding with `mcphub.nvim`'s own module name while both may be
+--- present in a dev/test environment.
 local detect = require("mcp-client.transport.detect")
 
 local M = {}
 
 --- Semantic version of the MCP protocol revision this client speaks.
 --- Sent as `protocolVersion` in InitializeRequest; legacy servers that omit
---- `MCP-Protocol-Version` in their own responses are assumed to be on the
---- 2025-03-26 revision per the Key Technical Decisions.
+--- `MCP-Protocol-Version` in their own responses are assumed to be on this
+--- revision.
 local PROTOCOL_VERSION = "2025-03-26"
 
 local function build_initialize_request(config)
@@ -92,17 +85,14 @@ function M.connect(config, opts)
 end
 
 --- The user-facing setup entrypoint: `require("mcp-client").setup(opts)`,
---- mirroring `require("mcphub").setup(opts)`'s call shape so a real config's
---- migration off `mcphub.nvim` is a mechanical swap rather than a redesign.
+--- mirroring `require("mcphub").setup(opts)`'s call shape so migrating a
+--- config off `mcphub.nvim` is a mechanical swap.
 ---
 --- All orchestration (validating/normalizing config, registering native
 --- servers, connecting servers, wiring OAuth token stores) lives in
---- `config.lua`; this is a thin, deliberate delegation so the module's own
---- public name (`require("mcp-client")`) is the entrypoint, matching the
---- established U3/U6/U7 pattern of a small, justified extension to a shared
---- file. `config` is required lazily so this thin U1-era `connect` path (and
---- the specs that exercise it in isolation) never pull in the whole
---- client/native/auth stack unless `setup()` is actually called.
+--- `config.lua`. `config` is required lazily so `connect()` (and specs that
+--- exercise it in isolation) don't pull in the whole client/native/auth
+--- stack unless `setup()` is actually called.
 ---
 --- @param opts table|nil  see `mcp-client.config.setup` for the full shape.
 function M.setup(opts)

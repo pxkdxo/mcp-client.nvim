@@ -1,15 +1,11 @@
 --- Client registration, token exchange, and full-flow orchestration for the
 --- OAuth 2.1 Authorization Code + PKCE grant.
 ---
---- Scope note (naming): the plan's file list for this unit names four auth
---- files -- discovery / dcr / pkce / redirect_listener -- but the flow it
---- describes also requires a token-exchange POST and a stage that stitches
+--- Also covers the token-exchange POST and the stage that stitches
 --- discovery -> (DCR or configured client_id) -> PKCE -> loopback capture ->
---- token exchange into the single typed result handed off to U7. With no
---- fifth file sanctioned, those live here alongside DCR, since registration
---- and token exchange are both RFC-defined POSTs to the authorization server
---- returning typed results, and this is the module that turns discovery
---- output into a token. See the task report's concerns for this deviation.
+--- token exchange into a single typed result, since both are RFC-defined
+--- POSTs to the authorization server and this is the module that turns
+--- discovery output into a token.
 ---
 --- Networking: register() and exchange_code_for_token() POST to the
 --- authorization server via plenary.curl (never raw vim.uv -- these are
@@ -132,7 +128,7 @@ function M.build_authorization_url(opts)
 end
 
 --- Exchange an authorization code for tokens (RFC 6749 §4.1.3 + PKCE §4.5 +
---- RFC 8707 resource). Returns the typed token result U7 consumes.
+--- RFC 8707 resource).
 --- @param opts table {
 ---   token_endpoint, code, code_verifier, client_id, redirect_uri, resource
 --- }
@@ -143,7 +139,7 @@ end
 ---     token_type     = string,       -- e.g. "Bearer"
 ---     expires_at     = number|nil,   -- absolute unix time (os.time-based)
 ---     scope          = string|nil,
----     -- metadata U7 needs to refresh later, none of it secret:
+---     -- metadata needed to refresh later, none of it secret:
 ---     token_endpoint = string,
 ---     client_id      = string,
 ---     resource       = string,

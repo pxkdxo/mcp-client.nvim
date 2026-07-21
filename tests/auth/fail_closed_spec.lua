@@ -1,7 +1,7 @@
--- Covers R12 fail-closed transport security and the token-refresh lifecycle:
+-- Covers fail-closed transport security and the token-refresh lifecycle:
 --
 --   * transport/tls.lua's URL-scheme + credential-presence gate:
---       - a non-localhost server with no TLS and/or no token is refused (R12);
+--       - a non-localhost server with no TLS and/or no token is refused;
 --       - a localhost server is unaffected and proceeds.
 --   * auth/refresh.lua's refresh-token grant:
 --       - an expired access token is refreshed transparently before retry;
@@ -18,7 +18,7 @@ local client = require("mcp-client.client")
 local HttpDouble = require("tests.helpers.http_double")
 local wait_for = require("tests.helpers.wait")
 
-describe("transport.tls fail-closed gate (R12)", function()
+describe("transport.tls fail-closed gate", function()
 	local function has_token()
 		return { has_token = true }
 	end
@@ -53,7 +53,6 @@ describe("transport.tls fail-closed gate (R12)", function()
 			local ok, reason = tls.check_connection_allowed("https://server.example.com/mcp", no_token())
 			assert.is_false(ok)
 			assert.is_string(reason)
-			-- Names the missing credential, not a generic "failed".
 			assert.matches("auth", reason)
 		end)
 
@@ -69,9 +68,8 @@ describe("transport.tls fail-closed gate (R12)", function()
 		end)
 
 		it("treats a bare loopback-looking hostname (127.0.0.2) as non-localhost", function()
-			-- Only the canonical loopback names/addresses are exempt; a different
-			-- 127.0.0.0/8 alias is still a real network address for R12 purposes
-			-- unless it is exactly 127.0.0.1. (U9 validates the live cert case.)
+			-- Only the canonical loopback names/addresses are exempt; other
+			-- 127.0.0.0/8 aliases are treated as real network addresses.
 			local ok = tls.check_connection_allowed("http://127.0.0.2/mcp", no_token())
 			assert.is_false(ok)
 		end)
@@ -81,7 +79,6 @@ describe("transport.tls fail-closed gate (R12)", function()
 		it("does not echo any token material in the refusal string", function()
 			local _, reason = tls.check_connection_allowed("http://server.example.com/mcp", {
 				has_token = true,
-				-- Even if a caller (wrongly) passed the value, tls must not echo it.
 				access_token = "SECRET-should-never-appear",
 			})
 			assert.is_nil(reason:find("SECRET-should-never-appear", 1, true))
@@ -89,7 +86,7 @@ describe("transport.tls fail-closed gate (R12)", function()
 	end)
 end)
 
-describe("client.connect enforces the fail-closed gate (R12)", function()
+describe("client.connect enforces the fail-closed gate", function()
 	after_each(function()
 		client._reset_registry()
 		vim.wait(30, function()
@@ -100,8 +97,6 @@ describe("client.connect enforces the fail-closed gate (R12)", function()
 	it("refuses a non-localhost server with no TLS and no auth, before opening a connection", function()
 		local connected, err
 		client.connect({
-			-- A non-localhost URL that would connect-refuse at the socket anyway,
-			-- but the gate must refuse it FIRST, without ever attempting the POST.
 			url = "http://server.example.com/mcp",
 		}, {
 			on_connect = function(c, e)
@@ -115,7 +110,6 @@ describe("client.connect enforces the fail-closed gate (R12)", function()
 		assert.is_nil(connected)
 		assert.is_not_nil(err)
 		assert.matches("fail closed", err)
-		assert.matches("R12", err)
 	end)
 
 	it("refuses a non-localhost https server when no Authorization header is configured", function()
@@ -136,8 +130,6 @@ describe("client.connect enforces the fail-closed gate (R12)", function()
 	end)
 
 	it("allows a localhost server with no TLS and no auth (unaffected by the gate)", function()
-		-- A real loopback double: the gate must NOT interfere; the connection
-		-- proceeds and initializes exactly as before this unit existed.
 		local double = HttpDouble.new({
 			on_request = function()
 				return {
@@ -180,7 +172,6 @@ describe("client.connect enforces the fail-closed gate (R12)", function()
 			return connected ~= nil or err ~= nil
 		end))
 		assert.is_nil(connected)
-		-- No secret is present here to leak, but assert the shape stays clean.
 		assert.is_string(err)
 	end)
 end)
@@ -357,8 +348,7 @@ describe("auth.refresh (refresh-token grant)", function()
 end)
 
 describe("client transparent token refresh (expired -> refresh -> retry)", function()
-	-- End-to-end coverage of the U7 scenario the standalone refresh.lua tests do
-	-- NOT reach: an expired access token, configured on the client via
+	-- An expired access token, configured on the client via
 	-- config.auth.token_store, is refreshed transparently through client:request
 	-- before the request is sent, and a revoked refresh token surfaces a terminal
 	-- re-auth error through that same path -- never an indefinite retry.
@@ -425,9 +415,8 @@ describe("client transparent token refresh (expired -> refresh -> retry)", funct
 					if method == "POST" and path == "/mcp" then
 						local ok, decoded = pcall(vim.json.decode, rest)
 						if ok and decoded.method == "initialize" then
-							-- The whole point of the fix: this very first request must
-							-- already carry the refreshed token, not the expired one
-							-- that was in the store when client.connect() was called.
+							-- The very first request must already carry the refreshed
+							-- token, not the expired one from when connect() was called.
 							seen_auth_on_initialize = head and head:match("[Aa]uthorization:%s*([^\r\n]+)")
 							return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
 						end
@@ -454,8 +443,7 @@ describe("client transparent token refresh (expired -> refresh -> retry)", funct
 			assert.is_nil(got.err)
 			assert.is_not_nil(got.client)
 
-			-- Exactly one refresh grant, spent BEFORE the dial -- not zero
-			-- (the old, broken behavior: dial with the stale token) and not
+			-- Exactly one refresh grant, spent before the dial rather than
 			-- deferred to a later request.
 			assert.are.equal(1, token_hits)
 			assert.are.equal("Bearer fresh-access-token", seen_auth_on_initialize)
@@ -649,17 +637,10 @@ describe("client transparent token refresh (expired -> refresh -> retry)", funct
 end)
 
 describe("client concurrent refresh coalescing (single-flight)", function()
-	-- Reproduces the reachable CodeCompanion resource-fan-out scenario: N requests
-	-- are issued against the same client in a tight loop (without awaiting each
-	-- callback) while the configured token is expired. Without single-flight
-	-- coalescing, every one of the N calls independently observes the token as
-	-- expired and fires its own refresh-token grant. Because refresh tokens ROTATE
-	-- (the AS invalidates the presented refresh_token and issues a new one), the
-	-- first grant to complete rotates the token; the remaining N-1 grants are then
-	-- presenting an already-stale refresh_token and are rejected with invalid_grant
-	-- -- so most of the batch spuriously surfaces a terminal re-auth error even
-	-- though a sibling refreshed successfully. With coalescing, exactly ONE grant
-	-- runs for the whole batch and every request succeeds.
+	-- N requests fire in a tight loop while the configured token is expired.
+	-- Refresh tokens rotate on use, so without single-flight coalescing each
+	-- call would race its own refresh grant and all but the winner would be
+	-- rejected with invalid_grant against an already-rotated token.
 	local token_store = require("mcp-client.auth.token_store")
 
 	local double
@@ -685,12 +666,9 @@ describe("client concurrent refresh coalescing (single-flight)", function()
 	it("coalesces N concurrent refreshes onto one grant; every request succeeds", function()
 		local token_hits = 0
 		local ping_replies = 0
-		-- A rotating token endpoint with reuse-detection: the currently-valid
-		-- refresh token starts as "rt-0"; each successful exchange rotates it to a
-		-- fresh value and returns that value. A grant presenting anything other
-		-- than the currently-valid refresh token is rejected with invalid_grant --
-		-- exactly what a real rotating AS does when it detects reuse of a token it
-		-- already rotated away.
+		-- A rotating token endpoint with reuse-detection: a grant presenting
+		-- anything other than the currently-valid refresh token is rejected
+		-- with invalid_grant, as a real rotating AS would.
 		local current_refresh = "rt-0"
 		local rotation = 0
 		double = HttpDouble.new({
@@ -761,20 +739,16 @@ describe("client concurrent refresh coalescing (single-flight)", function()
 			return got ~= nil
 		end, 3000))
 		assert.is_nil(got.err)
-		-- client.connect() itself now refreshes a stored-but-expired token
-		-- before dialing, so the batch below starts from an ALREADY-fresh
-		-- token (one /token hit already spent here) unless re-expired.
+		-- client.connect() refreshes a stored-but-expired token before dialing,
+		-- so one grant is already spent here.
 		assert.are.equal(1, token_hits)
 
-		-- Re-expire the store (keeping the CURRENT, just-rotated refresh
-		-- token, so the double's reuse-detection still accepts it) to
-		-- recreate the scenario this test exercises: N concurrent requests
-		-- all reaching ensure_fresh_token while the token is expired.
+		-- Re-expire the store, keeping the current rotated refresh token, so
+		-- the batch below starts with an expired token again.
 		store:save(vim.tbl_extend("force", store:load(), { expires_at = os.time() - 1 }))
 
-		-- Fire N requests in a tight loop, exactly like codecompanion.lua's
-		-- resources/read fan-out: each is dispatched before any callback runs, so
-		-- they all reach ensure_fresh_token while the token is still expired.
+		-- Fire N requests in a tight loop so all of them reach
+		-- ensure_fresh_token while the token is still expired.
 		local N = 5
 		local replies = {}
 		for i = 1, N do
@@ -787,18 +761,14 @@ describe("client concurrent refresh coalescing (single-flight)", function()
 			return #replies == N
 		end, 3000))
 
-		-- The token endpoint was hit exactly once more for the whole batch
-		-- (plus the one already spent at connect time above): single-flight
-		-- coalescing, not N independent grants.
+		-- The token endpoint was hit exactly once more for the whole batch:
+		-- single-flight coalescing, not N independent grants.
 		assert.are.equal(2, token_hits)
-		-- (2) Every one of the N concurrent requests succeeded; none spuriously
-		--     surfaced a re-auth error.
 		assert.are.equal(N, #replies)
 		for _, reply in ipairs(replies) do
 			assert.is_nil(reply.err)
 			assert.are.same({ pong = true }, reply.result.result)
 		end
-		-- All N pings actually reached the server carrying the (single) refreshed token.
 		assert.are.equal(N, ping_replies)
 		-- The rotated token was persisted for next time and is no longer expired.
 		local status = store:status()
@@ -810,9 +780,8 @@ describe("client concurrent refresh coalescing (single-flight)", function()
 end)
 
 describe("bearer attachment on the wire (happy path)", function()
-	-- The transport doesn't care that 127.0.0.1 is technically localhost for the
-	-- header-merge test (per the brief): this exercises that a token applied to a
-	-- shared headers table is actually sent on every outbound request.
+	-- Exercises that a token applied to a shared headers table is actually
+	-- sent on every outbound request.
 	local token_store = require("mcp-client.auth.token_store")
 	local StreamableHttp = require("mcp-client.transport.streamable_http")
 

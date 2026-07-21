@@ -1,28 +1,17 @@
---- Configuration and setup orchestration (U8) -- the single "glue" call a
---- real user's config makes.
----
---- Every prior unit (U1-U7) built one piece; nothing wired them together into
---- the `require("mcp-client").setup(opts)` a user actually calls. This
---- module is that wiring. It:
----   * validates and normalizes the externally-supplied configuration -- so no
----     personal path, port, or credential lives in this plugin's source (R7);
----   * registers each configured native, in-process server via `native.register`
----     (U3);
----   * connects each configured remote server via `client.connect` (U2), threading
----     an auto-constructed `TokenStore` (U7) into any non-localhost server that did
----     not bring its own (design question 3);
+--- Configuration and setup orchestration -- wires user config into the
+--- rest of the plugin via `require("mcp-client").setup(opts)`. It:
+---   * validates and normalizes the externally-supplied configuration;
+---   * registers each configured native, in-process server via `native.register`;
+---   * connects each configured remote server via `client.connect`, threading
+---     an auto-constructed `TokenStore` into any non-localhost server that did
+---     not bring its own;
 ---   * records what it set up in a small module-local state table that
----     `health.lua` (U8) reads back to build `:checkhealth mcp-client`,
----     without health.lua having to re-derive any of this wiring.
+---     `health.lua` reads back to build `:checkhealth mcp-client`.
 ---
---- What it deliberately does NOT do (design question 3, explicit scope
---- boundary): it never *triggers* the interactive OAuth authorization flow
---- (`auth.dcr.run_flow`, which opens a browser and blocks on a loopback
---- redirect). A non-localhost server with no stored token yet fails closed at the
---- transport gate (R12, tls.lua) with a clear, actionable error; setup surfaces
---- that error and points the user at how to authenticate (see README and the
---- error text below). Auto-triggering a login on every Neovim startup is an
---- undesigned UX surface out of scope for this unit.
+--- Setup never triggers the interactive OAuth flow (`auth.dcr.run_flow`,
+--- which opens a browser and blocks on a loopback redirect). A non-localhost
+--- server with no stored token fails closed at the transport gate (tls.lua)
+--- with an actionable error pointing at how to authenticate manually.
 
 local mcp_client = require("mcp-client.client")
 local native = require("mcp-client.native")
@@ -32,9 +21,8 @@ local token_store = require("mcp-client.auth.token_store")
 local M = {}
 
 --- What `setup()` last wired up, for `health.lua` to read back. Purely a
---- reporting record: the live client roster is always re-read from
---- `client.get_clients()`, never cached here. Each `servers[name]` entry carries
---- the server's `url` and (if one was configured/constructed) its `token_store`.
+--- reporting record -- the live client roster is always re-read from
+--- `client.get_clients()`, never cached here.
 local state = {
 	servers = {}, ---@type table<string, { url: string, token_store: table|nil }>
 	native_servers = {}, ---@type string[]
@@ -54,8 +42,8 @@ function M.get_hub(name)
 end
 
 --- Reset the setup record. Called by tests between specs, and internally at the
---- start of each `setup()` so a re-`setup()` reflects only the latest config.
---- Does not tear down live clients -- that is `client._reset_registry()`'s job.
+--- start of each `setup()`. Does not tear down live clients -- that is
+--- `client._reset_registry()`'s job.
 function M._reset()
 	state = { servers = {}, native_servers = {} }
 end
@@ -77,9 +65,8 @@ end
 --- Normalize the two accepted server-config shapes into a name->config map:
 ---   * `opts.server`  -- a single server config table (shorthand for one server);
 ---   * `opts.servers` -- a map of `name -> server config`.
---- Both may be present, though a single server is the common case (the dotfiles'
---- `server_url` singular). Each server config's `name` defaults to its map key so
---- health/get_clients can correlate it; an explicit `config.name` wins.
+--- Both may be present. Each server config's `name` defaults to its map key
+--- so health/get_clients can correlate it; an explicit `config.name` wins.
 local function collect_servers(opts)
 	local servers = {}
 	if opts.server ~= nil then
@@ -97,24 +84,19 @@ local function collect_servers(opts)
 	return servers
 end
 
---- Resolve the TokenStore for one server, per design question 3:
+--- Resolve the TokenStore for one server:
 ---   * a caller-supplied `config.auth.token_store` is always honored as-is;
----   * a localhost server gets none (the R12 gate exempts localhost, and there is
----     nothing to authenticate);
+---   * a localhost server gets none (nothing to authenticate);
 ---   * a non-localhost server with no supplied store gets one auto-constructed,
 ---     keyed by server name, on the backend/data_home from `opts.token_store`
 ---     (defaults to auto-detected keychain/file).
 --- Returns the store (or nil) and does NOT trigger any OAuth flow.
 ---
 --- `store_opts.key`, if set, is always namespaced with the server's own `name`
---- (`"<key>:<name>"`), never used verbatim: `opts.token_store.key` is a single
---- global default shared across every server in one `setup()` call, and a bare
---- override would collapse every non-localhost server without its own
---- `auth.token_store` onto the exact same backing file/keychain entry --
---- silently corrupting one server's stored credentials with another's on the
---- next refresh. Namespacing by name preserves `key`'s only legitimate
---- purpose (a stable per-deployment/per-profile prefix) while keeping
---- distinct servers' storage always distinct.
+--- (`"<key>:<name>"`), never used verbatim -- a bare override would collapse
+--- every non-localhost server without its own `auth.token_store` onto the
+--- same backing file/keychain entry, corrupting one server's credentials
+--- with another's on the next refresh.
 local function resolve_token_store(name, server_config, store_opts)
 	local supplied = server_config.auth and server_config.auth.token_store or nil
 	if supplied then
@@ -136,11 +118,10 @@ local function resolve_token_store(name, server_config, store_opts)
 end
 
 --- Connect one server. Threads the resolved TokenStore into `config.auth`
---- (client.connect consults `config.auth.token_store`, U7), records the server in
---- the state table, and surfaces a connect error through an actionable
---- notification -- including, for the fail-closed no-token case, the concrete
---- next step the user can take to authenticate (design question 3: a real,
---- working manual mechanism, not a bare "no token configured").
+--- (client.connect consults `config.auth.token_store`), records the server
+--- in the state table, and surfaces a connect error through an actionable
+--- notification -- including, for the fail-closed no-token case, the
+--- concrete steps the user can take to authenticate.
 local function connect_server(name, server_config, store_opts)
 	assert(
 		type(server_config.url) == "string" and server_config.url ~= "",
@@ -149,9 +130,8 @@ local function connect_server(name, server_config, store_opts)
 
 	local store = resolve_token_store(name, server_config, store_opts)
 
-	-- Build the connect config: start from the user's server config, force the
-	-- resolved name, and thread the store into `auth` without clobbering any
-	-- other auth fields the caller set.
+	-- Thread the store into `auth` without clobbering other auth fields the
+	-- caller set.
 	local connect_config = vim.tbl_extend("force", {}, server_config)
 	connect_config.name = server_config.name or name
 	if store then
@@ -166,12 +146,10 @@ local function connect_server(name, server_config, store_opts)
 				local msg = string.format("mcp-client: failed to connect server %q: %s", name, tostring(err))
 				-- Append a concrete next step for the two credential-related
 				-- failure shapes, rather than leaving the user with a dead end.
-				-- (These are documented manual mechanisms, not an auto-login --
-				-- see design question 3 / the README.)
 				if not tls.is_localhost(server_config.url) and store then
 					local auth_status = store:status()
 					if not auth_status.has_token then
-						-- R12 fail-closed refusal: no credential configured at all.
+						-- Fail-closed refusal: no credential configured at all.
 						msg = msg
 							.. "\n"
 							.. string.format(
@@ -185,11 +163,8 @@ local function connect_server(name, server_config, store_opts)
 								name
 							)
 					elseif auth_status.expired then
-						-- A stored token exists (M.connect already tried to refresh
-						-- it before dialing) but the connection still failed --
-						-- commonly the refresh itself failed (revoked/expired
-						-- refresh token, or a network error). Re-authentication is
-						-- the same manual mechanism as the no-token case above.
+						-- Stored token exists but refresh (already attempted before
+						-- dialing) failed, e.g. a revoked refresh token or network error.
 						msg = msg
 							.. "\n"
 							.. string.format(
@@ -214,15 +189,15 @@ local function connect_server(name, server_config, store_opts)
 	})
 end
 
---- The single glue entrypoint. All configuration is externally supplied here
---- (R7). Delegated to from `require("mcp-client").setup(opts)`.
+--- The single glue entrypoint, delegated to from
+--- `require("mcp-client").setup(opts)`.
 ---
 --- @param opts table|nil
 ---   server            (table|nil)  a single server config (shorthand): { url, name?,
 ---                  headers?, reconnect?, auth?, ... } -- same shape client.connect's
 ---                  `config` accepts.
----   servers           (table|nil)  a map of `name -> server config` for one or more servers
----                  (R7's plural "server list"). `name` defaults to the map key.
+---   servers           (table|nil)  a map of `name -> server config` for one or more servers.
+---                  `name` defaults to the map key.
 ---   native_servers (table|nil)  a map of `name -> native server config`
 ---                  (`tools`/`resources`/`prompts` tables; native.register's shape).
 ---                  A config with no `name` uses its map key.
@@ -238,8 +213,8 @@ function M.setup(opts)
 
 	M._reset()
 
-	-- 1. Native, in-process servers (U3). Registered first so they are already
-	--    in get_clients() when adapters/health run.
+	-- Native, in-process servers registered first so they are already in
+	-- get_clients() when adapters/health run.
 	if opts.native_servers ~= nil then
 		assert(type(opts.native_servers) == "table", "setup: `native_servers` must be a table")
 		for key, server_config in pairs(opts.native_servers) do
@@ -254,7 +229,7 @@ function M.setup(opts)
 		end
 	end
 
-	-- 2. Remote servers (U2), each with its resolved TokenStore (U7).
+	-- Remote servers, each with its resolved TokenStore.
 	for name, server_config in pairs(collect_servers(opts)) do
 		connect_server(name, server_config, opts.token_store)
 	end
