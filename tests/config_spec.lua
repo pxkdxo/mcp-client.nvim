@@ -80,6 +80,34 @@ describe("config.setup (orchestration)", function()
 			local all = client.get_clients({ name = "mykey" })
 			assert.are.equal(1, #all)
 		end)
+
+		it(
+			"regression: a second setup() call disconnects and replaces the prior roster, not accumulates alongside it",
+			function()
+				stub_connect()
+				config.setup({
+					native_servers = {
+						example = require("tests.fixtures.example_native_server"),
+					},
+				})
+				local first = client.get_clients({ name = "example-native" })[1]
+
+				stub_connect()
+				config.setup({
+					native_servers = {
+						example = require("tests.fixtures.example_native_server"),
+					},
+				})
+
+				local all = client.get_clients({ name = "example-native" })
+				assert.are.equal(
+					1,
+					#all,
+					"a repeated setup() must not leave the prior registration alongside a new one"
+				)
+				assert.is_true(first:is_stopped(), "the prior registration must be disconnected, not orphaned")
+			end
+		)
 	end)
 
 	describe("servers", function()
@@ -160,6 +188,34 @@ describe("config.setup (orchestration)", function()
 				assert.is_not_nil(store_b)
 				assert.are_not.equal(store_a.key, store_b.key)
 				assert.are_not.equal(store_a:path(), store_b:path())
+			end
+		)
+
+		it(
+			"regression: the connect-failure auth hint saves under the store's actual (possibly-namespaced) key, not the bare server name",
+			function()
+				stub_connect({ fail = "connection refused" })
+				local real_notify = vim.notify
+				local notified
+				vim.notify = function(msg, _level)
+					notified = msg
+				end
+				config.setup({
+					servers = { remote = { url = "https://server.example.com/mcp" } },
+					token_store = { backend = "file", data_home = vim.fn.tempname(), key = "shared" },
+				})
+				vim.wait(30, function()
+					return false
+				end)
+				vim.notify = real_notify
+
+				assert.is_not_nil(notified)
+				local store = config.get_hub("remote").token_store
+				assert.are.equal("shared:remote", store.key)
+				-- The printed snippet must save under the store's real, namespaced
+				-- key -- not the bare server name, which setup() never looks up.
+				assert.is_not_nil(notified:find("key = " .. vim.inspect(store.key), 1, true))
+				assert.is_nil(notified:find('key = "remote"', 1, true))
 			end
 		)
 

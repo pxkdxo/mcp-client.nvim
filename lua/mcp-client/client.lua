@@ -852,10 +852,12 @@ function M.get_clients(filter)
 	return out
 end
 
---- Test-only: clear the registry between specs so state does not leak.
---- Deliberately does *not* reset `next_id`: ids stay globally monotonic so a
---- deferred autocmd from a torn-down client can never collide with a
---- freshly-registered one in the following spec.
+--- Disconnect and clear every registered client. Used by tests between specs
+--- so state does not leak, and by `config.setup()` so a repeated `setup()`
+--- call replaces the prior client roster instead of accumulating duplicates
+--- alongside it. Deliberately does *not* reset `next_id`: ids stay globally
+--- monotonic so a deferred autocmd from a torn-down client can never collide
+--- with a freshly-registered one afterward.
 function M._reset_registry()
 	for id, entry in pairs(registry) do
 		pcall(function()

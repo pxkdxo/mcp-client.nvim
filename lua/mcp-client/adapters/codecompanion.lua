@@ -65,6 +65,17 @@ local client = require("mcp-client.client")
 
 local M = {}
 
+--- Monotonic JSON-RPC id generator. Requests are correlated by
+--- `rpc_message.id` (client.lua's `entry._in_flight`, legacy_sse.lua's
+--- `_pending`), so two concurrent calls sharing an id would silently deliver
+--- a response to the wrong callback -- e.g. an overlapping `tools/list`
+--- refresh and `tools/call`. Never reused for the life of the session.
+local next_request_id = 0
+local function new_request_id()
+	next_request_id = next_request_id + 1
+	return next_request_id
+end
+
 --- Namespace CodeCompanion tool/editor-context entries with this prefix so
 --- multiple clients' entries can never collide with each other or with a
 --- builtin/other-extension entry under the same generic registries this
@@ -110,7 +121,7 @@ local function refresh_client_tools(mcp_client)
 	pcall(function()
 		mcp_client:request({
 			jsonrpc = "2.0",
-			id = 1,
+			id = new_request_id(),
 			method = "tools/list",
 			-- vim.empty_dict(), not {}: an empty Lua table serializes to a JSON
 			-- array `[]`, which a strict real server rejects (HTTP 400) -- MCP
@@ -132,7 +143,7 @@ local function refresh_client_prompts(mcp_client)
 	pcall(function()
 		mcp_client:request({
 			jsonrpc = "2.0",
-			id = 1,
+			id = new_request_id(),
 			method = "prompts/list",
 			params = vim.empty_dict(),
 		}, function(err, result, _response)
@@ -151,7 +162,7 @@ local function refresh_client_resources(mcp_client)
 	pcall(function()
 		mcp_client:request({
 			jsonrpc = "2.0",
-			id = 1,
+			id = new_request_id(),
 			method = "resources/list",
 			params = vim.empty_dict(),
 		}, function(err, result, _response)
@@ -218,7 +229,7 @@ local function build_tool_spec(mcp_client, tool_info)
 				local ok, call_err = pcall(function()
 					mcp_client:request({
 						jsonrpc = "2.0",
-						id = 1,
+						id = new_request_id(),
 						method = "tools/call",
 						-- arguments defaults to vim.empty_dict() (not {}) so a
 						-- zero-argument tool call serializes `arguments` as a JSON
@@ -313,7 +324,7 @@ local function build_editor_context_entry(mcp_client)
 				pcall(function()
 					mcp_client:request({
 						jsonrpc = "2.0",
-						id = 1,
+						id = new_request_id(),
 						method = "resources/read",
 						params = { uri = resource_info.uri },
 					}, function(err, result, _response)
@@ -376,7 +387,7 @@ local function build_prompt_slash_command_entry(mcp_client, prompt_info)
 					pcall(function()
 						mcp_client:request({
 							jsonrpc = "2.0",
-							id = 1,
+							id = new_request_id(),
 							method = "prompts/get",
 							params = { name = prompt_info.name, arguments = arguments },
 						}, function(err, result, _response)

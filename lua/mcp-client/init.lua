@@ -20,7 +20,10 @@ local function build_initialize_request(config)
 		method = "initialize",
 		params = {
 			protocolVersion = PROTOCOL_VERSION,
-			capabilities = config.capabilities or {},
+			-- vim.empty_dict(), not {}: an empty Lua table serializes to a JSON
+			-- array `[]`, which a strict server rejects -- MCP requires
+			-- `capabilities` to be an object.
+			capabilities = config.capabilities or vim.empty_dict(),
 			clientInfo = {
 				name = config.name or "mcp-client",
 				version = config.client_version or "0.1.0",

@@ -545,6 +545,66 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 		assert.is_true(found_echo)
 	end)
 
+	it("regression: two concurrent tools/call requests never share a JSON-RPC id", function()
+		local call_ids = {}
+		local stopped = false
+		local obj = { name = "id-check" }
+		function obj:is_stopped()
+			return stopped
+		end
+		function obj:request(rpc_message, callback)
+			if stopped then
+				return callback("client is disconnected", nil, nil)
+			end
+			vim.schedule(function()
+				if rpc_message.method == "tools/list" then
+					return callback(nil, {
+						tools = { { name = "echo_tool", description = "d", inputSchema = { type = "object" } } },
+					}, nil)
+				elseif rpc_message.method == "tools/call" then
+					-- Never replies -- this test only cares what id each
+					-- concurrent call was issued with, not any response.
+					table.insert(call_ids, rpc_message.id)
+					return
+				end
+				return callback("unsupported method: " .. tostring(rpc_message.method), nil, nil)
+			end)
+		end
+		function obj:notify(_rpc_message) end
+		function obj:disconnect()
+			stopped = true
+		end
+		client.register_native(obj)
+
+		local codecompanion_adapter = require("mcp-client.adapters.codecompanion")
+		codecompanion_adapter.setup({})
+
+		local found
+		vim.wait(200, function()
+			codecompanion_adapter.exports.refresh()
+			for name in pairs(fake_mcp.get_registered_tools()) do
+				if name:match("echo_tool$") then
+					found = name
+				end
+			end
+			return found ~= nil
+		end)
+		assert.is_not_nil(found)
+
+		local resolved = fake_mcp.get_registered_tools()[found].callback()
+
+		-- Fire two overlapping calls before either can resolve.
+		resolved.cmds[1]({}, {}, {})
+		resolved.cmds[1]({}, {}, {})
+
+		vim.wait(200, function()
+			return #call_ids == 2
+		end)
+
+		assert.are.equal(2, #call_ids)
+		assert.are_not.equal(call_ids[1], call_ids[2])
+	end)
+
 	describe("prompt/slash-command bridging", function()
 		--- A minimal chat double: just enough of `CodeCompanion.Chat` for a
 		--- slash command's `callback(chat)` to add a real message via
