@@ -155,25 +155,28 @@ describe("config.setup (orchestration)", function()
 			assert.is_nil(record.token_store)
 		end)
 
-		it("retains the exact connect config passed to client.connect, including headers and reconnect tuning", function()
-			local calls = stub_connect()
-			config.setup({
-				servers = {
-					remote = {
-						url = "https://server.example.com/mcp",
-						headers = { ["X-API-Key"] = "s3cr3t" },
-						reconnect = { max_attempts = 5, backoff_ms = 250 },
+		it(
+			"retains the exact connect config passed to client.connect, including headers and reconnect tuning",
+			function()
+				local calls = stub_connect()
+				config.setup({
+					servers = {
+						remote = {
+							url = "https://server.example.com/mcp",
+							headers = { ["X-API-Key"] = "s3cr3t" },
+							reconnect = { max_attempts = 5, backoff_ms = 250 },
+						},
 					},
-				},
-				token_store = { backend = "file", data_home = vim.fn.tempname() },
-			})
-			local record = config.get_hub("remote")
-			assert.is_not_nil(record)
-			assert.is_not_nil(record.connect_config)
-			assert.are.same(calls[1], record.connect_config)
-			assert.are.same({ ["X-API-Key"] = "s3cr3t" }, record.connect_config.headers)
-			assert.are.same({ max_attempts = 5, backoff_ms = 250 }, record.connect_config.reconnect)
-		end)
+					token_store = { backend = "file", data_home = vim.fn.tempname() },
+				})
+				local record = config.get_hub("remote")
+				assert.is_not_nil(record)
+				assert.is_not_nil(record.connect_config)
+				assert.are.same(calls[1], record.connect_config)
+				assert.are.same({ ["X-API-Key"] = "s3cr3t" }, record.connect_config.headers)
+				assert.are.same({ max_attempts = 5, backoff_ms = 250 }, record.connect_config.reconnect)
+			end
+		)
 
 		it("retains connect_config.auth.token_store as the same object reference as record.token_store", function()
 			local calls = stub_connect()

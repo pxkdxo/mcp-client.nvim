@@ -13,6 +13,7 @@
 --- server with no stored token fails closed at the transport gate (tls.lua)
 --- with an actionable error pointing at how to authenticate manually.
 
+local commands = require("mcp-client.commands")
 local mcp_client = require("mcp-client.client")
 local native = require("mcp-client.native")
 local tls = require("mcp-client.transport.tls")
@@ -246,6 +247,12 @@ function M.setup(opts)
 	for name, server_config in pairs(collect_servers(opts)) do
 		connect_server(name, server_config, opts.token_store)
 	end
+
+	-- Register :MCPAuth once state is populated so its no-argument
+	-- resolution/completion see this setup()'s servers immediately.
+	-- nvim_create_user_command overwrites an already-defined command of the
+	-- same name, so a repeated setup() call is safe here.
+	commands.register()
 end
 
 return M
