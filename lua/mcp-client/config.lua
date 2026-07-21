@@ -24,19 +24,23 @@ local M = {}
 --- reporting record -- the live client roster is always re-read from
 --- `client.get_clients()`, never cached here.
 local state = {
-	servers = {}, ---@type table<string, { url: string, token_store: table|nil }>
+	servers = {}, ---@type table<string, { url: string, token_store: table|nil, connect_config: table|nil }>
 	native_servers = {}, ---@type string[]
 }
 
 --- Public, read-only view of the setup record for health.lua.
---- @return table { servers = table<string, {url, token_store}>, native_servers = string[] }
+--- @return table { servers = table<string, {url, token_store, connect_config}>, native_servers = string[] }
 function M.state()
 	return state
 end
 
 --- Convenience accessor for one server's record (nil if not configured).
 --- @param name string
---- @return table|nil { url, token_store }
+--- @return table|nil { url, token_store, connect_config }
+---   `connect_config` is the exact table `connect_server` built and passed to
+---   `mcp_client.connect` -- retained so a later caller can reconnect this one
+---   server exactly as `setup()` originally did. Its `auth.token_store` (when
+---   present) is the same object as `token_store`, not a copy.
 function M.get_hub(name)
 	return state.servers[name]
 end
@@ -138,7 +142,7 @@ local function connect_server(name, server_config, store_opts)
 		connect_config.auth = vim.tbl_extend("force", server_config.auth or {}, { token_store = store })
 	end
 
-	state.servers[name] = { url = server_config.url, token_store = store }
+	state.servers[name] = { url = server_config.url, token_store = store, connect_config = connect_config }
 
 	mcp_client.connect(connect_config, {
 		on_connect = function(_client_object, err)
