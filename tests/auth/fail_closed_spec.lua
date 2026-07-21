@@ -1,8 +1,8 @@
 -- Covers R12 fail-closed transport security and the token-refresh lifecycle:
 --
 --   * transport/tls.lua's URL-scheme + credential-presence gate:
---       - a non-localhost hub with no TLS and/or no token is refused (R12);
---       - a localhost hub is unaffected and proceeds.
+--       - a non-localhost server with no TLS and/or no token is refused (R12);
+--       - a localhost server is unaffected and proceeds.
 --   * auth/refresh.lua's refresh-token grant:
 --       - an expired access token is refreshed transparently before retry;
 --       - a rotated refresh token is stored;
@@ -11,9 +11,9 @@
 --   * bearer attachment on the wire: a request through a transport carrying an
 --     Authorization header actually sends it (via a loopback HTTP double).
 
-local tls = require("mcphub-neovim.transport.tls")
-local refresh = require("mcphub-neovim.auth.refresh")
-local client = require("mcphub-neovim.client")
+local tls = require("mcp-client.transport.tls")
+local refresh = require("mcp-client.auth.refresh")
+local client = require("mcp-client.client")
 
 local HttpDouble = require("tests.helpers.http_double")
 local wait_for = require("tests.helpers.wait")
@@ -43,14 +43,14 @@ describe("transport.tls fail-closed gate (R12)", function()
 
 	describe("non-localhost is fail-closed", function()
 		it("refuses a non-localhost http:// URL even with a token (no TLS)", function()
-			local ok, reason = tls.check_connection_allowed("http://hub.example.com/mcp", has_token())
+			local ok, reason = tls.check_connection_allowed("http://server.example.com/mcp", has_token())
 			assert.is_false(ok)
 			assert.is_string(reason)
 			assert.matches("TLS", reason)
 		end)
 
 		it("refuses a non-localhost https:// URL with no token (no auth)", function()
-			local ok, reason = tls.check_connection_allowed("https://hub.example.com/mcp", no_token())
+			local ok, reason = tls.check_connection_allowed("https://server.example.com/mcp", no_token())
 			assert.is_false(ok)
 			assert.is_string(reason)
 			-- Names the missing credential, not a generic "failed".
@@ -58,13 +58,13 @@ describe("transport.tls fail-closed gate (R12)", function()
 		end)
 
 		it("refuses a non-localhost http:// URL with no token (both missing)", function()
-			local ok, reason = tls.check_connection_allowed("http://hub.example.com/mcp", no_token())
+			local ok, reason = tls.check_connection_allowed("http://server.example.com/mcp", no_token())
 			assert.is_false(ok)
 			assert.is_string(reason)
 		end)
 
 		it("allows a non-localhost https:// URL WITH a token", function()
-			local ok, reason = tls.check_connection_allowed("https://hub.example.com/mcp", has_token())
+			local ok, reason = tls.check_connection_allowed("https://server.example.com/mcp", has_token())
 			assert.is_true(ok, reason)
 		end)
 
@@ -79,7 +79,7 @@ describe("transport.tls fail-closed gate (R12)", function()
 
 	describe("the refusal reason never contains a secret", function()
 		it("does not echo any token material in the refusal string", function()
-			local _, reason = tls.check_connection_allowed("http://hub.example.com/mcp", {
+			local _, reason = tls.check_connection_allowed("http://server.example.com/mcp", {
 				has_token = true,
 				-- Even if a caller (wrongly) passed the value, tls must not echo it.
 				access_token = "SECRET-should-never-appear",
@@ -97,12 +97,12 @@ describe("client.connect enforces the fail-closed gate (R12)", function()
 		end)
 	end)
 
-	it("refuses a non-localhost hub with no TLS and no auth, before opening a connection", function()
+	it("refuses a non-localhost server with no TLS and no auth, before opening a connection", function()
 		local connected, err
 		client.connect({
 			-- A non-localhost URL that would connect-refuse at the socket anyway,
 			-- but the gate must refuse it FIRST, without ever attempting the POST.
-			url = "http://hub.example.com/mcp",
+			url = "http://server.example.com/mcp",
 		}, {
 			on_connect = function(c, e)
 				connected, err = c, e
@@ -118,10 +118,10 @@ describe("client.connect enforces the fail-closed gate (R12)", function()
 		assert.matches("R12", err)
 	end)
 
-	it("refuses a non-localhost https hub when no Authorization header is configured", function()
+	it("refuses a non-localhost https server when no Authorization header is configured", function()
 		local connected, err
 		client.connect({
-			url = "https://hub.example.com/mcp",
+			url = "https://server.example.com/mcp",
 		}, {
 			on_connect = function(c, e)
 				connected, err = c, e
@@ -135,7 +135,7 @@ describe("client.connect enforces the fail-closed gate (R12)", function()
 		assert.matches("auth", err)
 	end)
 
-	it("allows a localhost hub with no TLS and no auth (unaffected by the gate)", function()
+	it("allows a localhost server with no TLS and no auth (unaffected by the gate)", function()
 		-- A real loopback double: the gate must NOT interfere; the connection
 		-- proceeds and initializes exactly as before this unit existed.
 		local double = HttpDouble.new({
@@ -168,7 +168,7 @@ describe("client.connect enforces the fail-closed gate (R12)", function()
 	it("the refusal error never contains a token value", function()
 		local connected, err
 		client.connect({
-			url = "https://hub.example.com/mcp",
+			url = "https://server.example.com/mcp",
 			headers = { ["X-Other"] = "value" },
 		}, {
 			on_connect = function(c, e)
@@ -204,7 +204,7 @@ describe("auth.refresh (refresh-token grant)", function()
 			scope = "mcp",
 			token_endpoint = nil, -- set per test to the double's URL
 			client_id = "the-client-id",
-			resource = "https://hub.example/mcp",
+			resource = "https://server.example/mcp",
 		}, overrides or {})
 	end
 
@@ -246,7 +246,7 @@ describe("auth.refresh (refresh-token grant)", function()
 		-- Metadata for the *next* refresh is preserved.
 		assert.are.equal(double.url .. "/token", result.token_endpoint)
 		assert.are.equal("the-client-id", result.client_id)
-		assert.are.equal("https://hub.example/mcp", result.resource)
+		assert.are.equal("https://server.example/mcp", result.resource)
 		-- The request used the refresh grant, not the authorization-code grant.
 		assert.matches("grant_type=refresh_token", received_body, 1, true)
 		assert.matches("refresh_token=the%-refresh%-token", received_body)
@@ -362,7 +362,7 @@ describe("client transparent token refresh (expired -> refresh -> retry)", funct
 	-- config.auth.token_store, is refreshed transparently through client:request
 	-- before the request is sent, and a revoked refresh token surfaces a terminal
 	-- re-auth error through that same path -- never an indefinite retry.
-	local token_store = require("mcphub-neovim.auth.token_store")
+	local token_store = require("mcp-client.auth.token_store")
 
 	local double
 	local tmp
@@ -389,7 +389,7 @@ describe("client transparent token refresh (expired -> refresh -> retry)", funct
 	-- backend, temp data_home) exercises the real load/save/status path.
 	local function seed_expired_store(token_endpoint, overrides)
 		tmp = make_tmpdir()
-		local store = token_store.new({ key = "hubX", backend = "file", data_home = tmp })
+		local store = token_store.new({ key = "serverX", backend = "file", data_home = tmp })
 		store:save(vim.tbl_extend("force", {
 			access_token = "expired-access-token",
 			refresh_token = "the-refresh-token",
@@ -398,7 +398,7 @@ describe("client transparent token refresh (expired -> refresh -> retry)", funct
 			scope = "mcp",
 			token_endpoint = token_endpoint,
 			client_id = "the-client-id",
-			resource = "https://hub.example/mcp",
+			resource = "https://server.example/mcp",
 		}, overrides or {}))
 		return store
 	end
@@ -660,7 +660,7 @@ describe("client concurrent refresh coalescing (single-flight)", function()
 	-- -- so most of the batch spuriously surfaces a terminal re-auth error even
 	-- though a sibling refreshed successfully. With coalescing, exactly ONE grant
 	-- runs for the whole batch and every request succeeds.
-	local token_store = require("mcphub-neovim.auth.token_store")
+	local token_store = require("mcp-client.auth.token_store")
 
 	local double
 	local tmp
@@ -736,7 +736,7 @@ describe("client concurrent refresh coalescing (single-flight)", function()
 		})
 
 		tmp = make_tmpdir()
-		local store = token_store.new({ key = "hubConcurrent", backend = "file", data_home = tmp })
+		local store = token_store.new({ key = "serverConcurrent", backend = "file", data_home = tmp })
 		store:save({
 			access_token = "expired-access-token",
 			refresh_token = "rt-0",
@@ -745,7 +745,7 @@ describe("client concurrent refresh coalescing (single-flight)", function()
 			scope = "mcp",
 			token_endpoint = double.url .. "/token",
 			client_id = "the-client-id",
-			resource = "https://hub.example/mcp",
+			resource = "https://server.example/mcp",
 		})
 
 		local got
@@ -798,7 +798,7 @@ describe("client concurrent refresh coalescing (single-flight)", function()
 			assert.is_nil(reply.err)
 			assert.are.same({ pong = true }, reply.result.result)
 		end
-		-- All N pings actually reached the hub carrying the (single) refreshed token.
+		-- All N pings actually reached the server carrying the (single) refreshed token.
 		assert.are.equal(N, ping_replies)
 		-- The rotated token was persisted for next time and is no longer expired.
 		local status = store:status()
@@ -813,8 +813,8 @@ describe("bearer attachment on the wire (happy path)", function()
 	-- The transport doesn't care that 127.0.0.1 is technically localhost for the
 	-- header-merge test (per the brief): this exercises that a token applied to a
 	-- shared headers table is actually sent on every outbound request.
-	local token_store = require("mcphub-neovim.auth.token_store")
-	local StreamableHttp = require("mcphub-neovim.transport.streamable_http")
+	local token_store = require("mcp-client.auth.token_store")
+	local StreamableHttp = require("mcp-client.transport.streamable_http")
 
 	local double
 	after_each(function()

@@ -1,13 +1,13 @@
--- U9 hub-agnosticism & resilience/auth integration spec.
+-- U9 server-agnosticism & resilience/auth integration spec.
 --
 -- Unlike every prior unit's tests (which use in-repo local doubles only), U9's
--- Approach calls for validating against REAL, externally-running MCP hubs. This
+-- Approach calls for validating against REAL, externally-running MCP servers. This
 -- spec therefore has two kinds of coverage, clearly separated:
 --
 --   * HERMETIC (always runs): client-kind / envelope agnosticism and the R12
 --     fail-closed gate -- exercised with local doubles and pure gate checks, so
 --     they run everywhere and act as regression guards for the interop bugs U9
---     surfaced against the real hubs.
+--     surfaced against the real servers.
 --   * LIVE (skips gracefully when the endpoint is unreachable): protocol parity
 --     against ravitemer/mcp-hub (:40032) and samanhappy/mcphub (:3000), and the
 --     R12 successful-auth path against a self-signed-TLS non-localhost double.
@@ -16,28 +16,28 @@
 -- will NOT have the two exact external processes (localhost:40032,
 -- localhost:3000) running. Every live block probes reachability first and SKIPS
 -- with a visible reason (pending("...")) rather than hard-failing, so the full
--- suite stays green for them. See tests/helpers/live_hub.lua.
+-- suite stays green for them. See tests/helpers/live_backends.lua.
 --
 -- SAFETY: this spec only ever contacts the two sanctioned validation endpoints
 -- (:40032, :3000) and locally-bound loopback aliases. The user's real,
--- daily-driver hub on port 37373 is never referenced anywhere.
+-- daily-driver server on port 37373 is never referenced anywhere.
 --
--- Requirements covered: R9 (hub-agnosticism, no hub-specific code path),
+-- Requirements covered: R9 (server-agnosticism, no server-specific code path),
 -- R11 (connection-loss surfaced as a visible failure, adapters degrade -- no
 -- hang), R12 (bearer auth + TLS for non-localhost; fail closed without them).
 
-local client = require("mcphub-neovim.client")
-local tls = require("mcphub-neovim.transport.tls")
-local live_hub = require("tests.helpers.live_hub")
+local client = require("mcp-client.client")
+local tls = require("mcp-client.transport.tls")
+local live_backends = require("tests.helpers.live_backends")
 local wait_for = require("tests.helpers.wait")
-local non_localhost = require("tests.fixtures.non_localhost_hub_double")
+local non_localhost = require("tests.fixtures.non_localhost_server_double")
 
 --- A minimal remote-shaped client double: its request() callback delivers the
 --- FULL JSON-RPC envelope (`{ jsonrpc, id, result = {...} }`), exactly as the
 --- real remote transports (streamable_http, legacy_sse) do -- and unlike the
 --- older adapter doubles, which returned the unwrapped payload and so never
 --- exercised the envelope-unwrapping path. This is the regression guard for the
---- U9-surfaced "adapter reads result.tools but a real hub nests it under
+--- U9-surfaced "adapter reads result.tools but a real server nests it under
 --- result.result" bug. request() callbacks fire on a deferred vim.schedule to
 --- match remote clients' always-async contract.
 local function make_enveloped_remote_double(name, listing)
@@ -67,7 +67,7 @@ local function make_enveloped_remote_double(name, listing)
 	return obj
 end
 
-describe("U9 hub-agnosticism: adapters are agnostic to the result envelope (R9)", function()
+describe("U9 server-agnosticism: adapters are agnostic to the result envelope (R9)", function()
 	after_each(function()
 		client._reset_registry()
 		vim.wait(30, function()
@@ -77,10 +77,10 @@ describe("U9 hub-agnosticism: adapters are agnostic to the result envelope (R9)"
 
 	it("Avante adapter reads tools from a remote (enveloped) client, not just a native one", function()
 		-- Register a remote-shaped double that nests its tools under result.result,
-		-- exactly like the real hubs. Before the U9 fix the adapter read result.tools
+		-- exactly like the real servers. Before the U9 fix the adapter read result.tools
 		-- and got nothing; now it unwraps and sees the listing.
-		local avante = require("mcphub-neovim.adapters.avante")
-		client.register_native(make_enveloped_remote_double("remote-hub", {
+		local avante = require("mcp-client.adapters.avante")
+		client.register_native(make_enveloped_remote_double("remote-server", {
 			{ name = "enveloped_tool", description = "d", inputSchema = { type = "object" } },
 		}))
 
@@ -115,10 +115,10 @@ describe("U9 hub-agnosticism: adapters are agnostic to the result envelope (R9)"
 			end,
 		}
 		package.loaded["codecompanion.config"] = { interactions = { chat = { editor_context = {} } } }
-		package.loaded["mcphub-neovim.adapters.codecompanion"] = nil
-		local cc = require("mcphub-neovim.adapters.codecompanion")
+		package.loaded["mcp-client.adapters.codecompanion"] = nil
+		local cc = require("mcp-client.adapters.codecompanion")
 
-		local double = make_enveloped_remote_double("remote-hub-cc", {
+		local double = make_enveloped_remote_double("remote-server-cc", {
 			{ name = "cc_enveloped_tool", description = "d", inputSchema = { type = "object" } },
 		})
 		client.register_native(double)
@@ -150,11 +150,11 @@ describe("U9 hub-agnosticism: adapters are agnostic to the result envelope (R9)"
 
 		package.loaded["codecompanion.mcp"] = nil
 		package.loaded["codecompanion.config"] = nil
-		package.loaded["mcphub-neovim.adapters.codecompanion"] = nil
+		package.loaded["mcp-client.adapters.codecompanion"] = nil
 	end)
 end)
 
-describe("U9 hub-agnosticism: live protocol parity (R9) [skips if hub unreachable]", function()
+describe("U9 server-agnosticism: live protocol parity (R9) [skips if server unreachable]", function()
 	after_each(function()
 		client._reset_registry()
 		vim.wait(30, function()
@@ -163,13 +163,13 @@ describe("U9 hub-agnosticism: live protocol parity (R9) [skips if hub unreachabl
 	end)
 
 	it("ravitemer/mcp-hub (:40032): connect, tools/list, clean disconnect", function()
-		if not live_hub.ravitemer_reachable() then
+		if not live_backends.ravitemer_reachable() then
 			pending("ravitemer/mcp-hub validation instance (localhost:40032) is not reachable; skipping live check")
 			return
 		end
 
 		local got
-		client.connect({ url = live_hub.RAVITEMER_MCP_HUB_URL, name = "u9-ravitemer" }, {
+		client.connect({ url = live_backends.RAVITEMER_MCP_HUB_URL, name = "u9-ravitemer" }, {
 			on_connect = function(c, e)
 				got = { c = c, e = e }
 			end,
@@ -181,10 +181,10 @@ describe("U9 hub-agnosticism: live protocol parity (R9) [skips if hub unreachabl
 			"connect to :40032 did not settle"
 		)
 		assert.is_nil(got.e, "connect error: " .. tostring(got.e))
-		-- This hub speaks the legacy two-endpoint SSE transport (confirmed in U9).
+		-- This server speaks the legacy two-endpoint SSE transport (confirmed in U9).
 		assert.are.equal("legacy_sse", got.c.transport)
 
-		-- tools/list with an OBJECT params (vim.empty_dict()); a strict hub rejects
+		-- tools/list with an OBJECT params (vim.empty_dict()); a strict server rejects
 		-- an empty [] here (the U9-surfaced encoding bug). Expect a real listing.
 		local reply
 		got.c:request(
@@ -203,7 +203,7 @@ describe("U9 hub-agnosticism: live protocol parity (R9) [skips if hub unreachabl
 		-- Remote clients deliver the full JSON-RPC envelope: payload under result.result.
 		local tools = reply.result and reply.result.result and reply.result.result.tools
 		assert.is_table(tools)
-		assert.is_true(#tools > 0, "expected a non-empty tool listing from the real hub")
+		assert.is_true(#tools > 0, "expected a non-empty tool listing from the real server")
 
 		got.c:disconnect()
 		assert.is_true(
@@ -215,11 +215,11 @@ describe("U9 hub-agnosticism: live protocol parity (R9) [skips if hub unreachabl
 	end)
 
 	it("samanhappy/mcphub (:3000): identical connect+list behavior through the same code path", function()
-		if not live_hub.samanhappy_reachable() then
+		if not live_backends.samanhappy_reachable() then
 			pending("samanhappy/mcphub container (localhost:3000) is not reachable; skipping live check")
 			return
 		end
-		if not live_hub.samanhappy_mcp_reachable() then
+		if not live_backends.samanhappy_mcp_reachable() then
 			-- U9 finding: the container's MCP transport routes are registered only
 			-- after initUpstreamServers() resolves; if any configured upstream fails
 			-- (a Context7 URL blocked by the container's SSRF guard, in the
@@ -235,10 +235,10 @@ describe("U9 hub-agnosticism: live protocol parity (R9) [skips if hub unreachabl
 		end
 
 		-- If/when the MCP endpoint IS mounted, the SAME client.connect code path
-		-- (no hub-specific branch) must connect and list tools -- proving genuine
-		-- hub-agnosticism (R9). samanhappy serves modern Streamable HTTP on
+		-- (no server-specific branch) must connect and list tools -- proving genuine
+		-- server-agnosticism (R9). samanhappy serves modern Streamable HTTP on
 		-- /mcp/<group>; $smart routes across all servers.
-		local url = live_hub.SAMANHAPPY_BASE_URL .. "/mcp/$smart"
+		local url = live_backends.SAMANHAPPY_BASE_URL .. "/mcp/$smart"
 		local got
 		client.connect({ url = url, name = "u9-samanhappy" }, {
 			on_connect = function(c, e)
@@ -338,12 +338,12 @@ describe("U9 resilience: connection loss is a visible failure, never a hang (R11
 	end)
 
 	it("live :40032 normal-operation lifecycle (connect -> disconnect) completes bounded", function()
-		if not live_hub.ravitemer_reachable() then
+		if not live_backends.ravitemer_reachable() then
 			pending("ravitemer/mcp-hub (localhost:40032) not reachable; skipping live lifecycle check")
 			return
 		end
 		local got
-		client.connect({ url = live_hub.RAVITEMER_MCP_HUB_URL, name = "r11-live-normal" }, {
+		client.connect({ url = live_backends.RAVITEMER_MCP_HUB_URL, name = "r11-live-normal" }, {
 			on_connect = function(c, e)
 				got = { c = c, e = e }
 			end,
@@ -357,17 +357,17 @@ describe("U9 resilience: connection loss is a visible failure, never a hang (R11
 			wait_for(function()
 				return got.c:is_stopped()
 			end, 3000),
-			"clean disconnect from the real hub must complete, not hang"
+			"clean disconnect from the real server must complete, not hang"
 		)
 	end)
 end)
 
-describe("U9 auth/TLS for non-localhost hubs (R12)", function()
+describe("U9 auth/TLS for non-localhost servers (R12)", function()
 	-- The R12 gate is a pure policy check, so the FAIL-CLOSED assertions run
 	-- everywhere (no server needed). The SUCCESSFUL-AUTH path needs a real
 	-- self-signed-TLS non-localhost server, which is best-effort (a bindable
 	-- non-localhost loopback alias + node + openssl); it skips gracefully when the
-	-- platform can't provide one -- see tests/fixtures/non_localhost_hub_double.lua.
+	-- platform can't provide one -- see tests/fixtures/non_localhost_server_double.lua.
 
 	after_each(function()
 		client._reset_registry()
@@ -376,7 +376,7 @@ describe("U9 auth/TLS for non-localhost hubs (R12)", function()
 		end)
 	end)
 
-	it("fail-closed: a non-localhost http (no TLS, no token) hub is refused before connecting", function()
+	it("fail-closed: a non-localhost http (no TLS, no token) server is refused before connecting", function()
 		local connected, err
 		client.connect({ url = "http://198.51.100.7:8080/mcp" }, {
 			on_connect = function(c, e)
@@ -391,7 +391,7 @@ describe("U9 auth/TLS for non-localhost hubs (R12)", function()
 		assert.matches("R12", err)
 	end)
 
-	it("fail-closed: a non-localhost https hub with no token is refused (missing auth)", function()
+	it("fail-closed: a non-localhost https server with no token is refused (missing auth)", function()
 		local connected, err
 		client.connect({ url = "https://198.51.100.7/mcp" }, {
 			on_connect = function(c, e)

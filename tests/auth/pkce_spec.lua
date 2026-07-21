@@ -1,4 +1,4 @@
-local pkce = require("mcphub-neovim.auth.pkce")
+local pkce = require("mcp-client.auth.pkce")
 
 describe("auth.pkce", function()
 	describe("generate", function()

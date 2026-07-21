@@ -1,17 +1,17 @@
 --- Avante adapter (U4, extended by U11, prompt wiring corrected in a
 --- follow-up fix -- see the doc comment above `M.custom_slash_commands()`
 --- below for the full story): translate this plugin's client/tool/prompt
---- surface -- `require("mcphub-neovim.client").get_clients(filter)` plus
+--- surface -- `require("mcp-client.client").get_clients(filter)` plus
 --- each client object's `request(rpc_message, callback)` -- into Avante's
 --- real `custom_tools` config option and `avante.config`'s live
 --- `slash_commands` array, replacing `mcphub.extensions.avante`.
 ---
---- This is a thin adapter (R6): it holds no direct hub or transport logic
+--- This is a thin adapter (R6): it holds no direct server or transport logic
 --- of its own. Every tool call it exposes to Avante is, underneath, a
 --- standard MCP `tools/list` / `tools/call` JSON-RPC message routed through
 --- a client object's `request()` -- exactly the same call a native server
---- (U3) or a remote hub connection (U1/U2) already answers. The adapter
---- never imports `mcphub-neovim.transport.*`, never touches a `Job` object,
+--- (U3) or a remote server connection (U1/U2) already answers. The adapter
+--- never imports `mcp-client.transport.*`, never touches a `Job` object,
 --- and never assumes a client is remote or native -- `get_clients()`
 --- deliberately makes the two indistinguishable, and this file relies on
 --- that uniformity rather than working around it.
@@ -58,7 +58,7 @@
 --- caller of `request()` must not assume the callback defers, but nothing
 --- requires an *adapter built on top of it* to return synchronously too).
 
-local client = require("mcphub-neovim.client")
+local client = require("mcp-client.client")
 
 local M = {}
 
@@ -69,7 +69,7 @@ local M = {}
 ---   * native  -> the handler's return value directly, e.g. `{ tools = {...} }`;
 ---   * remote  -> the full JSON-RPC envelope, e.g. `{ jsonrpc, id, result = { tools = {...} } }`.
 --- (Local test doubles historically mimic the native/unwrapped shape, so this
---- divergence only bites against a real remote hub -- surfaced by U9.) A
+--- divergence only bites against a real remote server -- surfaced by U9.) A
 --- nested `result` table alone is NOT a reliable envelope signal: a native
 --- tool is an arbitrary, MCP-unaware Lua function, and its own payload can
 --- legitimately use `result` as an ordinary field name (e.g. a calc/lookup
@@ -131,9 +131,9 @@ local function refresh_client_tools(mcp_client)
 			id = 1,
 			method = "tools/list",
 			-- vim.empty_dict(), not {}: an empty Lua table serializes to a JSON
-			-- array `[]`, which a strict real hub rejects (HTTP 400 "Invalid
+			-- array `[]`, which a strict real server rejects (HTTP 400 "Invalid
 			-- message") -- MCP requires `params` to be an object. (Surfaced by
-			-- U9's real-hub validation; local doubles echo regardless of shape.)
+			-- U9's real-server validation; local doubles echo regardless of shape.)
 			params = vim.empty_dict(),
 		}, function(cb_err, result, _response)
 			local payload = unwrap_result(result)
@@ -230,7 +230,7 @@ local function build_tool_spec(mcp_client, tool_info)
 					method = "tools/call",
 					-- arguments defaults to vim.empty_dict() (not {}) so a
 					-- zero-argument tool call serializes `arguments` as a JSON
-					-- object `{}`, not an array `[]` a strict hub would reject.
+					-- object `{}`, not an array `[]` a strict server would reject.
 					params = { name = tool_info.name, arguments = input or vim.empty_dict() },
 				}, function(err, result, _response)
 					if not on_complete then
@@ -277,7 +277,7 @@ end
 ---
 --- Usage:
 ---   require("avante").setup({
----     custom_tools = require("mcphub-neovim.adapters.avante").custom_tools,
+---     custom_tools = require("mcp-client.adapters.avante").custom_tools,
 ---   })
 function M.custom_tools()
 	local tools = {}
@@ -388,7 +388,7 @@ local function refresh_client_prompts(mcp_client)
 			id = 1,
 			method = "prompts/list",
 			-- vim.empty_dict(), not {}, for the same reason as tools/list above:
-			-- MCP requires `params` to be a JSON object, and a strict real hub
+			-- MCP requires `params` to be a JSON object, and a strict real server
 			-- rejects an empty Lua table's `[]` serialization.
 			params = vim.empty_dict(),
 		}, function(cb_err, result, _response)
@@ -496,7 +496,7 @@ local function build_prompt_command(mcp_client, prompt_info)
 					params = { name = prompt_info.name, arguments = arguments },
 				}, function(err, result, _response)
 					if err then
-						vim.notify("mcphub-neovim: prompt failed: " .. tostring(err), vim.log.levels.ERROR)
+						vim.notify("mcp-client: prompt failed: " .. tostring(err), vim.log.levels.ERROR)
 						return
 					end
 					local payload = unwrap_result(result)
@@ -507,7 +507,7 @@ local function build_prompt_command(mcp_client, prompt_info)
 				end)
 			end)
 			if not ok then
-				vim.notify("mcphub-neovim: prompt failed: " .. tostring(call_err), vim.log.levels.ERROR)
+				vim.notify("mcp-client: prompt failed: " .. tostring(call_err), vim.log.levels.ERROR)
 			end
 		end,
 	}

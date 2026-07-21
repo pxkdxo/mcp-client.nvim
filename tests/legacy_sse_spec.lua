@@ -1,4 +1,4 @@
-local LegacySse = require("mcphub-neovim.transport.legacy_sse")
+local LegacySse = require("mcp-client.transport.legacy_sse")
 
 --- Unit coverage for the pieces of the legacy transport U2 leans on that
 --- U1's specs did not exercise: server-notification routing and the SSE

@@ -1,6 +1,6 @@
---- mcphub-neovim: an MCP (Model Context Protocol) client for Neovim.
+--- mcp-client: an MCP (Model Context Protocol) client for Neovim.
 ---
---- Exposed as `require("mcphub-neovim")`, deliberately not
+--- Exposed as `require("mcp-client")`, deliberately not
 --- `require("mcphub")`, to avoid colliding with `mcphub.nvim`'s own
 --- module name while both may be present in a dev/test environment
 --- before cutover.
@@ -10,12 +10,12 @@
 --- pick and connect the right transport. Session lifecycle, reconnection,
 --- and the Neovim-native client/event API (get_clients(), MCPAttach/
 --- MCPDetach autocmds, etc.) are Task 2's job, not built here.
-local detect = require("mcphub-neovim.transport.detect")
+local detect = require("mcp-client.transport.detect")
 
 local M = {}
 
 --- Semantic version of the MCP protocol revision this client speaks.
---- Sent as `protocolVersion` in InitializeRequest; legacy hubs that omit
+--- Sent as `protocolVersion` in InitializeRequest; legacy servers that omit
 --- `MCP-Protocol-Version` in their own responses are assumed to be on the
 --- 2025-03-26 revision per the Key Technical Decisions.
 local PROTOCOL_VERSION = "2025-03-26"
@@ -29,14 +29,14 @@ local function build_initialize_request(config)
 			protocolVersion = PROTOCOL_VERSION,
 			capabilities = config.capabilities or {},
 			clientInfo = {
-				name = config.name or "mcphub-neovim",
+				name = config.name or "mcp-client",
 				version = config.client_version or "0.1.0",
 			},
 		},
 	}
 end
 
---- Connect to a remote MCP hub, detecting whether it speaks the modern
+--- Connect to a remote MCP server, detecting whether it speaks the modern
 --- single-endpoint Streamable HTTP transport or the legacy two-endpoint
 --- HTTP+SSE transport, and hand back a transport-agnostic client.
 ---
@@ -45,7 +45,7 @@ end
 --- wants to be notified.
 ---
 --- @param config table
----   url              (string, required) the hub's MCP endpoint URL
+---   url              (string, required) the server's MCP endpoint URL
 ---   name             (string|nil) client name sent in InitializeRequest
 ---   client_version   (string|nil) client version sent in InitializeRequest
 ---   capabilities     (table|nil) client capabilities sent in InitializeRequest
@@ -91,22 +91,22 @@ function M.connect(config, opts)
 	end)
 end
 
---- The user-facing setup entrypoint: `require("mcphub-neovim").setup(opts)`,
+--- The user-facing setup entrypoint: `require("mcp-client").setup(opts)`,
 --- mirroring `require("mcphub").setup(opts)`'s call shape so a real config's
 --- migration off `mcphub.nvim` is a mechanical swap rather than a redesign.
 ---
 --- All orchestration (validating/normalizing config, registering native
---- servers, connecting hubs, wiring OAuth token stores) lives in
+--- servers, connecting servers, wiring OAuth token stores) lives in
 --- `config.lua`; this is a thin, deliberate delegation so the module's own
---- public name (`require("mcphub-neovim")`) is the entrypoint, matching the
+--- public name (`require("mcp-client")`) is the entrypoint, matching the
 --- established U3/U6/U7 pattern of a small, justified extension to a shared
 --- file. `config` is required lazily so this thin U1-era `connect` path (and
 --- the specs that exercise it in isolation) never pull in the whole
 --- client/native/auth stack unless `setup()` is actually called.
 ---
---- @param opts table|nil  see `mcphub-neovim.config.setup` for the full shape.
+--- @param opts table|nil  see `mcp-client.config.setup` for the full shape.
 function M.setup(opts)
-	return require("mcphub-neovim.config").setup(opts)
+	return require("mcp-client.config").setup(opts)
 end
 
 return M

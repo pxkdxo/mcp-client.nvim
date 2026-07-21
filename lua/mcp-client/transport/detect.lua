@@ -1,5 +1,5 @@
---- Transport detection: connects to a configured hub URL and decides,
---- per the MCP spec's client-side detection algorithm, whether the hub
+--- Transport detection: connects to a configured server URL and decides,
+--- per the MCP spec's client-side detection algorithm, whether the server
 --- speaks the modern single-endpoint Streamable HTTP transport or only
 --- the legacy two-endpoint HTTP+SSE transport -- then hands back an
 --- already-connected transport behind the common transport interface
@@ -8,18 +8,18 @@
 ---
 --- Detection algorithm (MCP spec, transport revision negotiation):
 ---   1. POST the InitializeRequest to the configured URL.
----   2. A 2xx response means the hub speaks Streamable HTTP: use it,
----      remembering any Mcp-Session-Id the hub assigned.
----   3. A 400/404/405 response means the hub doesn't recognize POST on
+---   2. A 2xx response means the server speaks Streamable HTTP: use it,
+---      remembering any Mcp-Session-Id the server assigned.
+---   3. A 400/404/405 response means the server doesn't recognize POST on
 ---      that URL: fall back to legacy discovery -- GET the same URL and
 ---      expect an `endpoint` SSE event naming the URL to POST against.
 ---   4. Any other status is a genuine error, surfaced as such -- never
 ---      silently treated as "must be legacy."
 local curl = require("plenary.curl")
 
-local StreamableHttp = require("mcphub-neovim.transport.streamable_http")
-local LegacySse = require("mcphub-neovim.transport.legacy_sse")
-local transport_util = require("mcphub-neovim.transport.util")
+local StreamableHttp = require("mcp-client.transport.streamable_http")
+local LegacySse = require("mcp-client.transport.legacy_sse")
+local transport_util = require("mcp-client.transport.util")
 
 local M = {}
 
@@ -39,9 +39,9 @@ end
 local function describe_curl_error(curl_err)
 	local message = curl_err.message or vim.inspect(curl_err)
 	if message:find("Failed to connect", 1, true) or message:find("Connection refused", 1, true) then
-		return "could not connect to hub: " .. message
+		return "could not connect to server: " .. message
 	end
-	return "request to hub failed: " .. message
+	return "request to server failed: " .. message
 end
 
 --- Legacy discovery: GET the configured URL and expect an `endpoint` SSE
@@ -104,7 +104,7 @@ local function finalize_streamable_http(response, url, headers, on_done)
 	-- direct `application/json` body, or a single-event `text/event-stream`
 	-- response carrying the JSON-RPC message in its `data:` field. Try the
 	-- direct-JSON case first (the common/simple case), then fall back to
-	-- unwrapping a single SSE event -- a real hub may choose either.
+	-- unwrapping a single SSE event -- a real server may choose either.
 	local ok, decoded = pcall(vim.json.decode, response.body)
 	if not ok then
 		local sse_decoded, sse_err = transport_util.decode_json_from_sse_body(response.body)
@@ -138,7 +138,7 @@ local function finalize_streamable_http(response, url, headers, on_done)
 end
 
 --- @param opts table
----   url     (string) the configured hub URL
+---   url     (string) the configured server URL
 ---   request (table) the InitializeRequest JSON-RPC message to send
 ---   timeout (number|nil) per-request timeout in ms (default 10000)
 ---   headers (table|nil) extra headers merged into every request
@@ -166,7 +166,7 @@ function M.connect(opts, on_done)
 		timeout = timeout,
 		callback = vim.schedule_wrap(function(response)
 			if not response then
-				return on_done(nil, "no response from hub")
+				return on_done(nil, "no response from server")
 			end
 
 			if response.status >= 200 and response.status < 300 then
@@ -180,7 +180,7 @@ function M.connect(opts, on_done)
 			return on_done(
 				nil,
 				string.format(
-					"hub returned unexpected status %d for InitializeRequest: %s",
+					"server returned unexpected status %d for InitializeRequest: %s",
 					response.status,
 					response.body or ""
 				)

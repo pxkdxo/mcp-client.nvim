@@ -2,17 +2,17 @@
 ---
 --- One URL handles both directions: JSON-RPC requests/notifications are
 --- POSTed to it, and the server may optionally push messages back over an
---- SSE stream opened with GET on the same URL. All hub network I/O goes
+--- SSE stream opened with GET on the same URL. All server network I/O goes
 --- through plenary.curl -- never a hand-rolled vim.uv socket.
 local curl = require("plenary.curl")
-local transport_util = require("mcphub-neovim.transport.util")
+local transport_util = require("mcp-client.transport.util")
 
 local StreamableHttp = {}
 StreamableHttp.__index = StreamableHttp
 
 --- @param opts table
 ---   url        (string) the single MCP endpoint
----   session_id (string|nil) Mcp-Session-Id, if the hub assigned one
+---   session_id (string|nil) Mcp-Session-Id, if the server assigned one
 ---   headers    (table|nil) extra headers merged into every request
 function StreamableHttp.new(opts)
 	return setmetatable({
@@ -40,7 +40,7 @@ function StreamableHttp:_headers()
 end
 
 --- Send a JSON-RPC request and invoke callback(err, result, response) once
---- the hub replies. Fire-and-forget async: does not block the caller.
+--- the server replies. Fire-and-forget async: does not block the caller.
 function StreamableHttp:request(rpc_message, callback)
 	if self._closed then
 		return callback("transport is closed", nil, nil)
@@ -52,7 +52,7 @@ function StreamableHttp:request(rpc_message, callback)
 		timeout = 30000,
 		callback = vim.schedule_wrap(function(response)
 			if not response then
-				return callback("no response from hub", nil, nil)
+				return callback("no response from server", nil, nil)
 			end
 
 			local session_header = transport_util.find_header(response.headers, "Mcp-Session-Id")
@@ -62,21 +62,21 @@ function StreamableHttp:request(rpc_message, callback)
 
 			if response.status < 200 or response.status >= 300 then
 				return callback(
-					string.format("hub returned status %d: %s", response.status, response.body or ""),
+					string.format("server returned status %d: %s", response.status, response.body or ""),
 					nil,
 					response
 				)
 			end
 
 			-- Same dual response-shape handling as detect.lua's initialize
-			-- parsing: a real hub may answer with a direct JSON body or a
+			-- parsing: a real server may answer with a direct JSON body or a
 			-- single-event `text/event-stream` response.
 			local ok, decoded = pcall(vim.json.decode, response.body)
 			if not ok then
 				local sse_decoded, sse_err = transport_util.decode_json_from_sse_body(response.body)
 				if not sse_decoded then
 					return callback(
-						"failed to decode hub response as JSON: "
+						"failed to decode server response as JSON: "
 							.. tostring(decoded)
 							.. " (also tried SSE framing: "
 							.. tostring(sse_err)

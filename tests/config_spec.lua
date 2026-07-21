@@ -2,8 +2,8 @@
 -- glue call a real user's config makes: it validates and normalizes the
 -- externally-supplied configuration (R7 -- nothing personal baked into the
 -- plugin source), registers native servers via `native.register`, connects
--- each configured hub via `client.connect`, and threads an auto-constructed
--- TokenStore into any non-localhost hub that did not bring its own (design
+-- each configured server via `client.connect`, and threads an auto-constructed
+-- TokenStore into any non-localhost server that did not bring its own (design
 -- question 3). It never triggers an interactive OAuth flow.
 --
 -- These specs drive the orchestration through the same public seams every
@@ -11,8 +11,8 @@
 -- `client.connect` so no real transport/socket is ever opened -- the same
 -- discipline the adapter specs follow.
 
-local client = require("mcphub-neovim.client")
-local config = require("mcphub-neovim.config")
+local client = require("mcp-client.client")
+local config = require("mcp-client.config")
 
 describe("config.setup (orchestration)", function()
 	local real_connect
@@ -85,11 +85,11 @@ describe("config.setup (orchestration)", function()
 		end)
 	end)
 
-	describe("hubs", function()
-		it("connects each configured hub, passing its url through to client.connect", function()
+	describe("servers", function()
+		it("connects each configured server, passing its url through to client.connect", function()
 			local calls = stub_connect()
 			config.setup({
-				hubs = {
+				servers = {
 					local_hub = { url = "http://localhost:9999" },
 				},
 			})
@@ -100,10 +100,10 @@ describe("config.setup (orchestration)", function()
 			assert.are.equal("local_hub", calls[1].name)
 		end)
 
-		it("connects multiple hubs (R7's plural server list)", function()
+		it("connects multiple servers (R7's plural server list)", function()
 			local calls = stub_connect()
 			config.setup({
-				hubs = {
+				servers = {
 					a = { url = "http://localhost:1111" },
 					b = { url = "http://localhost:2222" },
 				},
@@ -111,29 +111,29 @@ describe("config.setup (orchestration)", function()
 			assert.are.equal(2, #calls)
 		end)
 
-		it("supports a single `hub` shorthand as well as a `hubs` map", function()
+		it("supports a single `server` shorthand as well as a `servers` map", function()
 			local calls = stub_connect()
 			config.setup({
-				hub = { url = "http://localhost:3333" },
+				server = { url = "http://localhost:3333" },
 			})
 			assert.are.equal(1, #calls)
 			assert.are.equal("http://localhost:3333", calls[1].url)
 		end)
 
-		it("does not construct a TokenStore for a localhost hub", function()
+		it("does not construct a TokenStore for a localhost server", function()
 			stub_connect()
 			config.setup({
-				hubs = { local_hub = { url = "http://localhost:9999" } },
+				servers = { local_hub = { url = "http://localhost:9999" } },
 			})
 			local record = config.get_hub("local_hub")
 			assert.is_not_nil(record)
 			assert.is_nil(record.token_store)
 		end)
 
-		it("auto-constructs a TokenStore for a non-localhost hub with none supplied", function()
+		it("auto-constructs a TokenStore for a non-localhost server with none supplied", function()
 			local calls = stub_connect()
 			config.setup({
-				hubs = { remote = { url = "https://hub.example.com/mcp" } },
+				servers = { remote = { url = "https://server.example.com/mcp" } },
 				-- Keep the store on the file backend under a temp dir so the spec
 				-- never touches a real keychain or the developer's data home.
 				token_store = { backend = "file", data_home = vim.fn.tempname() },
@@ -147,13 +147,13 @@ describe("config.setup (orchestration)", function()
 		end)
 
 		it(
-			"regression: a global token_store.key is namespaced per-hub, never used verbatim, so two non-localhost hubs never collide onto the same stored token",
+			"regression: a global token_store.key is namespaced per-server, never used verbatim, so two non-localhost servers never collide onto the same stored token",
 			function()
 				stub_connect()
 				config.setup({
-					hubs = {
-						remote_a = { url = "https://hub-a.example.com/mcp" },
-						remote_b = { url = "https://hub-b.example.com/mcp" },
+					servers = {
+						remote_a = { url = "https://server-a.example.com/mcp" },
+						remote_b = { url = "https://server-b.example.com/mcp" },
 					},
 					token_store = { backend = "file", data_home = vim.fn.tempname(), key = "shared" },
 				})
@@ -166,16 +166,16 @@ describe("config.setup (orchestration)", function()
 			end
 		)
 
-		it("does not overwrite a caller-supplied token_store on a hub", function()
+		it("does not overwrite a caller-supplied token_store on a server", function()
 			local calls = stub_connect()
-			local mine = require("mcphub-neovim.auth.token_store").new({
+			local mine = require("mcp-client.auth.token_store").new({
 				key = "custom",
 				backend = "file",
 				data_home = vim.fn.tempname(),
 			})
 			config.setup({
-				hubs = {
-					remote = { url = "https://hub.example.com/mcp", auth = { token_store = mine } },
+				servers = {
+					remote = { url = "https://server.example.com/mcp", auth = { token_store = mine } },
 				},
 			})
 			assert.are.equal(mine, calls[1].auth.token_store)
@@ -184,14 +184,14 @@ describe("config.setup (orchestration)", function()
 	end)
 
 	describe("validation", function()
-		it("errors when a hub config has no url", function()
+		it("errors when a server config has no url", function()
 			stub_connect()
 			assert.has_error(function()
-				config.setup({ hubs = { bad = {} } })
+				config.setup({ servers = { bad = {} } })
 			end)
 		end)
 
-		it("accepts an empty/absent opts table without error (no hubs, no native servers)", function()
+		it("accepts an empty/absent opts table without error (no servers, no native servers)", function()
 			stub_connect()
 			assert.has_no.errors(function()
 				config.setup()
@@ -203,25 +203,25 @@ describe("config.setup (orchestration)", function()
 	end)
 
 	describe("state record for health.lua", function()
-		it("records native server names and hub records after setup", function()
+		it("records native server names and server records after setup", function()
 			stub_connect()
 			config.setup({
 				native_servers = { example = require("tests.fixtures.example_native_server") },
-				hubs = { local_hub = { url = "http://localhost:9999" } },
+				servers = { local_hub = { url = "http://localhost:9999" } },
 			})
 			local state = config.state()
 			assert.are.equal("example-native", state.native_servers[1])
-			assert.is_not_nil(state.hubs.local_hub)
-			assert.are.equal("http://localhost:9999", state.hubs.local_hub.url)
+			assert.is_not_nil(state.servers.local_hub)
+			assert.are.equal("http://localhost:9999", state.servers.local_hub.url)
 		end)
 
 		it("_reset clears recorded state so a later setup starts clean", function()
 			stub_connect()
-			config.setup({ hubs = { local_hub = { url = "http://localhost:9999" } } })
+			config.setup({ servers = { local_hub = { url = "http://localhost:9999" } } })
 			config._reset()
 			local state = config.state()
 			assert.are.equal(0, #state.native_servers)
-			assert.is_nil(next(state.hubs))
+			assert.is_nil(next(state.servers))
 		end)
 	end)
 end)

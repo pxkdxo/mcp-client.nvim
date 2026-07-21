@@ -1,7 +1,7 @@
 local HttpDouble = require("tests.helpers.http_double")
 local wait_for = require("tests.helpers.wait")
 
-local detect = require("mcphub-neovim.transport.detect")
+local detect = require("mcp-client.transport.detect")
 
 local INITIALIZE_REQUEST = {
 	jsonrpc = "2.0",
@@ -10,7 +10,7 @@ local INITIALIZE_REQUEST = {
 	params = {
 		protocolVersion = "2025-03-26",
 		capabilities = {},
-		clientInfo = { name = "mcphub-neovim", version = "0.1.0" },
+		clientInfo = { name = "mcp-client", version = "0.1.0" },
 	},
 }
 
@@ -21,7 +21,7 @@ local function initialize_result_body()
 		result = {
 			protocolVersion = "2025-03-26",
 			capabilities = {},
-			serverInfo = { name = "test-hub", version = "0.0.1" },
+			serverInfo = { name = "test-server", version = "0.0.1" },
 		},
 	})
 end
@@ -115,9 +115,9 @@ describe("transport.detect", function()
 	end
 
 	it("sends an Accept header naming both response shapes the spec allows", function()
-		-- A real hub (samanhappy/mcphub) rejects the initial InitializeRequest
+		-- A real server (samanhappy/mcphub) rejects the initial InitializeRequest
 		-- with 406 Not Acceptable if this header is missing -- confirmed
-		-- against the live hub during U9 validation.
+		-- against the live server during U9 validation.
 		local received_head
 		double = HttpDouble.new({
 			on_request = function(method, path, rest, head)
@@ -154,7 +154,7 @@ describe("transport.detect", function()
 
 	it("uses the streamable_http transport when POST initialize's response is a single-event SSE stream", function()
 		-- The Streamable HTTP spec sanctions this response mode as an
-		-- alternative to a direct JSON body -- a real hub may choose either.
+		-- alternative to a direct JSON body -- a real server may choose either.
 		-- Reproduces the exact shape samanhappy/mcphub sent during U9's live
 		-- validation for the initialize handshake itself: a Content-Length-
 		-- framed (not left-open) body containing one `event: message` frame.
@@ -192,12 +192,12 @@ describe("transport.detect", function()
 		assert.is_not_nil(result)
 		assert.are.equal("streamable_http", result.transport)
 		assert.are.equal("sse-session-1", result.session_id)
-		assert.are.equal("test-hub", result.initialize_result.result.serverInfo.name)
+		assert.are.equal("test-server", result.initialize_result.result.serverInfo.name)
 
 		result.client:close()
 	end)
 
-	it("surfaces a clear error when the hub is unreachable", function()
+	it("surfaces a clear error when the server is unreachable", function()
 		-- Nothing is listening on this port: connection refused, not a hang.
 		local unreachable_url = "http://127.0.0.1:1/mcp"
 

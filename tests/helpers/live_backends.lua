@@ -1,6 +1,6 @@
---- Live-hub reachability probes for the U9 integration specs.
+--- Live-server reachability probes for the U9 integration specs.
 ---
---- U9 is the one unit that validates against REAL, externally-running MCP hub
+--- U9 is the one unit that validates against REAL, externally-running MCP server
 --- processes rather than in-repo test doubles (see the plan's Approach for U9).
 --- A future contributor or CI environment running `make test` will NOT have
 --- those exact processes running, so both integration specs MUST *skip*
@@ -8,7 +8,7 @@
 --- endpoints are unreachable. This helper centralizes that decision so the two
 --- specs share one well-commented, short-timeout probe.
 ---
---- The probe intentionally checks a hub's plain HTTP *health/liveness* surface,
+--- The probe intentionally checks a server's plain HTTP *health/liveness* surface,
 --- not the MCP protocol handshake: we only need to answer "is this specific
 --- external process up and answering right now?" cheaply and without side
 --- effects. It uses a very short timeout so a missing endpoint costs the suite
@@ -16,7 +16,7 @@
 ---
 --- SAFETY: these probes only ever touch the two sanctioned validation endpoints
 --- (`localhost:40032` for ravitemer/mcp-hub, `localhost:3000` for
---- samanhappy/mcphub). The user's real, live daily-driver hub on port 37373 is
+--- samanhappy/mcphub). The user's real, live daily-driver server on port 37373 is
 --- NEVER referenced here or anywhere in this repo -- see the repo-wide hygiene
 --- grep gate in U9's brief.
 local curl = require("plenary.curl")

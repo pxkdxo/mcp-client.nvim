@@ -10,7 +10,7 @@
 -- Security invariant under test throughout: no secret (access token, refresh
 -- token) ever appears in a status string or an error message.
 
-local token_store = require("mcphub-neovim.auth.token_store")
+local token_store = require("mcp-client.auth.token_store")
 
 local function make_tmpdir()
 	local dir = vim.fn.tempname()
@@ -28,7 +28,7 @@ local function sample_token(overrides)
 		scope = "mcp",
 		token_endpoint = "https://as.example/token",
 		client_id = "the-client-id",
-		resource = "https://hub.example/mcp",
+		resource = "https://server.example/mcp",
 	}
 	return vim.tbl_extend("force", base, overrides or {})
 end
@@ -50,7 +50,7 @@ describe("auth.token_store", function()
 	--- Build a store forced onto the file backend, isolated to a temp dir.
 	local function file_store(key)
 		return token_store.new({
-			key = key or "hub.example",
+			key = key or "server.example",
 			backend = "file",
 			data_home = tmp,
 		})
@@ -230,7 +230,7 @@ describe("auth.token_store", function()
 			end
 
 			local store = token_store.new({
-				key = "hub.example",
+				key = "server.example",
 				backend = "keychain",
 				command_runner = runner,
 			})

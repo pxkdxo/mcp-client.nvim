@@ -1,10 +1,10 @@
-local client = require("mcphub-neovim.client")
-local native = require("mcphub-neovim.native")
+local client = require("mcp-client.client")
+local native = require("mcp-client.native")
 
 --- Native-server specs (U3). A native server is an in-process, Lua-function
 --- backed "client" that registers into the exact same registry `client.lua`
 --- backs `get_clients()` with, wearing the exact same object shape (`id`,
---- `name`, `is_stopped()`, `request`, `notify`) as a remote hub connection,
+--- `name`, `is_stopped()`, `request`, `notify`) as a remote server connection,
 --- so adapters built against that shape (later tasks) cannot tell native
 --- from remote apart.
 

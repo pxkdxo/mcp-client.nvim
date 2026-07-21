@@ -1,5 +1,5 @@
-local client = require("mcphub-neovim.client")
-local native = require("mcphub-neovim.native")
+local client = require("mcp-client.client")
+local native = require("mcp-client.native")
 
 --- CodeCompanion adapter specs (U5). The real `codecompanion.nvim` plugin is
 --- not a dependency of this repo (only locally installed on the author's
@@ -9,7 +9,7 @@ local native = require("mcphub-neovim.native")
 --- the exact two modules the adapter genuinely `require()`s
 --- (`codecompanion.mcp`, `codecompanion.config`) via `package.loaded`, built
 --- to the *real, verified* shapes documented at the top of
---- `lua/mcphub-neovim/adapters/codecompanion.lua` (each cited against the
+--- `lua/mcp-client/adapters/codecompanion.lua` (each cited against the
 --- actual installed source at
 --- `~/.local/share/nvim/lazy/codecompanion.nvim`):
 ---   - `codecompanion.mcp.register_tools(server_name, tools, group)` /
@@ -128,18 +128,18 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 		package.loaded["codecompanion.config"] = fake_config
 		-- Force a clean reload of the adapter module itself so module-level
 		-- caches (tools_cache/resources_cache) never leak between specs.
-		package.loaded["mcphub-neovim.adapters.codecompanion"] = nil
+		package.loaded["mcp-client.adapters.codecompanion"] = nil
 	end)
 
 	after_each(function()
 		client._reset_registry()
 		package.loaded["codecompanion.mcp"] = nil
 		package.loaded["codecompanion.config"] = nil
-		package.loaded["mcphub-neovim.adapters.codecompanion"] = nil
+		package.loaded["mcp-client.adapters.codecompanion"] = nil
 	end)
 
-	it("has zero direct hub or transport knowledge (R6): does not require transport/* modules", function()
-		local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+	it("has zero direct server or transport knowledge (R6): does not require transport/* modules", function()
+		local codecompanion_adapter = require("mcp-client.adapters.codecompanion")
 		local path = debug.getinfo(codecompanion_adapter.setup, "S").source:sub(2)
 		local f = assert(io.open(path, "r"))
 		local source = f:read("*a")
@@ -151,7 +151,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 	end)
 
 	it("is a real CodeCompanion extension: setup() is a function, exports.refresh is a function", function()
-		local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+		local codecompanion_adapter = require("mcp-client.adapters.codecompanion")
 		assert.is_function(codecompanion_adapter.setup)
 		assert.is_table(codecompanion_adapter.exports)
 		assert.is_function(codecompanion_adapter.exports.refresh)
@@ -161,7 +161,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 		local example = require("tests.fixtures.example_native_server")
 		native.register(example)
 
-		local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+		local codecompanion_adapter = require("mcp-client.adapters.codecompanion")
 		codecompanion_adapter.setup({})
 
 		local all_tools, all_groups = fake_mcp.get_registered_tools()
@@ -228,7 +228,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 			},
 		})
 
-		local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+		local codecompanion_adapter = require("mcp-client.adapters.codecompanion")
 		codecompanion_adapter.setup({})
 
 		local all_tools = fake_mcp.get_registered_tools()
@@ -261,9 +261,9 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 		assert.are.equal("kg", decoded.result.unit)
 	end)
 
-	it("happy path: a tool call resolves through the adapter to a remote hub connection", function()
+	it("happy path: a tool call resolves through the adapter to a remote server connection", function()
 		local stopped = false
-		local obj = { name = "remote-hub" }
+		local obj = { name = "remote-server" }
 		function obj:is_stopped()
 			return stopped
 		end
@@ -277,7 +277,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 						tools = {
 							{
 								name = "remote_echo",
-								description = "Echo via a remote hub",
+								description = "Echo via a remote server",
 								inputSchema = { type = "object", properties = { text = { type = "string" } } },
 							},
 						},
@@ -296,7 +296,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 		end
 		client.register_native(obj)
 
-		local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+		local codecompanion_adapter = require("mcp-client.adapters.codecompanion")
 
 		-- setup() kicks off the initial tools/list refresh, but the remote
 		-- double's reply is deferred via vim.schedule -- exactly like a
@@ -358,7 +358,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 		local example = require("tests.fixtures.example_native_server")
 		native.register(example)
 
-		local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+		local codecompanion_adapter = require("mcp-client.adapters.codecompanion")
 		codecompanion_adapter.setup({})
 
 		local editor_context = fake_config.interactions.shared.editor_context
@@ -412,7 +412,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 			end
 			client.register_native(obj)
 
-			local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+			local codecompanion_adapter = require("mcp-client.adapters.codecompanion")
 			codecompanion_adapter.setup({})
 
 			local editor_context = fake_config.interactions.shared.editor_context
@@ -455,7 +455,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 	)
 
 	it("edge case: zero connected clients means no tools or editor_context entries, not an error", function()
-		local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+		local codecompanion_adapter = require("mcp-client.adapters.codecompanion")
 		assert.has_no.errors(function()
 			codecompanion_adapter.setup({})
 		end)
@@ -475,7 +475,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 		local example = require("tests.fixtures.example_native_server")
 		local server = native.register(example)
 
-		local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+		local codecompanion_adapter = require("mcp-client.adapters.codecompanion")
 		codecompanion_adapter.setup({})
 
 		local found_before = false
@@ -508,7 +508,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 		local example = require("tests.fixtures.example_native_server")
 		native.register(example)
 
-		local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+		local codecompanion_adapter = require("mcp-client.adapters.codecompanion")
 		codecompanion_adapter.setup({})
 
 		local editor_context = fake_config.interactions.shared.editor_context
@@ -541,7 +541,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 			local example = require("tests.fixtures.example_native_server")
 			native.register(example)
 
-			local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+			local codecompanion_adapter = require("mcp-client.adapters.codecompanion")
 			codecompanion_adapter.setup({})
 
 			-- The real, live path (confirmed against the installed
@@ -585,7 +585,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 		function obj:disconnect() end
 		client.register_native(obj)
 
-		local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+		local codecompanion_adapter = require("mcp-client.adapters.codecompanion")
 		assert.has_no.errors(function()
 			codecompanion_adapter.setup({})
 		end)
@@ -626,7 +626,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 				local example = require("tests.fixtures.example_native_server")
 				native.register(example)
 
-				local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+				local codecompanion_adapter = require("mcp-client.adapters.codecompanion")
 				codecompanion_adapter.setup({})
 
 				local slash_commands = fake_config.interactions.chat.slash_commands
@@ -683,7 +683,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 					end
 					vim.schedule(function()
 						if rpc_message.method == "prompts/list" then
-							-- Envelope-shaped reply, like a real remote hub -- jsonrpc/id
+							-- Envelope-shaped reply, like a real remote server -- jsonrpc/id
 							-- are what unwrap_result actually keys on (mirrors
 							-- avante_spec.lua's make_remote_prompt_double).
 							return callback(nil, {
@@ -727,7 +727,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 				end
 				client.register_native(obj)
 
-				local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+				local codecompanion_adapter = require("mcp-client.adapters.codecompanion")
 				codecompanion_adapter.setup({})
 
 				-- Remote double replies via vim.schedule, exactly like a real async
@@ -844,7 +844,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 				function obj:disconnect() end
 				client.register_native(obj)
 
-				local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+				local codecompanion_adapter = require("mcp-client.adapters.codecompanion")
 				codecompanion_adapter.setup({})
 
 				local slash_commands = fake_config.interactions.chat.slash_commands
@@ -917,7 +917,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 				function obj:disconnect() end
 				client.register_native(obj)
 
-				local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+				local codecompanion_adapter = require("mcp-client.adapters.codecompanion")
 				codecompanion_adapter.setup({})
 
 				local slash_commands = fake_config.interactions.chat.slash_commands
@@ -991,7 +991,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 				function obj:disconnect() end
 				client.register_native(obj)
 
-				local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+				local codecompanion_adapter = require("mcp-client.adapters.codecompanion")
 				codecompanion_adapter.setup({})
 
 				local slash_commands = fake_config.interactions.chat.slash_commands
@@ -1039,7 +1039,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 		)
 
 		it("edge case: zero connected clients means no slash-command entries, not an error", function()
-			local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+			local codecompanion_adapter = require("mcp-client.adapters.codecompanion")
 			assert.has_no.errors(function()
 				codecompanion_adapter.setup({})
 			end)
@@ -1060,7 +1060,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 				local example = require("tests.fixtures.example_native_server")
 				local server = native.register(example)
 
-				local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+				local codecompanion_adapter = require("mcp-client.adapters.codecompanion")
 				codecompanion_adapter.setup({})
 
 				local slash_commands = fake_config.interactions.chat.slash_commands
@@ -1091,7 +1091,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 			local example = require("tests.fixtures.example_native_server")
 			native.register(example)
 
-			local codecompanion_adapter = require("mcphub-neovim.adapters.codecompanion")
+			local codecompanion_adapter = require("mcp-client.adapters.codecompanion")
 			codecompanion_adapter.setup({})
 
 			local entry_key

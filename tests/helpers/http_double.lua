@@ -1,10 +1,10 @@
 --- Minimal raw-socket HTTP test double, for specs only.
 ---
---- This is test-fixture code standing in for a remote MCP hub; it is not
---- part of the plugin's own hub-communication path (which must always go
+--- This is test-fixture code standing in for a remote MCP server; it is not
+--- part of the plugin's own server-communication path (which must always go
 --- through plenary.curl per the project's transport constraints). Built
 --- directly on vim.uv because a test double playing "the server" has no
---- such constraint -- only client-side hub I/O does.
+--- such constraint -- only client-side server I/O does.
 local uv = vim.uv or vim.loop
 
 local HttpDouble = {}

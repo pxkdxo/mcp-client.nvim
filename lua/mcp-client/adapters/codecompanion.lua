@@ -1,16 +1,16 @@
 --- CodeCompanion adapter (U5): translate this plugin's client/tool surface --
---- `require("mcphub-neovim.client").get_clients(filter)` plus each client
+--- `require("mcp-client.client").get_clients(filter)` plus each client
 --- object's `request(rpc_message, callback)` -- into CodeCompanion's real
 --- extension, tool, and editor-context integration points, replacing
 --- `mcphub.extensions.codecompanion`.
 ---
---- This is a thin adapter (R6): it holds no direct hub or transport logic
+--- This is a thin adapter (R6): it holds no direct server or transport logic
 --- of its own. Every tool call and resource read it exposes to CodeCompanion
 --- is, underneath, a standard MCP `tools/list` / `tools/call` /
 --- `resources/list` / `resources/read` JSON-RPC message routed through a
 --- client object's `request()` -- exactly the same call a native server
---- (U3) or a remote hub connection (U1/U2) already answers. The adapter
---- never imports `mcphub-neovim.transport.*`, never touches a `Job` object,
+--- (U3) or a remote server connection (U1/U2) already answers. The adapter
+--- never imports `mcp-client.transport.*`, never touches a `Job` object,
 --- and never assumes a client is remote or native -- `get_clients()`
 --- deliberately makes the two indistinguishable, and this file relies on
 --- that uniformity rather than working around it.
@@ -31,12 +31,12 @@
 --- module on the runtimepath -- the path this adapter's own consumer is
 --- expected to use:
 ---
----   require("codecompanion").register_extension("mcphub-neovim", {
----     callback = require("mcphub-neovim.adapters.codecompanion"),
+---   require("codecompanion").register_extension("mcp-client", {
+---     callback = require("mcp-client.adapters.codecompanion"),
 ---   })
 ---
 --- (equivalently, `require("codecompanion").setup({ extensions = {
---- ["mcphub-neovim"] = { callback = require("mcphub-neovim.adapters.codecompanion") } } })`).
+--- ["mcp-client"] = { callback = require("mcp-client.adapters.codecompanion") } } })`).
 --- Either way, `M.setup(opts)` below is what actually gets called.
 ---
 --- ## 2. Tool registration
@@ -233,7 +233,7 @@
 --- fixture already demonstrates), building up the flat `arguments` table
 --- `prompts/get` expects before issuing the request.
 
-local client = require("mcphub-neovim.client")
+local client = require("mcp-client.client")
 
 local M = {}
 
@@ -263,7 +263,7 @@ local prompts_cache = {}
 --- `{ tools = {...} }`); remote clients (U1/U2) deliver the full JSON-RPC
 --- envelope (`{ jsonrpc, id, result = { tools = {...} } }`). Local test doubles
 --- historically mimic the native/unwrapped shape, so the divergence only bites
---- against a real remote hub -- surfaced by U9. A nested `result` table alone
+--- against a real remote server -- surfaced by U9. A nested `result` table alone
 --- is NOT a reliable envelope signal: a native tool is an arbitrary,
 --- MCP-unaware Lua function, and its own payload can legitimately use
 --- `result` as an ordinary field name (e.g. a calc/lookup tool returning
@@ -294,8 +294,8 @@ local function refresh_client_tools(mcp_client)
 			id = 1,
 			method = "tools/list",
 			-- vim.empty_dict(), not {}: an empty Lua table serializes to a JSON
-			-- array `[]`, which a strict real hub rejects (HTTP 400) -- MCP
-			-- requires `params` to be an object. (Surfaced by U9's real-hub
+			-- array `[]`, which a strict real server rejects (HTTP 400) -- MCP
+			-- requires `params` to be an object. (Surfaced by U9's real-server
 			-- validation; local doubles echo regardless of shape.)
 			params = vim.empty_dict(),
 		}, function(err, result, _response)
@@ -318,7 +318,7 @@ local function refresh_client_prompts(mcp_client)
 			id = 1,
 			method = "prompts/list",
 			-- vim.empty_dict(), not {}: see refresh_client_tools -- empty `{}`
-			-- serializes as JSON `[]`, which a strict real hub rejects.
+			-- serializes as JSON `[]`, which a strict real server rejects.
 			params = vim.empty_dict(),
 		}, function(err, result, _response)
 			local payload = unwrap_result(result)
@@ -340,7 +340,7 @@ local function refresh_client_resources(mcp_client)
 			id = 1,
 			method = "resources/list",
 			-- vim.empty_dict(), not {}: see refresh_client_tools -- empty `{}`
-			-- serializes as JSON `[]`, which a strict real hub rejects.
+			-- serializes as JSON `[]`, which a strict real server rejects.
 			params = vim.empty_dict(),
 		}, function(err, result, _response)
 			local payload = unwrap_result(result)
@@ -426,7 +426,7 @@ local function build_tool_spec(mcp_client, tool_info)
 						method = "tools/call",
 						-- arguments defaults to vim.empty_dict() (not {}) so a
 						-- zero-argument tool call serializes `arguments` as a JSON
-						-- object `{}`, not an array `[]` a strict hub would reject.
+						-- object `{}`, not an array `[]` a strict server would reject.
 						params = { name = tool_info.name, arguments = args or vim.empty_dict() },
 					}, function(err, result, _response)
 						if not output_cb then
@@ -842,10 +842,10 @@ end
 --- CodeCompanion extension entry point
 --- (`CodeCompanion.Extension.setup`, `_extensions/init.lua`): called once
 --- when the extension is loaded, either via
---- `require("codecompanion").setup({ extensions = { ["mcphub-neovim"] =
---- { callback = require("mcphub-neovim.adapters.codecompanion") } } })` or
---- `require("codecompanion").register_extension("mcphub-neovim", { callback
---- = require("mcphub-neovim.adapters.codecompanion") })`.
+--- `require("codecompanion").setup({ extensions = { ["mcp-client"] =
+--- { callback = require("mcp-client.adapters.codecompanion") } } })` or
+--- `require("codecompanion").register_extension("mcp-client", { callback
+--- = require("mcp-client.adapters.codecompanion") })`.
 ---
 --- Delegates straight to `refresh()`, which registers one `editor_context`
 --- entry per currently-known client
@@ -863,7 +863,7 @@ function M.setup(_opts)
 	refresh()
 end
 
---- Functions exposed via `require("codecompanion").extensions["mcphub-neovim"]`
+--- Functions exposed via `require("codecompanion").extensions["mcp-client"]`
 --- (`CodeCompanion.Extension.exports`).
 M.exports = {
 	--- Re-query `client.get_clients()` and re-publish tool/editor-context/prompt

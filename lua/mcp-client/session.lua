@@ -2,8 +2,8 @@
 --- header pair, and the one status the brief singles out for special
 --- handling -- a session-scoped 404.
 ---
---- Per the MCP spec, once a hub has assigned a session id, a later 404 on a
---- request means "that session no longer exists" (the hub was restarted,
+--- Per the MCP spec, once a server has assigned a session id, a later 404 on a
+--- request means "that session no longer exists" (the server was restarted,
 --- the session was GC'd, etc.). The correct behavior is not to surface an
 --- error to the caller but to transparently reinitialize a fresh session and
 --- retry the original request against it -- the caller only ever observes

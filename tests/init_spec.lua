@@ -1,7 +1,7 @@
 local HttpDouble = require("tests.helpers.http_double")
 local wait_for = require("tests.helpers.wait")
 
-local mcphub = require("mcphub-neovim")
+local mcphub = require("mcp-client")
 
 local function initialize_result_body()
 	return vim.json.encode({
@@ -10,12 +10,12 @@ local function initialize_result_body()
 		result = {
 			protocolVersion = "2025-03-26",
 			capabilities = {},
-			serverInfo = { name = "test-hub", version = "0.0.1" },
+			serverInfo = { name = "test-server", version = "0.0.1" },
 		},
 	})
 end
 
-describe("mcphub-neovim (public entrypoint)", function()
+describe("mcp-client (public entrypoint)", function()
 	local double
 
 	after_each(function()
@@ -25,14 +25,14 @@ describe("mcphub-neovim (public entrypoint)", function()
 		end
 	end)
 
-	it("is required as mcphub-neovim, not mcphub", function()
+	it("is required as mcp-client, not mcphub", function()
 		assert.is_not_nil(mcphub)
 		assert.has_error(function()
 			require("mcphub")
 		end)
 	end)
 
-	it("connects over streamable_http when the hub supports it", function()
+	it("connects over streamable_http when the server supports it", function()
 		double = HttpDouble.new({
 			on_request = function(method, path)
 				if method == "POST" and path == "/mcp" then
@@ -65,7 +65,7 @@ describe("mcphub-neovim (public entrypoint)", function()
 		got_client.close()
 	end)
 
-	it("connects over legacy_sse when the hub only supports the two-endpoint transport", function()
+	it("connects over legacy_sse when the server only supports the two-endpoint transport", function()
 		double = HttpDouble.new({
 			on_request = function(method, path)
 				if method == "POST" and path == "/mcp" then

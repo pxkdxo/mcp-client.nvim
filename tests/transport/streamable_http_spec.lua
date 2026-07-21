@@ -1,7 +1,7 @@
 local HttpDouble = require("tests.helpers.http_double")
 local wait_for = require("tests.helpers.wait")
 
-local StreamableHttp = require("mcphub-neovim.transport.streamable_http")
+local StreamableHttp = require("mcp-client.transport.streamable_http")
 
 describe("transport.streamable_http", function()
 	local double
@@ -50,9 +50,9 @@ describe("transport.streamable_http", function()
 	end)
 
 	it("sends an Accept header naming both response shapes the spec allows", function()
-		-- A real hub (samanhappy/mcphub) rejects any Streamable HTTP request
+		-- A real server (samanhappy/mcphub) rejects any Streamable HTTP request
 		-- missing this header with 406 Not Acceptable -- confirmed against
-		-- the live hub during U9 validation.
+		-- the live server during U9 validation.
 		local received_head
 		double = HttpDouble.new({
 			on_request = function(method, path, rest, head)
@@ -83,7 +83,7 @@ describe("transport.streamable_http", function()
 
 	it("decodes a JSON-RPC result delivered as a single-event SSE response", function()
 		-- The Streamable HTTP spec sanctions this response mode as an
-		-- alternative to a direct JSON body -- a real hub may choose either.
+		-- alternative to a direct JSON body -- a real server may choose either.
 		-- Reproduces the exact shape samanhappy/mcphub sent during U9's live
 		-- validation: status 200, Content-Type: text/event-stream, a
 		-- Content-Length-framed (not left-open/chunked) body containing one

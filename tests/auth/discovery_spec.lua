@@ -1,7 +1,7 @@
 local HttpDouble = require("tests.helpers.http_double")
 local wait_for = require("tests.helpers.wait")
 
-local discovery = require("mcphub-neovim.auth.discovery")
+local discovery = require("mcp-client.auth.discovery")
 
 describe("auth.discovery", function()
 	local double
@@ -15,9 +15,9 @@ describe("auth.discovery", function()
 
 	describe("parse_www_authenticate", function()
 		it("extracts the resource_metadata URL from a Bearer challenge", function()
-			local header = 'Bearer resource_metadata="https://hub.example/.well-known/oauth-protected-resource"'
+			local header = 'Bearer resource_metadata="https://server.example/.well-known/oauth-protected-resource"'
 			assert.are.equal(
-				"https://hub.example/.well-known/oauth-protected-resource",
+				"https://server.example/.well-known/oauth-protected-resource",
 				discovery.parse_www_authenticate(header)
 			)
 		end)
@@ -34,10 +34,10 @@ describe("auth.discovery", function()
 	end)
 
 	describe("default_prm_url", function()
-		it("derives the RFC 9728 well-known PRM URL from a hub URL", function()
+		it("derives the RFC 9728 well-known PRM URL from a server URL", function()
 			assert.are.equal(
-				"https://hub.example/.well-known/oauth-protected-resource",
-				discovery.default_prm_url("https://hub.example/mcp")
+				"https://server.example/.well-known/oauth-protected-resource",
+				discovery.default_prm_url("https://server.example/mcp")
 			)
 		end)
 	end)
@@ -50,7 +50,7 @@ describe("auth.discovery", function()
 						return {
 							status = 200,
 							body = vim.json.encode({
-								resource = "https://hub.example/mcp",
+								resource = "https://server.example/mcp",
 								authorization_servers = { "https://as.example" },
 							}),
 						}
@@ -72,7 +72,7 @@ describe("auth.discovery", function()
 			end))
 			assert.is_nil(err)
 			assert.are.same({ "https://as.example" }, result.authorization_servers)
-			assert.are.equal("https://hub.example/mcp", result.resource)
+			assert.are.equal("https://server.example/mcp", result.resource)
 		end)
 
 		it("surfaces a stage-labeled error on a non-2xx PRM response", function()

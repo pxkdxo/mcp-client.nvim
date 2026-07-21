@@ -22,14 +22,14 @@
 --- never token or code values.
 local curl = require("plenary.curl")
 
-local discovery = require("mcphub-neovim.auth.discovery")
-local pkce = require("mcphub-neovim.auth.pkce")
-local RedirectListener = require("mcphub-neovim.auth.redirect_listener")
+local discovery = require("mcp-client.auth.discovery")
+local pkce = require("mcp-client.auth.pkce")
+local RedirectListener = require("mcp-client.auth.redirect_listener")
 
 local M = {}
 
 local REQUEST_TIMEOUT_MS = 30000
-local CLIENT_NAME = "mcphub-neovim"
+local CLIENT_NAME = "mcp-client"
 
 --- Percent-encode a string for use in an application/x-www-form-urlencoded
 --- body or a query string (RFC 3986 unreserved characters pass through).
@@ -243,7 +243,7 @@ end
 --- @return string|nil
 local function default_prompt_for_code(url)
 	vim.notify(
-		"mcphub-neovim: could not open a browser automatically.\n"
+		"mcp-client: could not open a browser automatically.\n"
 			.. "Open this URL to authorize, then paste the resulting code:\n"
 			.. url,
 		vim.log.levels.WARN
@@ -260,7 +260,7 @@ end
 --- stage-labeled error.
 ---
 --- @param opts table
----   hub_url             (string, required) the non-localhost hub MCP URL
+---   server_url             (string, required) the non-localhost server MCP URL
 ---   client_id           (string|nil) fallback client_id when the AS has no DCR
 ---   scope               (string|nil) requested scope
 ---   redirect_timeout_ms (number|nil) how long to await the redirect callback
@@ -269,7 +269,7 @@ end
 --- @param callback fun(result: table|nil, err: string|nil)
 ---   result is the typed token-exchange result from exchange_code_for_token.
 function M.run_flow(opts, callback)
-	assert(opts.hub_url, "hub_url is required")
+	assert(opts.server_url, "server_url is required")
 	local open_url = opts.open_url or default_open_url
 	local prompt_for_code = opts.prompt_for_code or default_prompt_for_code
 
@@ -282,29 +282,29 @@ function M.run_flow(opts, callback)
 		callback(result, err)
 	end
 
-	-- Stage 1: probe the hub for its 401 + WWW-Authenticate challenge to
+	-- Stage 1: probe the server for its 401 + WWW-Authenticate challenge to
 	-- locate the PRM document.
-	curl.get(opts.hub_url, {
+	curl.get(opts.server_url, {
 		timeout = REQUEST_TIMEOUT_MS,
 		callback = vim.schedule_wrap(function(response)
 			if not response then
-				return finish(nil, "discovery: no response from hub")
+				return finish(nil, "discovery: no response from server")
 			end
 
 			local prm_url
-			local transport_util = require("mcphub-neovim.transport.util")
+			local transport_util = require("mcp-client.transport.util")
 			local challenge = transport_util.find_header(response.headers, "WWW-Authenticate")
 			if challenge then
 				prm_url = discovery.parse_www_authenticate(challenge)
 			end
-			prm_url = prm_url or discovery.default_prm_url(opts.hub_url)
+			prm_url = prm_url or discovery.default_prm_url(opts.server_url)
 
 			-- Stage 2: PRM -> authorization_servers.
 			discovery.fetch_protected_resource_metadata(prm_url, function(prm, prm_err)
 				if prm_err then
 					return finish(nil, prm_err)
 				end
-				local resource = prm.resource or opts.hub_url
+				local resource = prm.resource or opts.server_url
 				local issuer = prm.authorization_servers[1]
 
 				-- Stage 3: AS metadata -> endpoints.
@@ -352,7 +352,7 @@ function M.run_flow(opts, callback)
 			end)
 		end),
 		on_error = vim.schedule_wrap(function(err)
-			finish(nil, "discovery: request to hub failed: " .. (err.message or "unknown error"))
+			finish(nil, "discovery: request to server failed: " .. (err.message or "unknown error"))
 		end),
 	})
 end

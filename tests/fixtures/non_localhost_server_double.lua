@@ -1,16 +1,16 @@
---- Synthetic non-localhost HTTPS hub double, for the R12 auth/TLS validation.
+--- Synthetic non-localhost HTTPS server double, for the R12 auth/TLS validation.
 ---
 --- R12 (verbatim): "The client supports standard authentication (e.g. a bearer
---- token) and transport security (TLS) for hub connections that are not on
+--- token) and transport security (TLS) for server connections that are not on
 --- localhost. The client refuses (fails closed) a non-localhost connection
 --- lacking configured authentication or TLS."
 ---
---- Neither real reference hub (ravitemer/mcp-hub on :40032, samanhappy/mcphub on
+--- Neither real reference server (ravitemer/mcp-hub on :40032, samanhappy/mcphub on
 --- :3000) is non-localhost, so per the plan's Risks & Dependencies section the
 --- R12/TLS surface is validated against THIS synthetic double: a real HTTPS
 --- server bound to a loopback *alias other than localhost* (e.g. 127.0.0.2),
 --- presenting a self-signed certificate, standing in for a real non-localhost
---- hub. It exercises both R12 paths:
+--- server. It exercises both R12 paths:
 ---   * fail-closed  -- a non-localhost URL with no TLS and/or no token is refused
 ---                     by client.connect BEFORE any socket is opened (this needs
 ---                     no running server -- the gate is a pure policy check);
@@ -30,14 +30,14 @@
 ---   2. A TLS-terminating server. vim.uv has no TLS, and the plugin's transport
 ---      (correctly) does not pass curl's --insecure, so we terminate TLS in a
 ---      tiny Node https server (test-fixture code has no transport constraint;
----      only client-side hub I/O must go through plenary.curl). If Node is not
+---      only client-side server I/O must go through plenary.curl). If Node is not
 ---      available, the live server simply isn't started.
 --- When the live server can't be brought up, `:available()` returns false and
 --- the pure-gate (fail-closed) assertions still run against the chosen
 --- non-localhost URL -- the successful-auth assertions skip gracefully.
 ---
 --- SAFETY: this fixture only binds loopback aliases it has proven bindable, on
---- ephemeral ports. It never touches any real hub or port (37373/40032/3000).
+--- ephemeral ports. It never touches any real server or port (37373/40032/3000).
 
 local uv = vim.uv or vim.loop
 
@@ -155,7 +155,7 @@ const server = https.createServer(
 server.listen(port, host, () => fs.writeFileSync(capture + '.ready', '1'));
 ]]
 
---- Start a synthetic non-localhost HTTPS hub double.
+--- Start a synthetic non-localhost HTTPS server double.
 ---
 --- @return table double  with fields:
 ---   available (boolean)  true iff a live TLS server is up (bindable alias + Node

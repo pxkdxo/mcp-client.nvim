@@ -1,9 +1,9 @@
---- OAuth 2.1 metadata discovery for MCP hubs.
+--- OAuth 2.1 metadata discovery for MCP servers.
 ---
 --- Two RFCs, two hops:
 ---   1. RFC 9728 Protected Resource Metadata (PRM): a 401 from a
----      non-localhost hub carries a `WWW-Authenticate: Bearer
----      resource_metadata="..."` challenge pointing at the hub's PRM
+---      non-localhost server carries a `WWW-Authenticate: Bearer
+---      resource_metadata="..."` challenge pointing at the server's PRM
 ---      document, which lists the `authorization_servers` that guard it.
 ---   2. RFC 8414 Authorization Server Metadata: for a chosen AS, its
 ---      `.well-known/oauth-authorization-server` document names the
@@ -11,7 +11,7 @@
 ---      `registration_endpoint` (RFC 7591 DCR).
 ---
 --- Every network call here goes through plenary.curl -- exactly like U1's
---- transport code -- because these are ordinary HTTPS requests to the hub
+--- transport code -- because these are ordinary HTTPS requests to the server
 --- and its authorization server (vim.uv has no TLS). Each failure is
 --- surfaced with a stage label ("protected resource metadata", "authorization
 --- server metadata") so a caller never sees a generic "auth failed".
@@ -33,14 +33,14 @@ function M.parse_www_authenticate(header)
 	return header:match('resource_metadata%s*=%s*"([^"]+)"')
 end
 
---- Derive the default RFC 9728 well-known PRM URL from a hub URL, used when
---- the hub omits `resource_metadata` from its challenge (or sends no
---- challenge parameters at all). The well-known path is joined to the hub's
+--- Derive the default RFC 9728 well-known PRM URL from a server URL, used when
+--- the server omits `resource_metadata` from its challenge (or sends no
+--- challenge parameters at all). The well-known path is joined to the server's
 --- origin.
---- @param hub_url string
+--- @param server_url string
 --- @return string
-function M.default_prm_url(hub_url)
-	local origin = hub_url:match("^(https?://[^/]+)") or hub_url
+function M.default_prm_url(server_url)
+	local origin = server_url:match("^(https?://[^/]+)") or server_url
 	return origin .. "/.well-known/oauth-protected-resource"
 end
 

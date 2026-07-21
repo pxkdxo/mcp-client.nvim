@@ -1,6 +1,6 @@
-local client = require("mcphub-neovim.client")
-local native = require("mcphub-neovim.native")
-local avante = require("mcphub-neovim.adapters.avante")
+local client = require("mcp-client.client")
+local native = require("mcp-client.native")
+local avante = require("mcp-client.adapters.avante")
 
 --- Avante adapter specs (U4). The adapter is a thin translation layer: it
 --- turns `client.get_clients()`'s tool/resource/prompt surface into
@@ -8,7 +8,7 @@ local avante = require("mcphub-neovim.adapters.avante")
 --- tables, each with `name`/`description`/`param`/`func(input, opts)`,
 --- verified against the actual `yetone/avante.nvim` source at
 --- `~/.local/share/nvim/lazy/avante.nvim/lua/avante/llm_tools/init.lua` and
---- `types.lua`). It must hold no direct hub or transport logic of its own
+--- `types.lua`). It must hold no direct server or transport logic of its own
 --- (R6): every one of these specs only ever touches client objects through
 --- `client.register_native`/`native.register` and the public `request()`/
 --- `notify()` shape U2 established -- never a transport or Job object.
@@ -71,7 +71,7 @@ local function make_remote_prompt_double(name, prompts_listing, on_get)
 		name = name,
 		handle = function(rpc_message, callback)
 			if rpc_message.method == "prompts/list" then
-				-- Envelope-shaped reply, like a real remote hub -- proves
+				-- Envelope-shaped reply, like a real remote server -- proves
 				-- unwrap_result() is exercised for prompts too.
 				return callback(nil, { jsonrpc = "2.0", id = 1, result = { prompts = prompts_listing } }, nil)
 			elseif rpc_message.method == "prompts/get" then
@@ -112,10 +112,10 @@ describe("adapters.avante (custom_tools translation)", function()
 		client._reset_registry()
 	end)
 
-	it("has zero direct hub or transport knowledge (R6): does not require transport/* modules", function()
+	it("has zero direct server or transport knowledge (R6): does not require transport/* modules", function()
 		-- A crude but effective static check: the adapter module's own source
 		-- must never `require` the transport package or touch a Job object
-		-- directly -- only the public client API (require("mcphub-neovim.client")).
+		-- directly -- only the public client API (require("mcp-client.client")).
 		local path = debug.getinfo(avante.custom_tools, "S").source:sub(2)
 		local f = assert(io.open(path, "r"))
 		local source = f:read("*a")
@@ -216,11 +216,11 @@ describe("adapters.avante (custom_tools translation)", function()
 		assert.are.equal("kg", decoded.result.unit)
 	end)
 
-	it("happy path: a tool call from Avante resolves through the adapter to a remote hub connection", function()
-		make_remote_double("remote-hub", {
+	it("happy path: a tool call from Avante resolves through the adapter to a remote server connection", function()
+		make_remote_double("remote-server", {
 			{
 				name = "remote_echo",
-				description = "Echo via a remote hub",
+				description = "Echo via a remote server",
 				inputSchema = { type = "object", properties = { text = { type = "string" } } },
 			},
 		}, function(params, callback)
@@ -252,7 +252,7 @@ describe("adapters.avante (custom_tools translation)", function()
 		end)
 
 		assert.is_not_nil(remote_tool)
-		assert.are.equal("Echo via a remote hub", remote_tool.description)
+		assert.are.equal("Echo via a remote server", remote_tool.description)
 
 		-- The remote double's request() defers its callback via
 		-- vim.schedule -- proving the adapter's func() genuinely supports
@@ -487,12 +487,12 @@ describe("adapters.avante (prompt/slash-command translation, U11)", function()
 		make_remote_prompt_double("remote-prompts", {
 			{
 				name = "remote_greet",
-				description = "Greet someone via a remote hub",
+				description = "Greet someone via a remote server",
 				arguments = { { name = "who", required = false } },
 			},
 		}, function(params, callback)
 			local who = (params.arguments and params.arguments.who) or "world"
-			-- Remote reply is also enveloped, like the real hub U9 validated
+			-- Remote reply is also enveloped, like the real server U9 validated
 			-- against.
 			callback(nil, {
 				jsonrpc = "2.0",
@@ -523,7 +523,7 @@ describe("adapters.avante (prompt/slash-command translation, U11)", function()
 			return remote_command ~= nil
 		end)
 		assert.is_not_nil(remote_command)
-		assert.are.equal("Greet someone via a remote hub", remote_command.description)
+		assert.are.equal("Greet someone via a remote server", remote_command.description)
 
 		local rendered
 		local completed = false
@@ -641,13 +641,13 @@ describe("adapters.avante (fix: real Avante config wiring)", function()
 		-- Force a clean reload of the adapter module itself so module-level
 		-- caches (prompts_cache etc.) never leak between specs, same
 		-- discipline codecompanion_spec.lua applies to its own adapter.
-		package.loaded["mcphub-neovim.adapters.avante"] = nil
+		package.loaded["mcp-client.adapters.avante"] = nil
 	end)
 
 	after_each(function()
 		client._reset_registry()
 		package.loaded["avante.config"] = nil
-		package.loaded["mcphub-neovim.adapters.avante"] = nil
+		package.loaded["mcp-client.adapters.avante"] = nil
 	end)
 
 	it(
@@ -656,7 +656,7 @@ describe("adapters.avante (fix: real Avante config wiring)", function()
 			local example = require("tests.fixtures.example_native_server")
 			native.register(example)
 
-			local fresh_avante = require("mcphub-neovim.adapters.avante")
+			local fresh_avante = require("mcp-client.adapters.avante")
 			fresh_avante.custom_slash_commands()
 
 			-- The load-bearing assertion: the STUBBED avante.config MODULE's
@@ -682,7 +682,7 @@ describe("adapters.avante (fix: real Avante config wiring)", function()
 			local example = require("tests.fixtures.example_native_server")
 			local server = native.register(example)
 
-			local fresh_avante = require("mcphub-neovim.adapters.avante")
+			local fresh_avante = require("mcp-client.adapters.avante")
 			fresh_avante.custom_slash_commands()
 
 			local found_before = false
@@ -724,7 +724,7 @@ describe("adapters.avante (fix: real Avante config wiring)", function()
 				callback = function() end,
 			})
 
-			local fresh_avante = require("mcphub-neovim.adapters.avante")
+			local fresh_avante = require("mcp-client.adapters.avante")
 			fresh_avante.custom_slash_commands()
 
 			local found_user_command = false

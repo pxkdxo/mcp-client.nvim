@@ -10,7 +10,7 @@ local HttpDouble = require("tests.helpers.http_double")
 local http_get = require("tests.helpers.http_client")
 local wait_for = require("tests.helpers.wait")
 
-local dcr = require("mcphub-neovim.auth.dcr")
+local dcr = require("mcp-client.auth.dcr")
 
 describe("auth.dcr", function()
 	local double
@@ -45,7 +45,7 @@ describe("auth.dcr", function()
 			dcr.register({
 				registration_endpoint = double.url .. "/register",
 				redirect_uri = "http://127.0.0.1:9999/callback",
-				client_name = "mcphub-neovim",
+				client_name = "mcp-client",
 			}, function(res, e)
 				result, err = res, e
 			end)
@@ -111,7 +111,7 @@ describe("auth.dcr", function()
 				code_verifier = "the-verifier",
 				client_id = "the-client",
 				redirect_uri = "http://127.0.0.1:9999/callback",
-				resource = "https://hub.example/mcp",
+				resource = "https://server.example/mcp",
 			}, function(res, e)
 				result, err = res, e
 			end)
@@ -127,7 +127,7 @@ describe("auth.dcr", function()
 			-- Metadata U7 needs to refresh later.
 			assert.are.equal(double.url .. "/token", result.token_endpoint)
 			assert.are.equal("the-client", result.client_id)
-			assert.are.equal("https://hub.example/mcp", result.resource)
+			assert.are.equal("https://server.example/mcp", result.resource)
 			-- The exchange must send grant_type, code, and code_verifier.
 			assert.matches("grant_type=authorization_code", received_body, 1, true)
 			assert.matches("code_verifier=the%-verifier", received_body)
@@ -153,7 +153,7 @@ describe("auth.dcr", function()
 				code_verifier = "v",
 				client_id = "c",
 				redirect_uri = "http://127.0.0.1:9999/callback",
-				resource = "https://hub.example/mcp",
+				resource = "https://server.example/mcp",
 			}, function(res, e)
 				result, err = res, e
 			end)
@@ -177,7 +177,7 @@ describe("auth.dcr", function()
 				code_verifier = "v",
 				client_id = "c",
 				redirect_uri = "http://127.0.0.1:9999/callback",
-				resource = "https://hub.example/mcp",
+				resource = "https://server.example/mcp",
 			}, function(res, e)
 				result, err = res, e
 			end)
@@ -206,7 +206,7 @@ describe("auth.dcr", function()
 				code_verifier = "v",
 				client_id = "c",
 				redirect_uri = "http://127.0.0.1:9999/callback",
-				resource = "https://hub.example/mcp",
+				resource = "https://server.example/mcp",
 			}, function(res, e)
 				result, err = res, e
 			end)
@@ -220,7 +220,7 @@ describe("auth.dcr", function()
 	end)
 
 	-- The orchestrated flow. A single HttpDouble routes on path to stand in for
-	-- the hub (401), PRM, AS metadata, DCR, and token endpoints; the browser
+	-- the server (401), PRM, AS metadata, DCR, and token endpoints; the browser
 	-- open is stubbed to drive a callback against the real redirect listener.
 	describe("run_flow", function()
 		--- Build a routing double for the AS-side endpoints. `opts.with_dcr`
@@ -229,7 +229,7 @@ describe("auth.dcr", function()
 			opts = opts or {}
 			return HttpDouble.new({
 				on_request = function(method, path, rest)
-					-- The hub's protected resource: 401 with a PRM pointer.
+					-- The server's protected resource: 401 with a PRM pointer.
 					if path == "/mcp" then
 						return {
 							status = 401,
@@ -293,7 +293,7 @@ describe("auth.dcr", function()
 			local captured_auth_url
 			local result, err
 			dcr.run_flow({
-				hub_url = double.url .. "/mcp",
+				server_url = double.url .. "/mcp",
 				open_url = function(url)
 					captured_auth_url = url
 					-- Simulate the browser redirecting back with the code+state.
@@ -331,7 +331,7 @@ describe("auth.dcr", function()
 
 			local result, err
 			dcr.run_flow({
-				hub_url = double.url .. "/mcp",
+				server_url = double.url .. "/mcp",
 				client_id = "configured-fallback-client",
 				open_url = function(url)
 					local port = url:match("redirect_uri=http%%3A%%2F%%2F127%.0%.0%.1%%3A(%d+)")
@@ -361,7 +361,7 @@ describe("auth.dcr", function()
 
 			local result, err
 			dcr.run_flow({
-				hub_url = double.url .. "/mcp",
+				server_url = double.url .. "/mcp",
 				open_url = function()
 					return true
 				end,
@@ -385,7 +385,7 @@ describe("auth.dcr", function()
 			local manual_url, prompted
 			local result, err
 			dcr.run_flow({
-				hub_url = double.url .. "/mcp",
+				server_url = double.url .. "/mcp",
 				-- No open_url succeeds.
 				open_url = function()
 					return false
@@ -419,7 +419,7 @@ describe("auth.dcr", function()
 
 			local result, err
 			dcr.run_flow({
-				hub_url = double.url .. "/mcp",
+				server_url = double.url .. "/mcp",
 				redirect_timeout_ms = 150,
 				open_url = function()
 					return true -- browser "opened" but user never completes it

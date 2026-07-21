@@ -1,7 +1,7 @@
 local wait_for = require("tests.helpers.wait")
 local http_get = require("tests.helpers.http_client")
 
-local RedirectListener = require("mcphub-neovim.auth.redirect_listener")
+local RedirectListener = require("mcp-client.auth.redirect_listener")
 
 describe("auth.redirect_listener", function()
 	local listener

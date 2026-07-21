@@ -1,15 +1,15 @@
 -- Health-check specs (U8). `health.check(reporter?)` implements the body of
--- `:checkhealth mcphub-neovim`. It reports, purely by reading the public APIs
+-- `:checkhealth mcp-client`. It reports, purely by reading the public APIs
 -- other units already expose (`config.state()`, `client.get_clients()` /
 -- `is_stopped()`, `TokenStore:status()`):
---   * hub connection status, per configured hub;
+--   * server connection status, per configured server;
 --   * registered native servers;
---   * auth status for any hub that has a TokenStore (redacted fields only --
+--   * auth status for any server that has a TokenStore (redacted fields only --
 --     never the token itself).
 --
 -- The two brief scenarios under test:
---   * happy path: a connected hub with valid auth reports `ok`;
---   * edge case: a disconnected hub / failed auth reports `warn`/`error`
+--   * happy path: a connected server with valid auth reports `ok`;
+--   * edge case: a disconnected server / failed auth reports `warn`/`error`
 --     rather than crashing.
 --
 -- `health.check` takes an injected reporter (defaulting to `vim.health`) so a
@@ -17,10 +17,10 @@
 -- `:checkhealth` buffer -- the same test-seam discipline token_store.lua uses
 -- for its command runner.
 
-local client = require("mcphub-neovim.client")
-local config = require("mcphub-neovim.config")
-local health = require("mcphub-neovim.health")
-local token_store = require("mcphub-neovim.auth.token_store")
+local client = require("mcp-client.client")
+local config = require("mcp-client.config")
+local health = require("mcp-client.health")
+local token_store = require("mcp-client.auth.token_store")
 
 --- A reporter double that records every call vim.health would receive.
 local function recording_reporter()
@@ -51,8 +51,8 @@ local function recording_reporter()
 	return r
 end
 
---- Register a fake hub-shaped client into the real registry with a given
---- stopped state, and record it in config's state as a hub so health.lua can
+--- Register a fake server-shaped client into the real registry with a given
+--- stopped state, and record it in config's state as a server so health.lua can
 --- correlate it. Returns the client object.
 local function fake_hub(name, url, stopped)
 	local obj = {
@@ -95,11 +95,11 @@ describe("health.check", function()
 			health.check(r)
 		end)
 		-- It still opens a report section.
-		assert.is_true(r:has("start", "mcphub"))
+		assert.is_true(r:has("start", "mcp%-client"))
 	end)
 
 	describe("happy path", function()
-		it("reports ok for a connected localhost hub with no auth required", function()
+		it("reports ok for a connected localhost server with no auth required", function()
 			config._record_hub("local_hub", { url = "http://localhost:9999" })
 			fake_hub("local_hub", "http://localhost:9999", false)
 
@@ -110,7 +110,7 @@ describe("health.check", function()
 			assert.is_false(r:has("error", "local_hub"))
 		end)
 
-		it("reports ok for a connected non-localhost hub with a valid stored token", function()
+		it("reports ok for a connected non-localhost server with a valid stored token", function()
 			local store = token_store.new({ key = "remote", backend = "file", data_home = tmp })
 			store:save({
 				access_token = "SECRET-do-not-print",
@@ -118,8 +118,8 @@ describe("health.check", function()
 				token_type = "Bearer",
 				expires_at = os.time() + 3600,
 			})
-			config._record_hub("remote", { url = "https://hub.example.com/mcp", token_store = store })
-			fake_hub("remote", "https://hub.example.com/mcp", false)
+			config._record_hub("remote", { url = "https://server.example.com/mcp", token_store = store })
+			fake_hub("remote", "https://server.example.com/mcp", false)
 
 			local r = recording_reporter()
 			health.check(r)
@@ -132,7 +132,7 @@ describe("health.check", function()
 	end)
 
 	describe("registered native servers", function()
-		local native = require("mcphub-neovim.native")
+		local native = require("mcp-client.native")
 
 		it("lists registered native servers that are live in the registry", function()
 			-- Mirror what config.setup does: register the server AND record its
@@ -161,7 +161,7 @@ describe("health.check", function()
 	end)
 
 	describe("edge cases (must warn/error, never crash)", function()
-		it("reports error for a configured hub that never connected", function()
+		it("reports error for a configured server that never connected", function()
 			config._record_hub("local_hub", { url = "http://localhost:9999" })
 			-- No client registered for it: it never connected.
 
@@ -172,7 +172,7 @@ describe("health.check", function()
 			assert.is_true(r:has("error", "local_hub") or r:has("warn", "local_hub"))
 		end)
 
-		it("reports error/warn for a hub whose client is stopped (disconnected)", function()
+		it("reports error/warn for a server whose client is stopped (disconnected)", function()
 			config._record_hub("local_hub", { url = "http://localhost:9999" })
 			fake_hub("local_hub", "http://localhost:9999", true) -- stopped
 
@@ -183,11 +183,11 @@ describe("health.check", function()
 			assert.is_true(r:has("error", "local_hub") or r:has("warn", "local_hub"))
 		end)
 
-		it("warns for a non-localhost hub with a TokenStore but no stored token", function()
+		it("warns for a non-localhost server with a TokenStore but no stored token", function()
 			local store = token_store.new({ key = "remote", backend = "file", data_home = tmp })
 			-- Nothing saved: has_token == false.
-			config._record_hub("remote", { url = "https://hub.example.com/mcp", token_store = store })
-			fake_hub("remote", "https://hub.example.com/mcp", false)
+			config._record_hub("remote", { url = "https://server.example.com/mcp", token_store = store })
+			fake_hub("remote", "https://server.example.com/mcp", false)
 
 			local r = recording_reporter()
 			assert.has_no.errors(function()
@@ -196,7 +196,7 @@ describe("health.check", function()
 			assert.is_true(r:has("warn", "token") or r:has("warn", "auth") or r:has("warn", "authenticat"))
 		end)
 
-		it("warns for a non-localhost hub whose token is expired", function()
+		it("warns for a non-localhost server whose token is expired", function()
 			local store = token_store.new({ key = "remote", backend = "file", data_home = tmp })
 			store:save({
 				access_token = "SECRET-expired",
@@ -204,8 +204,8 @@ describe("health.check", function()
 				token_type = "Bearer",
 				expires_at = os.time() - 10, -- already expired
 			})
-			config._record_hub("remote", { url = "https://hub.example.com/mcp", token_store = store })
-			fake_hub("remote", "https://hub.example.com/mcp", false)
+			config._record_hub("remote", { url = "https://server.example.com/mcp", token_store = store })
+			fake_hub("remote", "https://server.example.com/mcp", false)
 
 			local r = recording_reporter()
 			assert.has_no.errors(function()

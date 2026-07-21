@@ -5,7 +5,7 @@
 --- session.lua) -- when they fire concurrently against the same client entry,
 --- plus the request-settling double-invoke guard. Unlike client_spec.lua these
 --- do NOT go over a real socket: they inject a fully controllable
---- `mcphub-neovim.transport.detect` double so a handshake can be held pending
+--- `mcp-client.transport.detect` double so a handshake can be held pending
 --- and resolved deterministically, which is the only way to force the
 --- otherwise timing-dependent race reproducibly.
 ---
@@ -80,7 +80,7 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 	local saved_detect
 
 	before_each(function()
-		saved_detect = package.loaded["mcphub-neovim.transport.detect"]
+		saved_detect = package.loaded["mcp-client.transport.detect"]
 		-- Build a fresh controllable detect stub per test.
 		local pending = {}
 		detect_stub = {
@@ -99,18 +99,18 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 				return #pending
 			end,
 		}
-		package.loaded["mcphub-neovim.transport.detect"] = detect_stub
+		package.loaded["mcp-client.transport.detect"] = detect_stub
 		-- Reload the client so its module-top require binds to the stub.
-		package.loaded["mcphub-neovim.client"] = nil
-		client = require("mcphub-neovim.client")
+		package.loaded["mcp-client.client"] = nil
+		client = require("mcp-client.client")
 	end)
 
 	after_each(function()
 		pcall(function()
 			client._reset_registry()
 		end)
-		package.loaded["mcphub-neovim.client"] = nil
-		package.loaded["mcphub-neovim.transport.detect"] = saved_detect
+		package.loaded["mcp-client.client"] = nil
+		package.loaded["mcp-client.transport.detect"] = saved_detect
 	end)
 
 	--- Connect a client backed by a controllable initial transport. Returns the
@@ -118,7 +118,7 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 	local function connect_client(cfg)
 		local initial = transport_double({ label = "initial" })
 		local obj
-		client.connect(vim.tbl_extend("force", { url = "http://127.0.0.1:1/mcp", name = "hub" }, cfg or {}), {
+		client.connect(vim.tbl_extend("force", { url = "http://127.0.0.1:1/mcp", name = "server" }, cfg or {}), {
 			on_connect = function(c)
 				obj = c
 			end,
@@ -133,7 +133,7 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 	it("coalesces a concurrent reconnect + reinitialize onto a single handshake dial", function()
 		-- A short reconnect backoff so the reconnect attempt's handshake dial
 		-- fires within the same brief window as the reinitialize handshake --
-		-- i.e. they are genuinely concurrent (the real hub-restart race), not
+		-- i.e. they are genuinely concurrent (the real server-restart race), not
 		-- serialized far apart by the default 1000ms backoff.
 		local obj, initial = connect_client({ reconnect = { initial_delay = 5, max_attempts = 3 } })
 
@@ -147,7 +147,7 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 		--       reconnect machine schedules attempt_reconnect's dial.
 		local reply
 		initial:set_responder(function()
-			return "hub returned status 404: session expired", nil, { status = 404 }
+			return "server returned status 404: session expired", nil, { status = 404 }
 		end)
 		obj:request({ jsonrpc = "2.0", id = 1, method = "ping" }, function(err, result)
 			reply = { err = err, result = result }
@@ -229,7 +229,7 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 		-- The in-flight request 404s, starting a reinitialize handshake we HOLD
 		-- pending (never resolve until the very end).
 		initial:set_responder(function()
-			return "hub returned status 404: session expired", nil, { status = 404 }
+			return "server returned status 404: session expired", nil, { status = 404 }
 		end)
 
 		local reply_count = 0
@@ -294,7 +294,7 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 
 		-- Start a reinitialize handshake (404 request) and hold it pending.
 		initial:set_responder(function()
-			return "hub returned status 404: session expired", nil, { status = 404 }
+			return "server returned status 404: session expired", nil, { status = 404 }
 		end)
 		local reply
 		obj:request({ jsonrpc = "2.0", id = 1, method = "ping" }, function(err, result)
@@ -436,7 +436,7 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 	it("abandons a wedged reconnect dial: frees the slot, times out coalesced waiters, closes a late result", function()
 		-- Scenario (round 3), the wedged-dial starvation: a reconnect attempt's
 		-- handshake dial (D1) is dispatched but its underlying detect.connect NEVER
-		-- calls back (a hub that accepts the connection but hangs the MCP handshake
+		-- calls back (a server that accepts the connection but hangs the MCP handshake
 		-- with no response and no clean exit -- exactly what ATTEMPT_TIMEOUT_MS
 		-- exists to bound). A reinitialize (a 404 request) COALESCES onto D1 before
 		-- the guard fires, joining its waiter list.
@@ -482,7 +482,7 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 		-- starting its own dial. Its callback (the on_done session.lua awaits) is
 		-- what must be notified with a timeout error when we abandon D1.
 		initial:set_responder(function()
-			return "hub returned status 404: session expired", nil, { status = 404 }
+			return "server returned status 404: session expired", nil, { status = 404 }
 		end)
 		local reinit_reply
 		obj:request({ jsonrpc = "2.0", id = 1, method = "ping" }, function(err, result)
@@ -563,7 +563,7 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 		-- never fires), so `attempt_reconnect`'s guard -- the ONLY existing timeout on
 		-- a handshake dial -- never runs. A 404 request drives `make_reinitializer`
 		-- straight into `perform_handshake` as the sole, first caller; it dispatches
-		-- the one physical dial and that dial NEVER calls back (a hub that accepts the
+		-- the one physical dial and that dial NEVER calls back (a server that accepts the
 		-- TCP connection but hangs the MCP handshake forever, exactly the pathology
 		-- ATTEMPT_TIMEOUT_MS exists to bound elsewhere).
 		--
@@ -581,7 +581,7 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 		local dials_after_connect = detect_stub.dials
 
 		initial:set_responder(function()
-			return "hub returned status 404: session expired", nil, { status = 404 }
+			return "server returned status 404: session expired", nil, { status = 404 }
 		end)
 		local reply
 		obj:request({ jsonrpc = "2.0", id = 1, method = "ping" }, function(err, result)
@@ -620,7 +620,7 @@ describe("client concurrency (reconnect vs reinitialize race)", function()
 		-- The slot is genuinely freed: a follow-up reinitialize dials FRESH rather
 		-- than joining the abandoned dial's dead waiter list.
 		initial:set_responder(function()
-			return "hub returned status 404: session expired", nil, { status = 404 }
+			return "server returned status 404: session expired", nil, { status = 404 }
 		end)
 		local reply2
 		obj:request({ jsonrpc = "2.0", id = 2, method = "ping" }, function(err, result)

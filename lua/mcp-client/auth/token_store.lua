@@ -2,14 +2,14 @@
 ---
 --- A token result (the typed table dcr.exchange_code_for_token / refresh.refresh
 --- produce -- access_token, refresh_token, expires_at, token_endpoint,
---- client_id, resource, ...) is persisted between Neovim sessions so a hub
+--- client_id, resource, ...) is persisted between Neovim sessions so a server
 --- connection does not force a fresh OAuth flow every launch.
 ---
 --- Two backends, chosen automatically (overridable for tests):
 ---   * keychain -- the OS keychain where a binding exists. On macOS this is the
 ---     `security` generic-password CLI. The secret material lives in the
 ---     keychain; nothing touches disk.
----   * file     -- a 0600-permissioned JSON file under $XDG_DATA_HOME/mcphub-neovim/
+---   * file     -- a 0600-permissioned JSON file under $XDG_DATA_HOME/mcp-client/
 ---     when no keychain binding is available. Never world-readable, always
 ---     outside the repository checkout, and (living under $XDG_DATA_HOME) never
 ---     committed to version control.
@@ -21,7 +21,7 @@
 
 local M = {}
 
-local KEYCHAIN_SERVICE = "mcphub-neovim"
+local KEYCHAIN_SERVICE = "mcp-client"
 
 --- Default command runner for the keychain backend: runs argv synchronously and
 --- returns { code = number, stdout = string }. Injectable via opts for tests so
@@ -70,8 +70,8 @@ local TokenStore = {}
 TokenStore.__index = TokenStore
 
 --- @param opts table
----   key            (string) identifies which hub this token belongs to (e.g.
----                  the hub URL or host); scopes storage so multiple hubs coexist.
+---   key            (string) identifies which server this token belongs to (e.g.
+---                  the server URL or host); scopes storage so multiple servers coexist.
 ---   backend        ("keychain"|"file"|nil) force a backend; auto-detected if nil.
 ---   data_home      (string|nil) override $XDG_DATA_HOME base (tests).
 ---   command_runner (fun(argv)->{code,stdout}|nil) override the keychain CLI
@@ -129,7 +129,7 @@ end
 -- ---------------------------------------------------------------------------
 
 function TokenStore:path()
-	local dir = data_home_dir(self._data_home) .. "/mcphub-neovim"
+	local dir = data_home_dir(self._data_home) .. "/mcp-client"
 	return dir .. "/token-" .. safe_key(self.key) .. ".json"
 end
 

@@ -1,4 +1,4 @@
-local Session = require("mcphub-neovim.session")
+local Session = require("mcp-client.session")
 
 --- The session unit owns the Mcp-Session-Id / MCP-Protocol-Version header
 --- lifecycle and the single special case the brief calls out: a
@@ -61,7 +61,7 @@ describe("session (id/protocol lifecycle + 404 reinitialize)", function()
 		-- fresh transport whose call resolves normally; the caller sees only
 		-- the successful retry, never the 404.
 		local original_transport = transport_double(function()
-			return "hub returned status 404: session expired", nil, { status = 404 }
+			return "server returned status 404: session expired", nil, { status = 404 }
 		end)
 		local retry_transport = transport_double(function()
 			return nil, { pong = true }
@@ -96,7 +96,7 @@ describe("session (id/protocol lifecycle + 404 reinitialize)", function()
 		local reinit_count = 0
 		local session = Session.new({
 			transport = transport_double(function()
-				return "hub returned status 500: boom", nil, { status = 500 }
+				return "server returned status 500: boom", nil, { status = 500 }
 			end),
 			reinitialize = function()
 				reinit_count = reinit_count + 1
@@ -116,7 +116,7 @@ describe("session (id/protocol lifecycle + 404 reinitialize)", function()
 	it("surfaces the original 404 if the reinitialize itself fails", function()
 		local session = Session.new({
 			transport = transport_double(function()
-				return "hub returned status 404", nil, { status = 404 }
+				return "server returned status 404", nil, { status = 404 }
 			end),
 			reinitialize = function(on_done)
 				on_done("re-handshake failed", nil)

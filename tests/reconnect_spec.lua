@@ -1,4 +1,4 @@
-local Reconnect = require("mcphub-neovim.reconnect")
+local Reconnect = require("mcp-client.reconnect")
 
 --- The reconnect state machine is deliberately pure and clock-injectable:
 --- it never touches the network or a real timer, so its backoff arithmetic

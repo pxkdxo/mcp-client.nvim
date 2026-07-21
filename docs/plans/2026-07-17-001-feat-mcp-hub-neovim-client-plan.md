@@ -13,9 +13,9 @@ execution: code
 
 ## Goal Capsule
 
-- **Objective:** replace `mcphub.nvim` and its patched `ravitemer/mcp-hub` daemon with `mcphub-neovim`, a from-scratch, LSP-inspired MCP client core plus thin Avante and CodeCompanion adapters, reaching full functional parity and proven hub-agnosticism before any cutover.
+- **Objective:** replace `mcphub.nvim` and its patched `ravitemer/mcp-hub` daemon with `mcp-client`, a from-scratch, LSP-inspired MCP client core plus thin Avante and CodeCompanion adapters, reaching full functional parity and proven hub-agnosticism before any cutover.
 - **Product authority:** this Product Contract; the Planning Contract and Implementation Units below implement it without altering its scope.
-- **Execution profile:** software implementation plan, `execution: code`. U1-U9 target this repo (`mcphub-neovim`); U10 (cutover) targets the dotfiles repo (`~/.local/etc`).
+- **Execution profile:** software implementation plan, `execution: code`. U1-U9 target this repo (`mcp-client`); U10 (cutover) targets the dotfiles repo (`~/.local/etc`).
 - **Stop conditions:** if contact with a real hub or the MCP spec proves a settled decision infeasible, surface it rather than silently reworking scope. Do not begin U10 until U1-U9's Definition of Done is met.
 - **Tail ownership:** the executing session owns running tests, fixing failures, and committing per unit; this plan does not choreograph exact commands.
 - **Open blockers:** none — the three questions the requirements doc deferred to planning (orchestrator porting, native-server API shape, parity checklist) are all resolved below.
@@ -26,7 +26,7 @@ execution: code
 
 ### Summary
 
-Build `mcphub-neovim`: a shareable, from-scratch Neovim MCP client with an LSP-inspired core and thin Avante/CodeCompanion adapters. It fully replaces `mcphub.nvim`'s tool-bridging and native-server-hosting role, talks only the standard MCP protocol endpoint (no hub-proprietary API), and must reach full functional parity with `mcphub.nvim` and prove hub-agnosticism against a second real hub before cutover.
+Build `mcp-client`: a shareable, from-scratch Neovim MCP client with an LSP-inspired core and thin Avante/CodeCompanion adapters. It fully replaces `mcphub.nvim`'s tool-bridging and native-server-hosting role, talks only the standard MCP protocol endpoint (no hub-proprietary API), and must reach full functional parity with `mcphub.nvim` and prove hub-agnosticism against a second real hub before cutover.
 
 ### Problem Frame
 
@@ -42,7 +42,7 @@ Swapping hub implementations alone would not remove the client-side coupling: ne
 - **Hub-agnosticism proven against `samanhappy/mcphub` specifically** (session-settled: user-directed — chosen over a hand-written stub server: the second-hub validation target is a real, independently-maintained MCP hub implementation, not one authored to already fit this client).
 - **No dashboard/health-panel UI** (session-settled: user-directed — chosen over rebuilding a minimal `:MCPHub`-style panel: the interactive dashboard isn't used day-to-day, so parity targets the functional tool-bridging and native-server surface; status is exposed via a `:checkhealth`-style command or logs instead).
 - **Native-server hosting ships as a general core capability; porting `orchestrator.lua` itself is not assumed** (session-settled: user-directed — corrects an initial assumption that porting `orchestrator.lua` was included by default; that file was auto-generated rather than deliberately designed, so whether to rebuild, redesign, or drop its specific tool set is an open design call for planning, not inherited from `mcphub.nvim`'s current shape).
-- **Repo name `mcphub-neovim` kept for now** (session-settled: user-directed — chosen over renaming immediately: naming doesn't block the spec; revisit before any public release given the similarity to `mcphub.nvim`).
+- **Repo name `mcphub-neovim` kept for now** (session-settled: user-directed — chosen over renaming immediately: naming doesn't block the spec; revisit before any public release given the similarity to `mcphub.nvim`). **Superseded 2026-07-20:** renamed to `mcp-client.nvim` (require namespace `mcp-client`) — the "hub" framing was itself found to be a slight misnomer (the client works identically against a multiplexing hub or a plain standalone MCP server; nothing in the protocol path is hub-specific), so `hubs`/`connect_hub`/etc. terminology was generalized to `servers`/`connect_server`/etc. throughout at the same time.
 
 ### Requirements
 
@@ -111,7 +111,7 @@ Swapping hub implementations alone would not remove the client-side coupling: ne
 **Deferred for later**
 
 - Whether and how to port `orchestrator.lua`'s specific task-orchestration tools (`create_plan`, `get_next_subtask`, `complete_subtask`, `fail_subtask`, `get_plan_status`, `list_plans`, the `active_plans` resource, and the `orchestrate` prompt) as a native server — resolved for v1 during planning (see Key Technical Decisions); may be revisited as a follow-up plan.
-- Renaming the repo away from `mcphub-neovim` — revisit before any public release.
+- Renaming the repo away from `mcphub-neovim` — revisit before any public release. **Done 2026-07-20**, see the superseded Key Decision above.
 
 **Outside this product's identity**
 
@@ -181,28 +181,28 @@ Both of the dotfiles repo's AI-chat surfaces (Avante and CodeCompanion) switch t
 
 | U-ID | Title | Files touched | Depends on |
 |---|---|---|---|
-| U1 | Core scaffold & dual-transport connection | `lua/mcphub-neovim/init.lua`, `lua/mcphub-neovim/transport/*.lua` | — |
-| U2 | Session lifecycle, reconnection & event API | `lua/mcphub-neovim/client.lua`, `lua/mcphub-neovim/session.lua`, `lua/mcphub-neovim/reconnect.lua` | U1 |
-| U3 | Native in-process server registration | `lua/mcphub-neovim/native.lua` | U2 |
-| U4 | Avante adapter | `lua/mcphub-neovim/adapters/avante.lua` | U2, U3 |
-| U5 | CodeCompanion adapter | `lua/mcphub-neovim/adapters/codecompanion.lua` | U2, U3 |
-| U6 | OAuth discovery & authorization flow | `lua/mcphub-neovim/auth/*.lua` | U1 |
-| U7 | Token management & fail-closed transport security | `lua/mcphub-neovim/auth/*.lua`, `lua/mcphub-neovim/transport/tls.lua` | U6 |
-| U8 | Configuration, documentation, health check | `lua/mcphub-neovim/config.lua`, `lua/mcphub-neovim/health.lua`, `README.md` | U1-U7 |
+| U1 | Core scaffold & dual-transport connection | `lua/mcp-client/init.lua`, `lua/mcp-client/transport/*.lua` | — |
+| U2 | Session lifecycle, reconnection & event API | `lua/mcp-client/client.lua`, `lua/mcp-client/session.lua`, `lua/mcp-client/reconnect.lua` | U1 |
+| U3 | Native in-process server registration | `lua/mcp-client/native.lua` | U2 |
+| U4 | Avante adapter | `lua/mcp-client/adapters/avante.lua` | U2, U3 |
+| U5 | CodeCompanion adapter | `lua/mcp-client/adapters/codecompanion.lua` | U2, U3 |
+| U6 | OAuth discovery & authorization flow | `lua/mcp-client/auth/*.lua` | U1 |
+| U7 | Token management & fail-closed transport security | `lua/mcp-client/auth/*.lua`, `lua/mcp-client/transport/tls.lua` | U6 |
+| U8 | Configuration, documentation, health check | `lua/mcp-client/config.lua`, `lua/mcp-client/health.lua`, `README.md` | U1-U7 |
 | U9 | Hub-agnosticism & parity validation | `tests/integration/*.lua` | U1-U8 |
-| U11 | Avante prompt/slash-command bridging | `lua/mcphub-neovim/adapters/avante.lua` | U3, U4 |
-| U12 | CodeCompanion prompt/slash-command bridging | `lua/mcphub-neovim/adapters/codecompanion.lua` | U3, U5 |
+| U11 | Avante prompt/slash-command bridging | `lua/mcp-client/adapters/avante.lua` | U3, U4 |
+| U12 | CodeCompanion prompt/slash-command bridging | `lua/mcp-client/adapters/codecompanion.lua` | U3, U5 |
 | U10 | Cutover (dotfiles repo) | `nvim/lua/plugins/ai.lua` (dotfiles repo) | U1-U9, U11, U12 (all Definition of Done, not just U9's own unit) |
 
-U6 and U7 both touch `lua/mcphub-neovim/auth/`, on disjoint files: U6 owns `discovery.lua`/`dcr.lua`/`pkce.lua`/`redirect_listener.lua`; U7 owns `token_store.lua`/`refresh.lua`.
+U6 and U7 both touch `lua/mcp-client/auth/`, on disjoint files: U6 owns `discovery.lua`/`dcr.lua`/`pkce.lua`/`redirect_listener.lua`; U7 owns `token_store.lua`/`refresh.lua`.
 
 ### U1. Core scaffold & dual-transport connection
 
 - **Goal:** establish the plugin skeleton and connect the core to a remote MCP hub, supporting both the modern single-endpoint Streamable HTTP transport and the legacy two-endpoint HTTP+SSE fallback via the spec's detection algorithm.
 - **Requirements:** R1
 - **Dependencies:** none
-- **Files:** `lua/mcphub-neovim/init.lua`, `lua/mcphub-neovim/transport/streamable_http.lua`, `lua/mcphub-neovim/transport/legacy_sse.lua`, `lua/mcphub-neovim/transport/detect.lua`, `tests/transport/detect_spec.lua`, `tests/transport/streamable_http_spec.lua`
-- **Approach:** as an early step within this unit — before fully building the legacy-transport fallback — verify which transport version each reference hub (`ravitemer/mcp-hub`, `samanhappy/mcphub`) actually serves, so the fallback's necessity is confirmed early rather than discovered only at U9. On connect, POST an `InitializeRequest` to the configured hub URL; on success, use the modern single-endpoint transport for all subsequent requests. On a 400/404/405 response, fall back to legacy discovery (GET expecting an `endpoint` SSE event) and use the two-endpoint transport instead. Wrap both behind a common transport interface so the rest of the core is transport-agnostic. The GET request for either transport's SSE stream is made via `plenary.curl` with `raw = {"-N"}` (disabling curl's buffering) and a `stream` callback for incremental delivery, holding one curl process open for the life of the connection — never re-invoked per message. Expose the module as `require("mcphub-neovim")`, not `require("mcphub")`, to avoid colliding with `mcphub.nvim`'s own module name while both may be present during development, before cutover (U10).
+- **Files:** `lua/mcp-client/init.lua`, `lua/mcp-client/transport/streamable_http.lua`, `lua/mcp-client/transport/legacy_sse.lua`, `lua/mcp-client/transport/detect.lua`, `tests/transport/detect_spec.lua`, `tests/transport/streamable_http_spec.lua`
+- **Approach:** as an early step within this unit — before fully building the legacy-transport fallback — verify which transport version each reference hub (`ravitemer/mcp-hub`, `samanhappy/mcphub`) actually serves, so the fallback's necessity is confirmed early rather than discovered only at U9. On connect, POST an `InitializeRequest` to the configured hub URL; on success, use the modern single-endpoint transport for all subsequent requests. On a 400/404/405 response, fall back to legacy discovery (GET expecting an `endpoint` SSE event) and use the two-endpoint transport instead. Wrap both behind a common transport interface so the rest of the core is transport-agnostic. The GET request for either transport's SSE stream is made via `plenary.curl` with `raw = {"-N"}` (disabling curl's buffering) and a `stream` callback for incremental delivery, holding one curl process open for the life of the connection — never re-invoked per message. Expose the module as `require("mcp-client")`, not `require("mcphub")`, to avoid colliding with `mcphub.nvim`'s own module name while both may be present during development, before cutover (U10).
 - **Patterns to follow:** `vim.lsp.start()`'s config/opts split as the rough shape for the core's own setup function.
 - **Test scenarios:**
   - Happy path: connecting to a hub serving the modern single-endpoint transport succeeds and uses it for all requests.
@@ -216,7 +216,7 @@ U6 and U7 both touch `lua/mcphub-neovim/auth/`, on disjoint files: U6 owns `disc
 - **Goal:** manage the MCP session lifecycle and implement reconnection with bounded backoff, exposing hub/client state through Neovim-native autocmds and a client-query API, satisfying R11.
 - **Requirements:** R2, R11
 - **Dependencies:** U1
-- **Files:** `lua/mcphub-neovim/client.lua`, `lua/mcphub-neovim/session.lua`, `lua/mcphub-neovim/reconnect.lua`, `tests/client_spec.lua`, `tests/reconnect_spec.lua`
+- **Files:** `lua/mcp-client/client.lua`, `lua/mcp-client/session.lua`, `lua/mcp-client/reconnect.lua`, `tests/client_spec.lua`, `tests/reconnect_spec.lua`
 - **Approach:** track `Mcp-Session-Id`/`MCP-Session-Id` per client instance; echo it and `MCP-Protocol-Version` on every request after initialize. On a 404, transparently reinitialize a new session rather than surfacing an error for that single case. Distinguish an intentional close (this unit's own reconnect teardown, or an explicit disconnect) from a real failure via the `job.user_data.intentional_close` flag KTD: set it before calling `vim.uv.kill(job:pid(), "sigterm")` directly, and check it first in the exit handler attached via `job:add_on_exit_callback`. On any stream-end where that flag is not set, schedule a reconnection attempt using the bounded-backoff KTD; once attempts are exhausted, transition to a visible "disconnected" state and fire the detach event — never leave a caller hanging. Fire `MCPAttach`/`MCPDetach`/`MCPNotify` `User` autocmds with `data = {client_id = ...}`. Expose `get_clients(filter)` and a client object with `id`, `name`, `config`, `is_stopped()`, `request(method, params, handler)`/`notify(method, params)`.
 - **Technical design (directional):** the reconnect state machine has three states — `connected`, `reconnecting` (bounded attempts with computed/hinted delay), `disconnected` (attempts exhausted, or an intentional close) — `MCPDetach` fires on the transition into `disconnected`, `MCPAttach` on any transition back to `connected`.
 - **Test scenarios:**
@@ -233,7 +233,7 @@ U6 and U7 both touch `lua/mcphub-neovim/auth/`, on disjoint files: U6 owns `disc
 - **Goal:** implement the general mechanism for registering Lua-defined MCP servers that run in-process, exposed through the same client/event API as remote hub connections, satisfying F3.
 - **Requirements:** R3
 - **Dependencies:** U2
-- **Files:** `lua/mcphub-neovim/native.lua`, `tests/native_spec.lua`, `tests/fixtures/example_native_server.lua`
+- **Files:** `lua/mcp-client/native.lua`, `tests/native_spec.lua`, `tests/fixtures/example_native_server.lua`
 - **Approach:** a native server is a config table (`name`, plus `tools`/`resources`/`prompts` tables of plain Lua functions) registered at core setup, styled after `mcphub.nvim`'s existing `native_servers` shape. Wrap it in the same client interface U2 exposes for remote connections so adapters cannot distinguish a native server from a remote one — request/notify calls short-circuit to direct Lua function calls instead of a network round-trip. No concrete native servers ship in v1 (`orchestrator.lua` is explicitly out of scope, see Key Technical Decisions); this unit proves the mechanism only, via a minimal test-only example server.
 - **Test scenarios:**
   - Happy path: a registered native server's tool is callable through the same `request()` path a remote server's tool would use, and appears in `get_clients()`.
@@ -246,7 +246,7 @@ U6 and U7 both touch `lua/mcphub-neovim/auth/`, on disjoint files: U6 owns `disc
 - **Goal:** expose MCP tools, resources, and prompts to Avante as a thin consumer of the core's public API, replacing `mcphub.extensions.avante`.
 - **Requirements:** R4, R6
 - **Dependencies:** U2, U3
-- **Files:** `lua/mcphub-neovim/adapters/avante.lua`, `tests/adapters/avante_spec.lua`
+- **Files:** `lua/mcp-client/adapters/avante.lua`, `tests/adapters/avante_spec.lua`
 - **Approach:** translate the core's client/tool listing into Avante's `custom_tools` function and slash-command/prompt registration, following the shape of Avante's existing `custom_tools` integration point but sourced from this plugin's core instead of `mcphub.nvim`'s. The adapter holds no direct hub or transport logic — everything routes through U2's client API (R6).
 - **Test scenarios:**
   - Happy path: a tool call issued from an Avante chat buffer resolves through the adapter to a native server (Covers F1).
@@ -260,7 +260,7 @@ U6 and U7 both touch `lua/mcphub-neovim/auth/`, on disjoint files: U6 owns `disc
 - **Goal:** provide equivalent tool/resource/prompt bridging for CodeCompanion chat, replacing `mcphub.extensions.codecompanion`.
 - **Requirements:** R5, R6
 - **Dependencies:** U2, U3
-- **Files:** `lua/mcphub-neovim/adapters/codecompanion.lua`, `tests/adapters/codecompanion_spec.lua`
+- **Files:** `lua/mcp-client/adapters/codecompanion.lua`, `tests/adapters/codecompanion_spec.lua`
 - **Approach:** implement as a CodeCompanion extension mirroring the current `extensions.mcphub` callback shape, registering tools and prompts/slash-commands via this plugin's core instead of `mcphub.nvim`. Implement the resource/var bridging path per the MCP spec regardless of CodeCompanion's currently-broken `make_vars` support — if CodeCompanion's `variables` API remains unfixed upstream, document the gap as CodeCompanion's, not work around it silently.
 - **Test scenarios:**
   - Happy path: a tool call issued from a CodeCompanion chat buffer resolves through the adapter to a native server and to a remote hub connection (Covers F1).
@@ -273,7 +273,7 @@ U6 and U7 both touch `lua/mcphub-neovim/auth/`, on disjoint files: U6 owns `disc
 - **Goal:** implement the MCP spec's OAuth 2.1 authorization flow for non-localhost hub connections — Protected Resource Metadata discovery, Authorization Server Metadata discovery, Dynamic Client Registration, and the Authorization Code + PKCE grant via a loopback redirect.
 - **Requirements:** R12
 - **Dependencies:** U1
-- **Files:** `lua/mcphub-neovim/auth/discovery.lua`, `lua/mcphub-neovim/auth/dcr.lua`, `lua/mcphub-neovim/auth/pkce.lua`, `lua/mcphub-neovim/auth/redirect_listener.lua`, `tests/auth/discovery_spec.lua`, `tests/auth/pkce_spec.lua`, `tests/auth/redirect_listener_spec.lua`
+- **Files:** `lua/mcp-client/auth/discovery.lua`, `lua/mcp-client/auth/dcr.lua`, `lua/mcp-client/auth/pkce.lua`, `lua/mcp-client/auth/redirect_listener.lua`, `tests/auth/discovery_spec.lua`, `tests/auth/pkce_spec.lua`, `tests/auth/redirect_listener_spec.lua`
 - **Approach:** on a 401 from a non-localhost hub, read `WWW-Authenticate` to locate the RFC 9728 protected-resource-metadata URL, fetch it for the `authorization_servers` list, then fetch RFC 8414 metadata for that AS. If the AS advertises a registration endpoint, perform RFC 7591 Dynamic Client Registration to obtain a `client_id`; otherwise fall back to a configured (hardcoded or user-supplied) `client_id` per the spec's documented fallback. Generate a PKCE code verifier/challenge pair and a per-flow `state` parameter, open the system browser (OS-detected `open`/`xdg-open`/`start`) at the authorization endpoint with a `localhost` redirect URI on an OS-assigned ephemeral port and the mandatory `resource` parameter (RFC 8707) bound to the target hub, and run a short-lived local HTTP listener bound explicitly to `127.0.0.1` (never `0.0.0.0`) on that redirect URI to capture the authorization code — rejecting any callback whose `state` doesn't match before accepting the code, and closing immediately after its first callback (success, mismatch, or timeout) rather than remaining open across multiple navigations. When no browser-open mechanism succeeds (e.g. a headless or SSH Neovim session with no reachable GUI), display the authorization URL for the user to open manually elsewhere, with the authorization code entered back manually instead of relying solely on the automatic loopback callback.
 - **Technical design (directional):** discovery → (DCR or configured client_id) → PKCE authorization request → loopback redirect capture → token exchange, each stage returning a typed result the next stage consumes; a failure at any stage surfaces a specific, stage-labeled error rather than a generic "auth failed."
 - **Test scenarios:**
@@ -290,8 +290,8 @@ U6 and U7 both touch `lua/mcphub-neovim/auth/`, on disjoint files: U6 owns `disc
 - **Goal:** manage the OAuth token lifecycle and enforce R12's fail-closed requirement for non-localhost hub connections lacking configured authentication or TLS.
 - **Requirements:** R12
 - **Dependencies:** U6
-- **Files:** `lua/mcphub-neovim/auth/token_store.lua`, `lua/mcphub-neovim/auth/refresh.lua`, `lua/mcphub-neovim/transport/tls.lua`, `tests/auth/token_store_spec.lua`, `tests/auth/fail_closed_spec.lua`
-- **Approach:** attach `Authorization: Bearer <token>` to every request the transport sends to a non-localhost hub; rotate the refresh token per the spec's public-client rotation requirement when the access token expires. Before opening a non-localhost connection, `transport/tls.lua` enforces that the hub URL uses `https://` (not implementing TLS itself — `plenary.curl`'s underlying curl process already handles the handshake and certificate verification) and that a configured token/credential is present; if either is missing, refuse the connection outright (fail closed) rather than warning and proceeding, per R12. Tokens persist between Neovim sessions via the OS keychain where a binding is available (e.g. macOS Keychain), falling back to a `0600`-permissioned file under `$XDG_DATA_HOME` when no keychain binding exists — never plaintext in a world-readable location or committed to version control. Auth status surfaced via `:checkhealth mcphub-neovim` (U8) and any error messages report token validity/expiry state without ever printing the token, refresh token, or PKCE verifier value.
+- **Files:** `lua/mcp-client/auth/token_store.lua`, `lua/mcp-client/auth/refresh.lua`, `lua/mcp-client/transport/tls.lua`, `tests/auth/token_store_spec.lua`, `tests/auth/fail_closed_spec.lua`
+- **Approach:** attach `Authorization: Bearer <token>` to every request the transport sends to a non-localhost hub; rotate the refresh token per the spec's public-client rotation requirement when the access token expires. Before opening a non-localhost connection, `transport/tls.lua` enforces that the hub URL uses `https://` (not implementing TLS itself — `plenary.curl`'s underlying curl process already handles the handshake and certificate verification) and that a configured token/credential is present; if either is missing, refuse the connection outright (fail closed) rather than warning and proceeding, per R12. Tokens persist between Neovim sessions via the OS keychain where a binding is available (e.g. macOS Keychain), falling back to a `0600`-permissioned file under `$XDG_DATA_HOME` when no keychain binding exists — never plaintext in a world-readable location or committed to version control. Auth status surfaced via `:checkhealth mcp-client` (U8) and any error messages report token validity/expiry state without ever printing the token, refresh token, or PKCE verifier value.
 - **Test scenarios:**
   - Happy path: every outbound request to a non-localhost hub carries the current bearer token.
   - Happy path: an expired access token triggers a refresh-token exchange transparently before the caller's request is retried.
@@ -306,13 +306,13 @@ U6 and U7 both touch `lua/mcphub-neovim/auth/`, on disjoint files: U6 owns `disc
 - **Goal:** externalize all configuration, document the plugin for third-party adopters, and provide a `:checkhealth`-based status view replacing the rejected dashboard UI.
 - **Requirements:** R7, R8
 - **Dependencies:** U1, U2, U3, U4, U5, U6, U7
-- **Files:** `lua/mcphub-neovim/config.lua`, `lua/mcphub-neovim/health.lua`, `README.md`
-- **Approach:** hub URL, server list, native-server registrations, and adapter options are all externally supplied at setup — no personal paths, ports, or credentials in the plugin source (verified by U9's grep check). `lua/mcphub-neovim/health.lua` implements `:checkhealth mcphub-neovim` using `vim.health.start/ok/warn/error`, following the pattern in bundled plugins like `telescope.nvim`'s `health.lua` (no custom health check exists yet in the user's own config) — reporting hub connection status, registered native servers, and auth status. README documents setup, the native-server trust model (full Neovim/Lua privilege, no sandboxing), and hub authentication expectations (R8).
+- **Files:** `lua/mcp-client/config.lua`, `lua/mcp-client/health.lua`, `README.md`
+- **Approach:** hub URL, server list, native-server registrations, and adapter options are all externally supplied at setup — no personal paths, ports, or credentials in the plugin source (verified by U9's grep check). `lua/mcp-client/health.lua` implements `:checkhealth mcp-client` using `vim.health.start/ok/warn/error`, following the pattern in bundled plugins like `telescope.nvim`'s `health.lua` (no custom health check exists yet in the user's own config) — reporting hub connection status, registered native servers, and auth status. README documents setup, the native-server trust model (full Neovim/Lua privilege, no sandboxing), and hub authentication expectations (R8).
 - **Test scenarios:**
-  - Happy path: `:checkhealth mcphub-neovim` reports `ok` for a connected hub with valid auth.
-  - Edge case: `:checkhealth mcphub-neovim` reports `warn`/`error` (not a crash) when the hub is disconnected or auth has failed.
+  - Happy path: `:checkhealth mcp-client` reports `ok` for a connected hub with valid auth.
+  - Edge case: `:checkhealth mcp-client` reports `warn`/`error` (not a crash) when the hub is disconnected or auth has failed.
   - Test expectation: README content is verified by manual review in U9's Definition-of-Done pass, not by an automated spec.
-- **Verification:** `:checkhealth mcphub-neovim` runs without error against both a healthy and an unhealthy configured hub, and its output correctly reflects each state.
+- **Verification:** `:checkhealth mcp-client` runs without error against both a healthy and an unhealthy configured hub, and its output correctly reflects each state.
 
 ### U9. Hub-agnosticism & parity validation
 
@@ -330,13 +330,13 @@ U6 and U7 both touch `lua/mcphub-neovim/auth/`, on disjoint files: U6 owns `disc
 
 **Parity checklist** (derived from `nvim/lua/plugins/ai.lua`, dotfiles repo):
 
-| `mcphub.nvim` surface | `mcphub-neovim` equivalent | Status |
+| `mcphub.nvim` surface | `mcp-client` equivalent | Status |
 |---|---|---|
 | `server_url` (hub connection) | R1 core connection, externally configured (R7) | Covered by U1, U8 |
 | `native_servers.orchestrator` | Explicitly excluded for v1 (Key Technical Decisions) | Out of scope |
 | `extensions.avante` (tools/vars/slash-commands) | U4 Avante adapter | Covered by U4 |
 | `extensions.codecompanion` (tools/vars/slash-commands) | U5 CodeCompanion adapter (`make_vars` gap documented, not silently worked around) | Covered by U5 |
-| `:MCPHub` interactive dashboard | Explicitly excluded (Key Decisions); replaced by `:checkhealth mcphub-neovim` | Covered by U8 |
+| `:MCPHub` interactive dashboard | Explicitly excluded (Key Decisions); replaced by `:checkhealth mcp-client` | Covered by U8 |
 | Avante's `disabled_tools` (built-in file/bash ops deferred to MCP) | Host-plugin (Avante) config, not this plugin's responsibility | Out of scope (unaffected) |
 
 ### U11. Avante prompt/slash-command bridging
@@ -344,7 +344,7 @@ U6 and U7 both touch `lua/mcphub-neovim/auth/`, on disjoint files: U6 owns `disc
 - **Goal:** close the gap R4's own Goal/Approach text already called for but U4 did not build — expose MCP prompts to Avante as slash commands, completing R4's "tools, resources (vars), and prompts (slash commands)" scope.
 - **Requirements:** R4, R6
 - **Dependencies:** U3 (native `prompts/list`/`prompts/get`, already built and working), U4 (the existing adapter file and its established patterns: `unwrap_result`, the sync/async `request()` hazard, `pcall` defense-in-depth)
-- **Files:** `lua/mcphub-neovim/adapters/avante.lua`, `tests/adapters/avante_spec.lua`
+- **Files:** `lua/mcp-client/adapters/avante.lua`, `tests/adapters/avante_spec.lua`
 - **Approach:** verify Avante's real slash-command/prompt registration mechanism against the locally-installed `avante.nvim` source (the same discipline U4 already applied to `custom_tools` — do not assume the mechanism's shape from memory or from mcphub.nvim's old behavior). U4's implementer never investigated or attempted prompt bridging at all; this is a fresh investigation, not a resumption of partial work. Route prompt discovery/invocation only through the core's public API (`get_clients()`, `request()` for `prompts/list`/`prompts/get`), following R6's "no direct hub/native access" rule and the same cache/refresh pattern U4 already established for tools.
 - **Test scenarios:**
   - Happy path: an MCP prompt registered on a native server is invocable as an Avante slash command and its rendered content matches the prompt's `prompts/get` result.
@@ -358,7 +358,7 @@ U6 and U7 both touch `lua/mcphub-neovim/auth/`, on disjoint files: U6 owns `disc
 - **Goal:** close the gap R5's own Goal/Approach text already called for but U5 explicitly scoped out — expose MCP prompts to CodeCompanion via its real prompt-adjacent mechanism, completing R5's "tool/resource/prompt bridging" scope.
 - **Requirements:** R5, R6
 - **Dependencies:** U3 (native `prompts/list`/`prompts/get`), U5 (the existing adapter file and its established patterns: the `tools_cache`/`resources_cache` model, single-flight refresh, `pcall` defense-in-depth)
-- **Files:** `lua/mcphub-neovim/adapters/codecompanion.lua`, `tests/adapters/codecompanion_spec.lua`
+- **Files:** `lua/mcp-client/adapters/codecompanion.lua`, `tests/adapters/codecompanion_spec.lua`
 - **Approach:** U5's implementer already investigated and documented CodeCompanion's real prompt-adjacent mechanism against the installed source: a class-based `SlashCommand.new/execute/output` registration point, materially larger and structurally distinct from both the `tools` registry and `editor_context` — explicitly scoped out of U5 as "a much larger, separate integration surface" rather than guessed at. This unit is that investigation's follow-through: verify the `SlashCommand` API's exact current shape against the installed `codecompanion.nvim` source (it may have changed since U5), then build the bridging. Route prompt discovery/invocation only through the core's public API, following R6, and reuse U5's existing refresh/cache/pruning pattern rather than inventing a parallel one.
 - **Test scenarios:**
   - Happy path: an MCP prompt registered on a native server is invocable as a CodeCompanion slash command and its rendered content matches the prompt's `prompts/get` result.
@@ -367,18 +367,18 @@ U6 and U7 both touch `lua/mcphub-neovim/auth/`, on disjoint files: U6 owns `disc
   - Integration: a client transitioning to `disconnected` is reflected in the slash-command list on next access, matching U5's existing tool/resource-list staleness and pruning handling.
 - **Verification:** a CodeCompanion chat session can invoke a registered MCP prompt as a slash command and see its rendered content, exercised against both a native server and a remote test-double hub.
 
-### U10. Cutover: switch `ai.lua` to `mcphub-neovim`
+### U10. Cutover: switch `ai.lua` to `mcp-client`
 
-**Target repo for this unit: the dotfiles repo (`~/.local/etc`), not `mcphub-neovim`.**
+**Target repo for this unit: the dotfiles repo (`~/.local/etc`), not `mcp-client`.**
 
-- **Goal:** complete R9/R10's actual finish line by switching the dotfiles repo's Neovim config from `mcphub.nvim` to `mcphub-neovim`.
+- **Goal:** complete R9/R10's actual finish line by switching the dotfiles repo's Neovim config from `mcphub.nvim` to `mcp-client`.
 - **Requirements:** R9, R10
 - **Dependencies:** U9 — do not begin until U1-U9's Definition of Done is met.
 - **Files (dotfiles repo):** `nvim/lua/plugins/ai.lua`, `scripts/mcphub-launch.sh`, `launchd/agents/com.patrickdeyoreo.mcphub.plist`
-- **Approach:** replace the `ravitemer/mcphub.nvim` plugin spec in `ai.lua` with `mcphub-neovim`, configured with the same hub URL and server list currently in use. Decommission the pieces no longer needed once `mcphub-neovim` is confirmed working end-to-end: unload and remove the `com.patrickdeyoreo.mcphub.plist` launchd agent and `scripts/mcphub-launch.sh`'s re-entrancy patch.
+- **Approach:** replace the `ravitemer/mcphub.nvim` plugin spec in `ai.lua` with `mcp-client`, configured with the same hub URL and server list currently in use. Decommission the pieces no longer needed once `mcp-client` is confirmed working end-to-end: unload and remove the `com.patrickdeyoreo.mcphub.plist` launchd agent and `scripts/mcphub-launch.sh`'s re-entrancy patch.
 - **Test scenarios:**
   - Test expectation: none — this unit is a configuration cutover in a different repo, not new feature code; correctness is verified by using Avante and CodeCompanion chat normally after the switch, per Definition of Done.
-- **Verification:** Avante and CodeCompanion chat sessions in the dotfiles Neovim config invoke MCP tools successfully through `mcphub-neovim`, with no reference to `mcphub.nvim` remaining in `ai.lua`.
+- **Verification:** Avante and CodeCompanion chat sessions in the dotfiles Neovim config invoke MCP tools successfully through `mcp-client`, with no reference to `mcphub.nvim` remaining in `ai.lua`.
 
 ---
 
@@ -389,14 +389,14 @@ U6 and U7 both touch `lua/mcphub-neovim/auth/`, on disjoint files: U6 owns `disc
 | `make test` (wraps `nvim --headless -c "PlenaryBustedDirectory tests/ {minimal_init = 'tests/minimal_init.lua'}"`) | U1-U9 | All specs pass |
 | `stylua --check .` | U1-U9 | No formatting diffs |
 | `grep -rE "(/Users/|localhost:37373)" lua/` (or equivalent) | U8, U9 | No hardcoded personal paths/ports found |
-| Manual: `:checkhealth mcphub-neovim` | U8 | Reports accurate status for healthy and unhealthy hub states |
-| Manual: Avante/CodeCompanion chat sessions in the dotfiles repo | U10 | Tool calls succeed through `mcphub-neovim` post-cutover |
+| Manual: `:checkhealth mcp-client` | U8 | Reports accurate status for healthy and unhealthy hub states |
+| Manual: Avante/CodeCompanion chat sessions in the dotfiles repo | U10 | Tool calls succeed through `mcp-client` post-cutover |
 
 ## Definition of Done
 
 - All Implementation Units' test scenarios pass via `make test`; `stylua --check .` is clean.
 - R1-R12 are each verified true against the parity checklist and integration tests in U9.
 - Hub-agnosticism is proven against both `ravitemer/mcp-hub` and `samanhappy/mcphub`, including the reconnect/crash-injection scenario (R11) and both the fail-closed and successful-auth paths (R12).
-- README and `:checkhealth mcphub-neovim` are complete and accurate; no hardcoded personal paths, ports, or credentials remain in `lua/`.
+- README and `:checkhealth mcp-client` are complete and accurate; no hardcoded personal paths, ports, or credentials remain in `lua/`.
 - Dead-end or experimental code from approaches that didn't pan out during implementation is removed, not left in the diff.
-- `ai.lua` (dotfiles repo) is switched over to `mcphub-neovim` and the `mcphub.nvim`-specific launchd agent/launch script are decommissioned (U10) — the concrete finish line for R9/R10.
+- `ai.lua` (dotfiles repo) is switched over to `mcp-client` and the `mcphub.nvim`-specific launchd agent/launch script are decommissioned (U10) — the concrete finish line for R9/R10.

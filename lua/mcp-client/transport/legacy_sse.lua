@@ -3,12 +3,12 @@
 --- A long-lived GET request opens an SSE stream that first delivers an
 --- `endpoint` event naming the URL to POST JSON-RPC messages to; further
 --- JSON-RPC responses/notifications arrive asynchronously over that same
---- stream rather than in the POST's own response body. All hub network
+--- stream rather than in the POST's own response body. All server network
 --- I/O goes through plenary.curl: the GET stream is one long-lived curl
 --- process (raw = {"-N"} to disable curl's buffering, fed incrementally
 --- via the `stream` callback), never re-invoked per message.
 local curl = require("plenary.curl")
-local transport_util = require("mcphub-neovim.transport.util")
+local transport_util = require("mcp-client.transport.util")
 
 local LegacySse = {}
 LegacySse.__index = LegacySse
@@ -39,7 +39,7 @@ function LegacySse.new(opts)
 	}, LegacySse)
 end
 
---- Register a handler for hub-originated messages that do not match a
+--- Register a handler for server-originated messages that do not match a
 --- pending request -- i.e. server notifications (a `method`, no id we sent).
 --- The client layer wires this to fire an `MCPNotify` autocmd. Optional; if
 --- unset such messages are simply ignored.
@@ -62,7 +62,7 @@ function LegacySse:_handle_message(decoded)
 		local callback = self._pending[decoded.id]
 		self._pending[decoded.id] = nil
 		if decoded.error then
-			callback(decoded.error.message or "hub returned an error", nil, decoded)
+			callback(decoded.error.message or "server returned an error", nil, decoded)
 		else
 			-- Pass the full decoded JSON-RPC object as the result, matching
 			-- streamable_http's `callback(nil, decoded, response)` shape so the
@@ -130,7 +130,7 @@ function LegacySse:request(rpc_message, callback)
 				end
 				return callback(
 					string.format(
-						"hub returned status %d posting to legacy endpoint",
+						"server returned status %d posting to legacy endpoint",
 						response and response.status or -1
 					),
 					nil,

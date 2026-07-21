@@ -2,7 +2,7 @@ local HttpDouble = require("tests.helpers.http_double")
 local ControllableSse = require("tests.helpers.controllable_sse")
 local wait_for = require("tests.helpers.wait")
 
-local client = require("mcphub-neovim.client")
+local client = require("mcp-client.client")
 
 --- Client-layer specs. These exercise the composed session + reconnect +
 --- transport stack end to end against a real socket-level test double,
@@ -18,7 +18,7 @@ local function initialize_result_body(session_id)
 		result = {
 			protocolVersion = "2025-03-26",
 			capabilities = {},
-			serverInfo = { name = "test-hub", version = "0.0.1", session = session_id },
+			serverInfo = { name = "test-server", version = "0.0.1", session = session_id },
 		},
 	})
 end
@@ -80,7 +80,7 @@ describe("client (session + reconnect + event API)", function()
 		local attached = on_autocmd("MCPAttach")
 
 		local got
-		client.connect({ url = double.url .. "/mcp", name = "hubA" }, {
+		client.connect({ url = double.url .. "/mcp", name = "serverA" }, {
 			on_connect = function(c, err)
 				got = { client = c, err = err }
 			end,
@@ -91,14 +91,14 @@ describe("client (session + reconnect + event API)", function()
 		end))
 		assert.is_nil(got.err)
 		assert.is_not_nil(got.client)
-		assert.are.equal("hubA", got.client.name)
+		assert.are.equal("serverA", got.client.name)
 		assert.is_false(got.client:is_stopped())
 
 		-- get_clients() reflects it, filterable by name.
 		local all = client.get_clients()
 		assert.are.equal(1, #all)
 		assert.are.equal(got.client.id, all[1].id)
-		local by_name = client.get_clients({ name = "hubA" })
+		local by_name = client.get_clients({ name = "serverA" })
 		assert.are.equal(1, #by_name)
 
 		-- MCPAttach fired with the client id.
@@ -158,7 +158,7 @@ describe("client (session + reconnect + event API)", function()
 		got.client:disconnect()
 	end)
 
-	it("fires MCPNotify when the hub pushes an unsolicited notification", function()
+	it("fires MCPNotify when the server pushes an unsolicited notification", function()
 		local sse = ControllableSse.new()
 		double = HttpDouble.new({
 			on_request = function(method, path)
@@ -533,7 +533,7 @@ describe("client (session + reconnect + event API)", function()
 		-- saw the real, live secret -- the one surface in this codebase that did
 		-- NOT follow the "never expose the raw token, only redacted status"
 		-- convention TokenStore:status()/health.lua establish everywhere else.
-		local token_store = require("mcphub-neovim.auth.token_store")
+		local token_store = require("mcp-client.auth.token_store")
 
 		local double
 		local tmp
@@ -561,7 +561,7 @@ describe("client (session + reconnect + event API)", function()
 
 		it("redacts Authorization in exposed config.headers; the real request still carries the bearer", function()
 			tmp = make_tmpdir()
-			local store = token_store.new({ key = "hubSecret", backend = "file", data_home = tmp })
+			local store = token_store.new({ key = "serverSecret", backend = "file", data_home = tmp })
 			store:save({
 				access_token = "SECRET-live-access-token",
 				token_type = "Bearer",
@@ -589,7 +589,7 @@ describe("client (session + reconnect + event API)", function()
 			local got
 			client.connect({
 				url = double.url .. "/mcp",
-				name = "hubSecret",
+				name = "serverSecret",
 				auth = { token_store = store },
 			}, {
 				on_connect = function(c, e)
@@ -614,7 +614,7 @@ describe("client (session + reconnect + event API)", function()
 			-- get_clients() returns the same exposed shape (it's the same object),
 			-- so the leak-free guarantee holds for every caller of get_clients()
 			-- too, not just the on_connect callback's object.
-			local from_registry = client.get_clients({ name = "hubSecret" })[1]
+			local from_registry = client.get_clients({ name = "serverSecret" })[1]
 			assert.is_not_nil(from_registry)
 			local dumped_registry = vim.inspect(from_registry.config)
 			assert.is_nil(dumped_registry:find("SECRET-live-access-token", 1, true))
@@ -643,7 +643,7 @@ describe("client (session + reconnect + event API)", function()
 			"keeps redaction current: headers added after client creation stay redacted, not a stale snapshot",
 			function()
 				tmp = make_tmpdir()
-				local store = token_store.new({ key = "hubSecret2", backend = "file", data_home = tmp })
+				local store = token_store.new({ key = "serverSecret2", backend = "file", data_home = tmp })
 				store:save({
 					access_token = "SECRET-token-v1",
 					token_type = "Bearer",
@@ -661,7 +661,7 @@ describe("client (session + reconnect + event API)", function()
 				local got
 				client.connect({
 					url = double.url .. "/mcp",
-					name = "hubSecret2",
+					name = "serverSecret2",
 					auth = { token_store = store },
 				}, {
 					on_connect = function(c, e)

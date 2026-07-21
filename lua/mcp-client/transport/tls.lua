@@ -4,8 +4,8 @@
 --- performs the handshake and certificate verification (the same
 --- networking-library discipline U1/U6 follow: never hand-roll TLS on vim.uv).
 --- Its sole job is a pre-connection policy check: before a connection to a
---- non-localhost hub is opened, refuse it outright unless the URL uses https://
---- AND a credential (bearer token) is configured. A localhost hub is exempt and
+--- non-localhost server is opened, refuse it outright unless the URL uses https://
+--- AND a credential (bearer token) is configured. A localhost server is exempt and
 --- proceeds exactly as before.
 ---
 --- R12 (verbatim): "The client refuses (fails closed) a non-localhost
@@ -64,7 +64,7 @@ end
 --- non-localhost: allowed only if the scheme is https:// AND a token is present.
 --- Otherwise refused (fail closed) with a clear, secret-free reason.
 ---
---- @param url string  the configured hub URL
+--- @param url string  the configured server URL
 --- @param token_status table|nil  { has_token = boolean }, e.g. token_store:status()
 ---   Only the `has_token` flag is read; no token value is inspected or echoed.
 --- @return boolean allowed, string|nil reason  reason is set iff not allowed
@@ -84,14 +84,14 @@ function M.check_connection_allowed(url, token_status)
 	-- Build a reason that names exactly what is missing, never a token value.
 	local missing = {}
 	if not has_tls then
-		table.insert(missing, "TLS (the hub URL must use https:// for a non-localhost connection)")
+		table.insert(missing, "TLS (the server URL must use https:// for a non-localhost connection)")
 	end
 	if not has_token then
-		table.insert(missing, "authentication (no bearer token is configured for this non-localhost hub)")
+		table.insert(missing, "authentication (no bearer token is configured for this non-localhost server)")
 	end
 
 	return false,
-		"refusing to connect (fail closed, R12): a non-localhost hub connection requires " .. table.concat(
+		"refusing to connect (fail closed, R12): a non-localhost server connection requires " .. table.concat(
 			missing,
 			" and "
 		) .. "; refusing rather than connecting unauthenticated"

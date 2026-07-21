@@ -18,12 +18,12 @@
 --- and a real failure were indistinguishable and a teardown re-triggered a
 --- connect that tore down again.
 
-local detect = require("mcphub-neovim.transport.detect")
-local tls = require("mcphub-neovim.transport.tls")
-local token_store = require("mcphub-neovim.auth.token_store")
-local refresh = require("mcphub-neovim.auth.refresh")
-local Session = require("mcphub-neovim.session")
-local Reconnect = require("mcphub-neovim.reconnect")
+local detect = require("mcp-client.transport.detect")
+local tls = require("mcp-client.transport.tls")
+local token_store = require("mcp-client.auth.token_store")
+local refresh = require("mcp-client.auth.refresh")
+local Session = require("mcp-client.session")
+local Reconnect = require("mcp-client.reconnect")
 
 local M = {}
 
@@ -49,13 +49,13 @@ local function build_initialize_request(config)
 			protocolVersion = PROTOCOL_VERSION,
 			-- MCP requires `capabilities` to be a JSON *object*. An empty Lua
 			-- table `{}` serializes to a JSON *array* `[]` via vim.json.encode,
-			-- which a strict real hub (e.g. ravitemer/mcp-hub) rejects with HTTP
+			-- which a strict real server (e.g. ravitemer/mcp-hub) rejects with HTTP
 			-- 400 "Invalid message". Use vim.empty_dict() so the empty case
 			-- serializes as `{}`. (Local test doubles echo regardless of shape,
-			-- so this only bites against a real hub -- surfaced by U9.)
+			-- so this only bites against a real server -- surfaced by U9.)
 			capabilities = config.capabilities or vim.empty_dict(),
 			clientInfo = {
-				name = config.name or "mcphub-neovim",
+				name = config.name or "mcp-client",
 				version = config.client_version or "0.1.0",
 			},
 		},
@@ -203,7 +203,7 @@ end
 --- Both handshake-dialing paths -- the reconnect path (attempt_reconnect,
 --- driven by an unexpected stream drop) and the session-reinitialize path
 --- (make_reinitializer, driven by a session-scoped 404) -- go through here
---- rather than calling detect.connect directly. A real hub restart fires both
+--- rather than calling detect.connect directly. A real server restart fires both
 --- at once (the restart both kills the legacy SSE GET stream Job AND makes the
 --- next request 404), so without coordination they would open two independent
 --- handshakes against the same entry: whichever resolved last would silently
@@ -321,7 +321,7 @@ end
 --- failure, feed the failure back into the machine as another drop so it
 --- either schedules the next bounded attempt or exhausts to disconnected.
 ---
---- Crucially the attempt is itself bounded by a timeout: a hub that accepts
+--- Crucially the attempt is itself bounded by a timeout: a server that accepts
 --- the connection but never completes the handshake (e.g. the legacy GET
 --- returns a non-endpoint 5xx and curl exits cleanly with no `endpoint`
 --- event) would otherwise leave `detect.connect` pending forever, wedging
@@ -330,7 +330,7 @@ end
 --- rather than hang -- the R11 "never leave a caller hanging" guarantee.
 ---
 --- The timeout does more than count the attempt: if the underlying detect.connect
---- dial genuinely never calls back (the pathological hangs-the-handshake hub), the
+--- dial genuinely never calls back (the pathological hangs-the-handshake server), the
 --- single-flight slot (entry._handshake) would otherwise stay populated FOREVER --
 --- every future reconnect attempt or reinitialize would just JOIN the same dead
 --- waiter list instead of dialing fresh, and any caller that coalesced onto the
@@ -458,7 +458,7 @@ end
 --- Without this guard, a 404-triggered reinitialize that is the sole trigger
 --- on `entry._handshake` (no concurrent reconnect attempt in flight to
 --- contribute attempt_reconnect's own guard) has no timeout anywhere in its
---- call chain: if the underlying detect.connect dial wedges (a hub that
+--- call chain: if the underlying detect.connect dial wedges (a server that
 --- accepts the connection but never completes or cleanly fails the
 --- handshake), `on_done` -- and therefore the original request's callback --
 --- would hang forever, an unconditional R11 violation. This is a structural
@@ -809,7 +809,7 @@ local function make_entry_methods(entry)
 	end
 end
 
---- Dial the hub and, on success, build and register the managed client entry.
+--- Dial the server and, on success, build and register the managed client entry.
 --- Split out from `M.connect` so the caller can refresh a stored-but-expired
 --- token first (see `M.connect` below) and only then run the actual dial --
 --- by the time this runs, `store:load()` (if any) is assumed already current.
@@ -833,12 +833,12 @@ local function do_connect(config, opts, store)
 	end
 
 	-- R12 fail-closed gate: before opening ANY connection, refuse a
-	-- non-localhost hub that lacks TLS (https://) or a configured credential.
+	-- non-localhost server that lacks TLS (https://) or a configured credential.
 	-- A configured token is surfaced as an Authorization header in
 	-- config.headers (token_store.apply_to_headers puts it there); its presence
-	-- is the "auth is configured" signal. A localhost hub is exempt entirely.
+	-- is the "auth is configured" signal. A localhost server is exempt entirely.
 	-- This must run before detect.connect so we never emit an unauthenticated
-	-- request to a non-localhost hub.
+	-- request to a non-localhost server.
 	local allowed, refusal = tls.check_connection_allowed(config.url, {
 		has_token = config.headers ~= nil and config.headers["Authorization"] ~= nil,
 	})
@@ -929,7 +929,7 @@ local function do_connect(config, opts, store)
 	end)
 end
 
---- Connect to a hub and register a managed client. Mirrors init.connect's
+--- Connect to a server and register a managed client. Mirrors init.connect's
 --- config/opts split, but returns the richer, reconnecting client object.
 ---
 --- @param config table  url, name, client_version, capabilities, headers,
@@ -949,7 +949,7 @@ function M.connect(config, opts)
 	local store = config.auth and config.auth.token_store or nil
 
 	-- A stored-but-expired token would otherwise be seeded into config.headers
-	-- verbatim (do_connect) and dialed against the hub as-is: a real hub
+	-- verbatim (do_connect) and dialed against the server as-is: a real server
 	-- correctly answers 401, which is not one of detect.lua's
 	-- legacy-transport-fallback statuses, so it surfaces as a bare,
 	-- unrecoverable connect failure -- even though the refresh token sitting
