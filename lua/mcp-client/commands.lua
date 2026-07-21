@@ -14,8 +14,8 @@
 --- override before it checks `is_localhost`, so a localhost server with an
 --- explicit `auth.token_store` override also qualifies) -- just additionally
 --- filtered by current validity. Explicit-name resolution never applies that
---- validity filter (R5): naming a server always resolves it, even if its
---- token is already valid.
+--- validity filter: naming a server always resolves it, even if its token is
+--- already valid.
 ---
 --- `config.lua` requires this module (to call `M.register()` once from
 --- `M.setup()`), so this module must not require `mcp-client.config` at load
@@ -53,24 +53,23 @@ local in_flight = {}
 --- calls could both tear down and reconnect the same registry entry, or race
 --- each other's token save.
 ---
---- Runs `dcr.run_flow` unconditionally (no short-circuit on an already-valid
---- token -- explicit-name resolution never applies the validity filter, R5,
---- and this action mirrors that: naming a server always re-authenticates
---- it). On a flow error, notifies and stops -- no save, no reconnect
---- attempted.
+--- Runs `dcr.run_flow` unconditionally -- no short-circuit on an already-valid
+--- token, matching explicit-name resolution's own rule that naming a server
+--- always re-authenticates it. On a flow error, notifies and stops -- no
+--- save, no reconnect attempted.
 ---
 --- On success, saves the token directly onto this server's existing
 --- TokenStore object (`config().get_hub(name).token_store`) -- never a
---- freshly-constructed store with a reconstructed key (KTD3). Then, before
---- dialing the reconnect, tears down any existing live client for this name:
+--- freshly-constructed store with a reconstructed key. Then, before dialing
+--- the reconnect, tears down any existing live client for this name:
 --- `:disconnect()` (so no two transports for this name are live at once),
 --- then `mcp_client()._forget(id)` (so the now-dead entry doesn't linger in
 --- the registry -- `disconnect()` alone leaves it queryable, by design, so
 --- without `_forget` a caller like `health.lua`'s `get_clients({name=...})[1]`
 --- could non-deterministically pick the stale entry over the fresh one).
 --- This makes re-authenticating an already-connected server replace rather
---- than duplicate the registry entry (KTD7) -- a no-op when there is no live
---- client yet, the common case. Finally reconnects using the exact retained
+--- than duplicate the registry entry -- a no-op when there is no live client
+--- yet, the common case. Finally reconnects using the exact retained
 --- `connect_config` (fetched via `config()._connect_config(name)`, the
 --- internal-only accessor -- never a freshly-built minimal one), reporting
 --- the reconnect's own success/failure distinctly from an OAuth failure.
@@ -78,8 +77,8 @@ local in_flight = {}
 --- Failure notifications reuse `dcr.run_flow`'s returned error string as-is
 --- (that module's error strings are secret-free by construction) rather than
 --- wrapping it with additional context. No notification here ever
---- interpolates `connect_config` or `connect_config.headers` wholesale
---- (KTD2) -- only the server name and error strings.
+--- interpolates `connect_config` or `connect_config.headers` wholesale --
+--- only the server name and error strings.
 --- @param name string  a server name already validated by resolve_target
 function M.authenticate(name)
 	if in_flight[name] then
@@ -128,16 +127,16 @@ function M.authenticate(name)
 	end)
 end
 
---- Whether a server record has a token_store at all (KTD5's completion
---- predicate). Does not consider current token validity.
+--- Whether a server record has a token_store at all. Does not consider
+--- current token validity.
 --- @param record table  a `config.state().servers` entry
 --- @return boolean
 local function has_token_store(record)
 	return record ~= nil and record.token_store ~= nil
 end
 
---- Whether a server record "needs authentication" (KTD6): has a token_store
---- AND (no token yet OR the stored token is expired).
+--- Whether a server record needs authentication: has a token_store AND (no
+--- token yet OR the stored token is expired).
 --- @param record table  a `config.state().servers` entry
 --- @return boolean
 local function needs_auth(record)
@@ -162,8 +161,8 @@ local function servers_with_token_store()
 	return names
 end
 
---- Every configured server name that currently needs authentication (KTD6),
---- sorted for deterministic output.
+--- Every configured server name that currently needs authentication, sorted
+--- for deterministic output.
 --- @return string[]
 local function servers_needing_auth()
 	local names = {}
@@ -181,18 +180,15 @@ end
 --- With an explicit `name`:
 ---   * errors "not configured" if no such server is in `config.state().servers`;
 ---   * errors "does not use token-based authentication" if the server has no
----     `token_store` (KTD5's predicate -- the common case: an unconfigured
----     localhost server);
----   * otherwise resolves to `name`, regardless of current token validity (R5).
+---     `token_store` (the common case: an unconfigured localhost server);
+---   * otherwise resolves to `name`, regardless of current token validity.
 ---
 --- With no `name` (nil or ""):
----   * partitions configured servers by KTD6's "needs authentication"
----     predicate;
----   * exactly one candidate resolves to that candidate's name (R2, AE2's
----     complement);
----   * zero candidates reports "nothing to authenticate" (AE2);
+---   * partitions configured servers by "needs authentication";
+---   * exactly one candidate resolves to that candidate's name;
+---   * zero candidates reports "nothing to authenticate";
 ---   * two or more candidates reports the candidate list and resolves to
----     nothing, asking for an explicit name (R2).
+---     nothing, asking for an explicit name.
 ---
 --- @param name string|nil
 --- @return string|nil target, string|nil err
@@ -223,8 +219,8 @@ function M.resolve_target(name)
 end
 
 --- `:MCPAuth <Tab>` completion candidates: every configured server name that
---- has a `token_store` (R6, KTD5), not only ones currently needing auth --
---- keeps completion useful for re-authenticating an already-valid server.
+--- has a `token_store`, not only ones currently needing auth -- keeps
+--- completion useful for re-authenticating an already-valid server.
 --- Matches `nvim_create_user_command`'s `complete` function signature:
 --- `fun(arg_lead, cmd_line, cursor_pos): string[]`.
 --- @return string[]
@@ -235,7 +231,7 @@ end
 --- `:MCPAuth [server-name]` callback: resolves the target and, on a definite
 --- target, hands it to `M.authenticate`. On no definite target, reports
 --- `resolve_target`'s error the same way the plugin already reports connect
---- errors (KTD4: `vim.notify`, no interactive picker).
+--- errors (`vim.notify`, no interactive picker).
 --- @param cmd_opts table  the table `nvim_create_user_command`'s callback receives
 local function on_mcpauth(cmd_opts)
 	local name = cmd_opts.args

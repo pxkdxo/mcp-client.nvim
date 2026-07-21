@@ -1,9 +1,7 @@
 -- `commands.lua` registers the `:MCPAuth [server-name]` Ex command and
 -- implements pure target-resolution logic: given no argument or an explicit
 -- server name, it resolves either a definite target server name or a clear
--- reason why none was chosen (KTD6's "needs authentication" predicate,
--- R2/R5's explicit-name-bypasses-validity rule, R6/KTD5's completion
--- candidate set).
+-- reason why none was chosen.
 --
 -- These specs drive `commands.resolve_target` and `commands.complete`
 -- directly against `config._record_hub`-populated state, mirroring how
@@ -16,9 +14,9 @@ local mcp_client = require("mcp-client.client")
 
 --- Build a minimal fake TokenStore with a fixed `status()` return, matching
 --- the shape token_store.lua's real `status()` produces (has_token/expired
---- are the only fields KTD6 cares about). Also records every `:save(token)`
---- call so U3's happy-path specs can assert the token landed on this exact
---- store object (KTD3).
+--- are the only fields the "needs authentication" predicate cares about).
+--- Also records every `:save(token)` call so happy-path specs can assert the
+--- token landed on this exact store object.
 local function fake_store(status)
 	local store = {
 		key = "fake",
@@ -53,7 +51,7 @@ describe("commands (MCPAuth target resolution + completion)", function()
 			assert.is_nil(err)
 		end)
 
-		it("explicit valid name resolves regardless of current token validity (R5)", function()
+		it("explicit valid name resolves regardless of current token validity", function()
 			config._record_hub("valid", {
 				url = "https://server.example.com/mcp",
 				token_store = fake_store({ has_token = true, expired = false }),
@@ -64,7 +62,7 @@ describe("commands (MCPAuth target resolution + completion)", function()
 			assert.is_nil(err)
 		end)
 
-		it('no argument, zero eligible servers: reports "nothing to authenticate" (AE2)', function()
+		it('no argument, zero eligible servers: reports "nothing to authenticate"', function()
 			config._record_hub("valid", {
 				url = "https://server.example.com/mcp",
 				token_store = fake_store({ has_token = true, expired = false }),
@@ -132,24 +130,21 @@ describe("commands (MCPAuth target resolution + completion)", function()
 	end)
 
 	describe("complete", function()
-		it(
-			"returns every configured server name that has a token_store, including ones with a valid token (R6, KTD5)",
-			function()
-				config._record_hub("valid", {
-					url = "https://server.example.com/mcp",
-					token_store = fake_store({ has_token = true, expired = false }),
-				})
-				config._record_hub("needs_auth", {
-					url = "https://other.example.com/mcp",
-					token_store = fake_store({ has_token = false, expired = false }),
-				})
-				config._record_hub("local_hub", { url = "http://localhost:9999" })
+		it("returns every configured server name that has a token_store, including ones with a valid token", function()
+			config._record_hub("valid", {
+				url = "https://server.example.com/mcp",
+				token_store = fake_store({ has_token = true, expired = false }),
+			})
+			config._record_hub("needs_auth", {
+				url = "https://other.example.com/mcp",
+				token_store = fake_store({ has_token = false, expired = false }),
+			})
+			config._record_hub("local_hub", { url = "http://localhost:9999" })
 
-				local candidates = commands.complete("", ":MCPAuth ", 9)
-				table.sort(candidates)
-				assert.are.same({ "needs_auth", "valid" }, candidates)
-			end
-		)
+			local candidates = commands.complete("", ":MCPAuth ", 9)
+			table.sort(candidates)
+			assert.are.same({ "needs_auth", "valid" }, candidates)
+		end)
 
 		it("returns an empty list when no configured server has a token_store", function()
 			config._record_hub("local_hub", { url = "http://localhost:9999" })
@@ -200,7 +195,7 @@ describe("commands (MCPAuth target resolution + completion)", function()
 		--- real `client.lua:new_id()` does), rather than deriving one from the
 		--- server name. A name-derived id would make a second `connect()` for
 		--- the same name silently overwrite the prior registry slot by id
-		--- collision -- passing the KTD7 "exactly one live client" assertion
+		--- collision -- passing the "exactly one live client" assertion
 		--- below for the wrong reason, without ever exercising `authenticate`'s
 		--- own disconnect-then-`_forget` teardown of the stale entry.
 		local function stub_client_connect(opts)
@@ -283,7 +278,7 @@ describe("commands (MCPAuth target resolution + completion)", function()
 		)
 
 		it(
-			"happy path: an already-connected server still runs run_flow and saves a fresh token, ending with exactly one live client for that name (KTD7)",
+			"happy path: an already-connected server still runs run_flow and saves a fresh token, ending with exactly one live client for that name",
 			function()
 				local store = fake_store({ has_token = true, expired = false })
 				local connect_config = {
@@ -320,7 +315,7 @@ describe("commands (MCPAuth target resolution + completion)", function()
 		)
 
 		it(
-			"edge case: target has no live client yet -- the KTD7 teardown step is a no-op and reconnect proceeds normally",
+			"edge case: target has no live client yet -- the teardown step is a no-op and reconnect proceeds normally",
 			function()
 				local store = fake_store({ has_token = false, expired = false })
 				local connect_config = {
