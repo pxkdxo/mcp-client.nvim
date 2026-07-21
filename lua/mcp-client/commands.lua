@@ -69,10 +69,22 @@ local in_flight = {}
 --- could non-deterministically pick the stale entry over the fresh one).
 --- This makes re-authenticating an already-connected server replace rather
 --- than duplicate the registry entry -- a no-op when there is no live client
---- yet, the common case. Finally reconnects using the exact retained
---- `connect_config` (fetched via `config()._connect_config(name)`, the
---- internal-only accessor -- never a freshly-built minimal one), reporting
---- the reconnect's own success/failure distinctly from an OAuth failure.
+--- yet, the common case.
+---
+--- The registry is shared with native, in-process servers, and a client
+--- object gives no reliable way to tell the two apart (`native.lua`
+--- deliberately keeps a native client indistinguishable in shape from a
+--- remote one). So this skips the teardown entirely when `name` also names a
+--- registered native server: tearing down "every entry matching this name"
+--- would silently disconnect and forget that native server too, with no
+--- reconnect step to bring it back. The rare cost is a stale duplicate
+--- remote entry left behind in that specific collision; the alternative is
+--- destroying an unrelated native server outright.
+---
+--- Finally reconnects using the exact retained `connect_config` (fetched via
+--- `config()._connect_config(name)`, the internal-only accessor -- never a
+--- freshly-built minimal one), reporting the reconnect's own success/failure
+--- distinctly from an OAuth failure.
 ---
 --- Failure notifications reuse `dcr.run_flow`'s returned error string as-is
 --- (that module's error strings are secret-free by construction) rather than
@@ -102,9 +114,19 @@ function M.authenticate(name)
 
 		record.token_store:save(token)
 
-		for _, live_client in ipairs(mcp_client().get_clients({ name = name })) do
-			live_client:disconnect()
-			mcp_client()._forget(live_client.id)
+		local names_collide = false
+		for _, native_name in ipairs(config().state().native_servers) do
+			if native_name == name then
+				names_collide = true
+				break
+			end
+		end
+
+		if not names_collide then
+			for _, live_client in ipairs(mcp_client().get_clients({ name = name })) do
+				live_client:disconnect()
+				mcp_client()._forget(live_client.id)
+			end
 		end
 
 		mcp_client().connect(connect_config, {

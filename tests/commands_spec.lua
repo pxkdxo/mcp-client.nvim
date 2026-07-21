@@ -484,6 +484,50 @@ describe("commands (MCPAuth target resolution + completion)", function()
 				assert.is_not_nil(notifications[1].msg:lower():find("already in progress"))
 			end
 		)
+
+		it("never disconnects a native server that happens to share the target's name", function()
+			-- A native and a remote server configured under the same name is an
+			-- edge case, but the registry has no way to tell the two apart by
+			-- object shape alone -- authenticate() must not blindly tear down
+			-- every registry entry matching the name.
+			local native_client = {
+				name = "shared_name",
+				stopped = false,
+			}
+			function native_client:is_stopped()
+				return self.stopped
+			end
+			function native_client:disconnect()
+				self.stopped = true
+			end
+			function native_client:request(_rpc, cb)
+				return cb("noop", nil, nil)
+			end
+			function native_client:notify(_rpc) end
+			mcp_client.register_native(native_client)
+			config._record_native("shared_name")
+
+			local store = fake_store({ has_token = false, expired = false })
+			local connect_config = {
+				url = "https://server.example.com/mcp",
+				name = "shared_name",
+				auth = { token_store = store },
+			}
+			config._record_hub("shared_name", {
+				url = connect_config.url,
+				token_store = store,
+				connect_config = connect_config,
+			})
+
+			stub_run_flow({ token = { access_token = "tok" } })
+			stub_client_connect()
+
+			capture_notifications(function()
+				commands.authenticate("shared_name")
+			end)
+
+			assert.is_false(native_client:is_stopped())
+		end)
 	end)
 
 	describe("register", function()
