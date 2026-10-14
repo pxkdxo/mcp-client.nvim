@@ -99,8 +99,8 @@ describe("auth.token_store", function()
 			store:save(sample_token())
 			local path = store:path()
 			-- The temp XDG_DATA_HOME is not inside this repo tree.
-			assert.is_nil(path:find("mcphub%-neovim/lua"))
-			assert.is_nil(path:find("mcphub%-neovim/tests"))
+			local repo_root = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h:h:h")
+			assert.is_nil(path:find(vim.pesc(repo_root), 1))
 			assert.is_not_nil(path:find(vim.pesc(tmp), 1))
 		end)
 
