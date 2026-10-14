@@ -20,6 +20,10 @@ local PROBE_TIMEOUT_MS = 750
 --- @param url string
 --- @return boolean reachable
 local function http_answers(url)
+	-- Legacy hub checks are optional; the shared proxy is covered by the POC suite.
+	if vim.env.MCP_CLIENT_LIVE ~= "1" then
+		return false
+	end
 	local ok, response = pcall(function()
 		return curl.get(url, { timeout = PROBE_TIMEOUT_MS })
 	end)
