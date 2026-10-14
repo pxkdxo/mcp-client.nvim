@@ -5,24 +5,23 @@
 --   * HERMETIC (always runs): client-kind / envelope agnosticism and the
 --     fail-closed auth gate -- exercised with local doubles and pure gate
 --     checks.
---   * LIVE (skips gracefully when the endpoint is unreachable): protocol
---     parity against ravitemer/mcp-hub (:40032) and samanhappy/mcphub (:3000),
---     and the successful-auth path against a self-signed-TLS non-localhost
---     double. The two hubs are complementary, not redundant: ravitemer covers
---     the legacy-SSE transport and a strict-JSON edge case; samanhappy covers
---     Streamable HTTP and is the more actively maintained of the two, but
---     neither alone exercises everything this client needs to validate.
+--   * LIVE (opt-in): connect/list/disconnect against real servers --
+--     ravitemer/mcp-hub (:40032) and samanhappy/mcphub (:3000) -- plus the
+--     successful-auth path against a self-signed-TLS non-localhost double.
+--     The two servers are complementary: ravitemer covers the legacy-SSE
+--     transport and a strict-JSON edge case; samanhappy covers Streamable
+--     HTTP.
 --
--- Every live block probes reachability first and skips with a visible reason
--- (pending("...")) rather than hard-failing, so the suite stays green without
--- those external processes running. See tests/helpers/live_backends.lua.
+-- The real-server checks only run with MCP_CLIENT_LIVE=1 set, and even then
+-- probe reachability first and skip with a visible reason (pending("..."))
+-- rather than hard-failing. See tests/helpers/live_servers.lua.
 --
--- This spec only ever contacts the two sanctioned validation endpoints
--- (:40032, :3000) and locally-bound loopback aliases.
+-- This spec only ever contacts those two endpoints (:40032, :3000) and
+-- locally-bound loopback aliases.
 
 local client = require("mcp-client.client")
 local tls = require("mcp-client.transport.tls")
-local live_backends = require("tests.helpers.live_backends")
+local live_servers = require("tests.helpers.live_servers")
 local wait_for = require("tests.helpers.wait")
 local non_localhost = require("tests.fixtures.non_localhost_server_double")
 
@@ -78,7 +77,7 @@ describe("server-agnosticism: adapters are agnostic to the result envelope", fun
 		assert.is_true(
 			wait_for(function()
 				for _, t in ipairs(avante.custom_tools()) do
-					if t.name == "enveloped_tool" then
+					if t.name == "mcp_remote-server__enveloped_tool" then
 						return true
 					end
 				end
@@ -140,7 +139,7 @@ describe("server-agnosticism: adapters are agnostic to the result envelope", fun
 	end)
 end)
 
-describe("server-agnosticism: live protocol parity [skips if server unreachable]", function()
+describe("server-agnosticism: live servers [opt-in via MCP_CLIENT_LIVE=1]", function()
 	after_each(function()
 		client._reset_registry()
 		vim.wait(30, function()
@@ -149,13 +148,13 @@ describe("server-agnosticism: live protocol parity [skips if server unreachable]
 	end)
 
 	it("ravitemer/mcp-hub (:40032): connect, tools/list, clean disconnect", function()
-		if not live_backends.ravitemer_reachable() then
-			pending("ravitemer/mcp-hub validation instance (localhost:40032) is not reachable; skipping live check")
+		if not live_servers.ravitemer_reachable() then
+			pending("ravitemer/mcp-hub instance (localhost:40032) is not reachable; skipping live check")
 			return
 		end
 
 		local got
-		client.connect({ url = live_backends.RAVITEMER_MCP_HUB_URL, name = "ravitemer-parity" }, {
+		client.connect({ url = live_servers.RAVITEMER_MCP_HUB_URL, name = "ravitemer-live" }, {
 			on_connect = function(c, e)
 				got = { c = c, e = e }
 			end,
@@ -201,24 +200,24 @@ describe("server-agnosticism: live protocol parity [skips if server unreachable]
 	end)
 
 	it("samanhappy/mcphub (:3000): identical connect+list behavior through the same code path", function()
-		if not live_backends.samanhappy_reachable() then
+		if not live_servers.samanhappy_reachable() then
 			pending("samanhappy/mcphub container (localhost:3000) is not reachable; skipping live check")
 			return
 		end
-		if not live_backends.samanhappy_mcp_reachable() then
+		if not live_servers.samanhappy_mcp_reachable() then
 			-- The container only mounts /mcp and /sse routes after its upstream
 			-- servers finish initializing; if any configured upstream fails, no MCP
 			-- route is ever mounted even though the dashboard stays reachable.
-			pending("samanhappy/mcphub exposes no mounted MCP endpoint; skipping live MCP parity against it")
+			pending("samanhappy/mcphub exposes no mounted MCP endpoint; skipping live MCP check against it")
 			return
 		end
 
 		-- The same client.connect code path (no server-specific branch) must
 		-- connect and list tools here. samanhappy serves Streamable HTTP on
 		-- /mcp/<group>; $smart routes across all configured servers.
-		local url = live_backends.SAMANHAPPY_BASE_URL .. "/mcp/$smart"
+		local url = live_servers.SAMANHAPPY_BASE_URL .. "/mcp/$smart"
 		local got
-		client.connect({ url = url, name = "samanhappy-parity" }, {
+		client.connect({ url = url, name = "samanhappy-live" }, {
 			on_connect = function(c, e)
 				got = { c = c, e = e }
 			end,
@@ -305,12 +304,12 @@ describe("resilience: connection loss is a visible failure, never a hang", funct
 	end)
 
 	it("live :40032 normal-operation lifecycle (connect -> disconnect) completes bounded", function()
-		if not live_backends.ravitemer_reachable() then
+		if not live_servers.ravitemer_reachable() then
 			pending("ravitemer/mcp-hub (localhost:40032) not reachable; skipping live lifecycle check")
 			return
 		end
 		local got
-		client.connect({ url = live_backends.RAVITEMER_MCP_HUB_URL, name = "resilience-live-normal" }, {
+		client.connect({ url = live_servers.RAVITEMER_MCP_HUB_URL, name = "resilience-live-normal" }, {
 			on_connect = function(c, e)
 				got = { c = c, e = e }
 			end,

@@ -1,13 +1,14 @@
 --- Live-server reachability probes for the integration specs that talk to
 --- real, externally-running MCP server processes instead of in-repo test
---- doubles. CI and most contributors won't have those processes running, so
---- the specs must skip gracefully -- with a clear reason -- rather than
---- hard-fail when the endpoints are unreachable.
+--- doubles. These checks are opt-in: every probe reports unreachable unless
+--- MCP_CLIENT_LIVE=1 is set, so the default suite never depends on local
+--- server processes. When opted in, the specs still skip -- with a clear
+--- reason -- rather than hard-fail if an endpoint is unreachable.
 local curl = require("plenary.curl")
 
 local M = {}
 
---- The two sanctioned live validation endpoints.
+--- The two live server endpoints.
 M.RAVITEMER_MCP_HUB_URL = "http://localhost:40032/mcp"
 M.RAVITEMER_HEALTH_URL = "http://localhost:40032/api/health"
 M.SAMANHAPPY_BASE_URL = "http://localhost:3000"
@@ -20,6 +21,9 @@ local PROBE_TIMEOUT_MS = 750
 --- @param url string
 --- @return boolean reachable
 local function http_answers(url)
+	if vim.env.MCP_CLIENT_LIVE ~= "1" then
+		return false
+	end
 	local ok, response = pcall(function()
 		return curl.get(url, { timeout = PROBE_TIMEOUT_MS })
 	end)

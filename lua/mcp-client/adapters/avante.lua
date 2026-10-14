@@ -2,7 +2,7 @@
 --- `require("mcp-client.client").get_clients(filter)` plus each client
 --- object's `request(rpc_message, callback)` -- into Avante's real
 --- `custom_tools` config option and `avante.config`'s live `slash_commands`
---- array, replacing `mcphub.extensions.avante`.
+--- array.
 ---
 --- This is a thin adapter: it holds no direct server or transport logic of
 --- its own. Every tool call it exposes to Avante is, underneath, a standard
@@ -79,12 +79,17 @@ end
 --- registry on every call, so a disconnected client is dropped immediately
 --- rather than waiting for its cache entry to expire.
 local tools_cache = {} ---@type table<string, table[]>
+local tools_inflight = {} ---@type table<string, boolean>
 
 --- Ask one client for its current tool listing via `tools/list`. A client
 --- that errors or returns something malformed leaves the previous cache
 --- entry (or the initial empty list) in place rather than raising, so one
 --- misbehaving client can't take down the whole tool list.
 local function refresh_client_tools(mcp_client)
+	if tools_inflight[mcp_client.id] then
+		return
+	end
+	tools_inflight[mcp_client.id] = true
 	local ok, err = pcall(function()
 		mcp_client:request({
 			jsonrpc = "2.0",
@@ -95,6 +100,7 @@ local function refresh_client_tools(mcp_client)
 			-- `params` to be an object.
 			params = vim.empty_dict(),
 		}, function(cb_err, result, _response)
+			tools_inflight[mcp_client.id] = nil
 			local payload = unwrap_result(result)
 			if cb_err or type(payload) ~= "table" or type(payload.tools) ~= "table" then
 				return
@@ -103,6 +109,7 @@ local function refresh_client_tools(mcp_client)
 		end)
 	end)
 	if not ok then
+		tools_inflight[mcp_client.id] = nil
 		-- Same handling as a callback-reported error: leave the cache as-is.
 		return err
 	end
@@ -142,12 +149,11 @@ local function schema_to_param(input_schema)
 end
 
 --- Build one Avante `AvanteLLMTool` entry for a single MCP tool exposed by
---- `mcp_client`. Tool names are passed through unqualified; if two connected
---- clients expose same-named tools, the later one in `get_clients()`'s
---- iteration order wins in Avante's list.
+--- `mcp_client`. Names include the configured server name so equal upstream
+--- tool names from different backends remain independently callable.
 local function build_tool_spec(mcp_client, tool_info)
 	return {
-		name = tool_info.name,
+		name = "mcp_" .. mcp_client.name .. "__" .. tool_info.name,
 		description = tool_info.description or ("MCP tool " .. tool_info.name),
 		param = schema_to_param(tool_info.inputSchema),
 		returns = {
@@ -230,6 +236,7 @@ function M.custom_tools()
 			-- id starts from a clean slate rather than a previous session's
 			-- listing.
 			tools_cache[mcp_client.id] = nil
+			tools_inflight[mcp_client.id] = nil
 		end
 	end
 	return tools

@@ -87,9 +87,7 @@ function M.connect(config, opts)
 	end)
 end
 
---- The user-facing setup entrypoint: `require("mcp-client").setup(opts)`,
---- mirroring `require("mcphub").setup(opts)`'s call shape so migrating a
---- config off `mcphub.nvim` is a mechanical swap.
+--- The user-facing setup entrypoint: `require("mcp-client").setup(opts)`.
 ---
 --- All orchestration (validating/normalizing config, registering native
 --- servers, connecting servers, wiring OAuth token stores) lives in

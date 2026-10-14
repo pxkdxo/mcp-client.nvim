@@ -1,7 +1,7 @@
 local HttpDouble = require("tests.helpers.http_double")
 local wait_for = require("tests.helpers.wait")
 
-local mcphub = require("mcp-client")
+local mcp_client = require("mcp-client")
 
 local function initialize_result_body()
 	return vim.json.encode({
@@ -26,7 +26,7 @@ describe("mcp-client (public entrypoint)", function()
 	end)
 
 	it("is required as mcp-client, not mcphub", function()
-		assert.is_not_nil(mcphub)
+		assert.is_not_nil(mcp_client)
 		assert.has_error(function()
 			require("mcphub")
 		end)
@@ -48,7 +48,7 @@ describe("mcp-client (public entrypoint)", function()
 
 		local got_client, got_err
 		local done = false
-		mcphub.connect({ url = double.url .. "/mcp" }, {
+		mcp_client.connect({ url = double.url .. "/mcp" }, {
 			on_connect = function(client, err)
 				got_client, got_err = client, err
 				done = true
@@ -83,7 +83,7 @@ describe("mcp-client (public entrypoint)", function()
 
 		local got_client, got_err
 		local done = false
-		mcphub.connect({ url = double.url .. "/mcp" }, {
+		mcp_client.connect({ url = double.url .. "/mcp" }, {
 			on_connect = function(client, err)
 				got_client, got_err = client, err
 				done = true
@@ -103,7 +103,7 @@ describe("mcp-client (public entrypoint)", function()
 	it("surfaces connection-refused as a clear error via on_connect", function()
 		local got_client, got_err
 		local done = false
-		mcphub.connect({ url = "http://127.0.0.1:1/mcp" }, {
+		mcp_client.connect({ url = "http://127.0.0.1:1/mcp" }, {
 			on_connect = function(client, err)
 				got_client, got_err = client, err
 				done = true
@@ -119,7 +119,7 @@ describe("mcp-client (public entrypoint)", function()
 
 	it("requires a url in config", function()
 		assert.has_error(function()
-			mcphub.connect({}, {})
+			mcp_client.connect({}, {})
 		end)
 	end)
 
@@ -140,7 +140,7 @@ describe("mcp-client (public entrypoint)", function()
 		})
 
 		local done = false
-		mcphub.connect({ url = double.url .. "/mcp" }, {
+		mcp_client.connect({ url = double.url .. "/mcp" }, {
 			on_connect = function(client, _err)
 				if client then
 					client.close()
