@@ -271,10 +271,9 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 		end
 		assert.is_nil(found, "remote client's tools must not appear synchronously")
 
-		-- refresh() (exports.refresh) re-queries and re-registers; call it
-		-- again once the deferred tools/list reply has landed.
+		-- Completed asynchronous discovery publishes tools without callers
+		-- polling refresh() or issuing another tools/list request.
 		vim.wait(200, function()
-			codecompanion_adapter.exports.refresh()
 			local tools = fake_mcp.get_registered_tools()
 			for name in pairs(tools) do
 				if name:match("remote_echo$") then

@@ -94,6 +94,20 @@ local NAME_PREFIX = "mcp_"
 local tools_cache = {}
 local resources_cache = {}
 local prompts_cache = {}
+local refresh
+local publish_scheduled = false
+-- Discovery completes asynchronously; publish cached results without starting
+-- another discovery cycle. Coalesce the three list responses into one turn.
+local function publish_discovered()
+	if publish_scheduled then return end
+	publish_scheduled = true
+	local config = package.loaded["codecompanion.config"]
+	vim.schedule(function()
+		publish_scheduled = false
+		if not config or package.loaded["codecompanion.config"] ~= config then return end
+		refresh(true)
+	end)
+end
 
 --- Normalize a client `request()` result to the bare MCP payload, regardless
 --- of which kind of client produced it. Native clients deliver the handler's
@@ -133,6 +147,7 @@ local function refresh_client_tools(mcp_client)
 				return
 			end
 			tools_cache[mcp_client.id] = payload.tools
+			publish_discovered()
 		end)
 	end)
 end
@@ -152,6 +167,7 @@ local function refresh_client_prompts(mcp_client)
 				return
 			end
 			prompts_cache[mcp_client.id] = payload.prompts
+			publish_discovered()
 		end)
 	end)
 end
@@ -171,6 +187,7 @@ local function refresh_client_resources(mcp_client)
 				return
 			end
 			resources_cache[mcp_client.id] = payload.resources
+			publish_discovered()
 		end)
 	end)
 end
@@ -481,7 +498,7 @@ local registered_prompt_slash_command_names = {}
 --- chat buffer opened after `setup()` already sees whatever is
 --- synchronously available (native clients) without requiring a manual
 --- first refresh.
-local function refresh()
+refresh = function(cached_only)
 	local mcp = require("codecompanion.mcp")
 	local config = require("codecompanion.config")
 	-- interactions.shared.editor_context, NOT interactions.chat.editor_context:
@@ -515,9 +532,11 @@ local function refresh()
 			prompts_cache[mcp_client.id] = nil
 			unregister_prompt_slash_commands(mcp_client.id)
 		else
-			refresh_client_tools(mcp_client)
-			refresh_client_resources(mcp_client)
-			refresh_client_prompts(mcp_client)
+			if not cached_only then
+				refresh_client_tools(mcp_client)
+				refresh_client_resources(mcp_client)
+				refresh_client_prompts(mcp_client)
+			end
 			local tool_configs, group = build_client_registration(mcp_client)
 			if group then
 				mcp.register_tools(mcp_client.id, tool_configs, group)
