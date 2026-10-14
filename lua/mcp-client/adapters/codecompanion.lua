@@ -1,8 +1,7 @@
 --- CodeCompanion adapter: translates this plugin's client/tool surface --
 --- `require("mcp-client.client").get_clients(filter)` plus each client
 --- object's `request(rpc_message, callback)` -- into CodeCompanion's
---- extension, tool, and editor-context integration points, replacing
---- `mcphub.extensions.codecompanion`.
+--- extension, tool, and editor-context integration points.
 ---
 --- This is a thin adapter: it holds no direct server or transport logic of
 --- its own. Every tool call and resource read it exposes to CodeCompanion is,

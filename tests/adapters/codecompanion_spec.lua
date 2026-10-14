@@ -108,7 +108,7 @@ describe("adapters.codecompanion (extension: tool + editor_context translation)"
 		local f = assert(io.open(path, "r"))
 		local source = f:read("*a")
 		f:close()
-		assert.is_nil(source:match('require%(%s*"mcphub%-neovim%.transport'))
+		assert.is_nil(source:match('require%(%s*"mcp%-client%.transport'))
 		assert.is_nil(source:match("plenary%.job"))
 		assert.is_nil(source:match("[Jj]ob:pid"))
 		assert.is_nil(source:match("vim%.uv%.kill"))

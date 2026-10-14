@@ -2,7 +2,7 @@
 --- `require("mcp-client.client").get_clients(filter)` plus each client
 --- object's `request(rpc_message, callback)` -- into Avante's real
 --- `custom_tools` config option and `avante.config`'s live `slash_commands`
---- array, replacing `mcphub.extensions.avante`.
+--- array.
 ---
 --- This is a thin adapter: it holds no direct server or transport logic of
 --- its own. Every tool call it exposes to Avante is, underneath, a standard

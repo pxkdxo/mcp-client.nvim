@@ -33,7 +33,7 @@ local next_id = 0
 
 local function new_id()
 	next_id = next_id + 1
-	return "mcphub-client-" .. next_id
+	return "mcp-client-" .. next_id
 end
 
 local function build_initialize_request(config)

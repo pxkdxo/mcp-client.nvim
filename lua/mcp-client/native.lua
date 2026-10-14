@@ -1,13 +1,12 @@
 --- Native, in-process MCP server registration.
 ---
---- A native server is a config table styled after `mcphub.nvim`'s existing
---- `native_servers` shape: `name` plus `tools`/`resources`/`prompts` tables
---- of plain Lua functions. `M.register(config)` wraps it in the exact same
---- client object shape `client.lua` exposes for a remote server connection
---- (`id`, `name`, `is_stopped()`, `request`, `notify`) and adds it to the
---- same registry `get_clients()` reads from (via `client.register_native`),
---- so adapters built against that shape cannot tell a native server from a
---- remote one.
+--- A native server is a config table: `name` plus `tools`/`resources`/
+--- `prompts` tables of plain Lua functions. `M.register(config)` wraps it in
+--- the exact same client object shape `client.lua` exposes for a remote
+--- server connection (`id`, `name`, `is_stopped()`, `request`, `notify`)
+--- and adds it to the same registry `get_clients()` reads from (via
+--- `client.register_native`), so adapters built against that shape cannot
+--- tell a native server from a remote one.
 ---
 --- No concrete native servers ship here -- see
 --- `tests/fixtures/example_native_server.lua` for a minimal example.
