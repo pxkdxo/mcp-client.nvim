@@ -102,6 +102,22 @@ describe("adapters.avante (custom_tools translation)", function()
 		assert.is_nil(source:match("vim%.uv%.kill"))
 	end)
 
+	it("keeps equal upstream tool names separately callable across servers", function()
+		for _, name in ipairs({"first", "second"}) do
+			local server_name = name
+			native.register({name=name, tools={echo=function() return server_name end}})
+		end
+		local seen = {}
+		for _, tool in ipairs(avante.custom_tools()) do
+			tool.func({}, {on_complete=function(value, err)
+				assert.is_nil(err)
+				seen[tool.name]=value
+			end})
+		end
+		assert.are.equal("first", seen.mcp_first__echo)
+		assert.are.equal("second", seen.mcp_second__echo)
+	end)
+
 	it("happy path: a tool call from Avante resolves through the adapter to a native server", function()
 		local example = require("tests.fixtures.example_native_server")
 		native.register(example)
@@ -111,7 +127,7 @@ describe("adapters.avante (custom_tools translation)", function()
 
 		local echo_tool
 		for _, t in ipairs(tools) do
-			if t.name == "echo" then
+			if t.name == "mcp_example-native__echo" then
 				echo_tool = t
 			end
 		end
@@ -157,7 +173,7 @@ describe("adapters.avante (custom_tools translation)", function()
 		local tools = avante.custom_tools()
 		local lookup_tool
 		for _, t in ipairs(tools) do
-			if t.name == "lookup" then
+			if t.name == "mcp_result-shaped-native__lookup" then
 				lookup_tool = t
 			end
 		end
@@ -205,7 +221,7 @@ describe("adapters.avante (custom_tools translation)", function()
 		local tools = avante.custom_tools()
 		local remote_tool
 		for _, t in ipairs(tools) do
-			if t.name == "remote_echo" then
+			if t.name == "mcp_remote-server__remote_echo" then
 				remote_tool = t
 			end
 		end
@@ -213,7 +229,7 @@ describe("adapters.avante (custom_tools translation)", function()
 
 		vim.wait(200, function()
 			for _, t in ipairs(avante.custom_tools()) do
-				if t.name == "remote_echo" then
+				if t.name == "mcp_remote-server__remote_echo" then
 					remote_tool = t
 				end
 			end
@@ -266,7 +282,7 @@ describe("adapters.avante (custom_tools translation)", function()
 		local tools_before = avante.custom_tools()
 		local found_before = false
 		for _, t in ipairs(tools_before) do
-			if t.name == "echo" then
+			if t.name == "mcp_example-native__echo" then
 				found_before = true
 			end
 		end
@@ -283,7 +299,7 @@ describe("adapters.avante (custom_tools translation)", function()
 		local tools_after = avante.custom_tools()
 		local found_after = false
 		for _, t in ipairs(tools_after) do
-			if t.name == "echo" then
+			if t.name == "mcp_example-native__echo" then
 				found_after = true
 			end
 		end
@@ -308,7 +324,7 @@ describe("adapters.avante (custom_tools translation)", function()
 		local echo_tool
 		for _, t in ipairs(tools) do
 			assert.are_not.equal("throws-on-request", t.name)
-			if t.name == "echo" then
+			if t.name == "mcp_example-native__echo" then
 				echo_tool = t
 			end
 		end
@@ -327,7 +343,7 @@ describe("adapters.avante (custom_tools translation)", function()
 		local tools = avante.custom_tools()
 		local echo_tool
 		for _, t in ipairs(tools) do
-			if t.name == "echo" then
+			if t.name == "mcp_example-native__echo" then
 				echo_tool = t
 			end
 		end
@@ -395,7 +411,7 @@ describe("adapters.avante (custom_tools translation)", function()
 		local echo_tool
 		vim.wait(200, function()
 			for _, t in ipairs(avante.custom_tools()) do
-				if t.name == "echo_tool" then
+				if t.name == "mcp_id-check__echo_tool" then
 					echo_tool = t
 				end
 			end

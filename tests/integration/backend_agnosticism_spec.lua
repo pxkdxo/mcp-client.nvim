@@ -78,7 +78,7 @@ describe("server-agnosticism: adapters are agnostic to the result envelope", fun
 		assert.is_true(
 			wait_for(function()
 				for _, t in ipairs(avante.custom_tools()) do
-					if t.name == "enveloped_tool" then
+					if t.name == "mcp_remote-server__enveloped_tool" then
 						return true
 					end
 				end
