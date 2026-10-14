@@ -1,8 +1,8 @@
 local Session = require("mcp-client.session")
 
 --- The session owns the Mcp-Session-Id / MCP-Protocol-Version header
---- lifecycle, including transparently reinitializing and retrying the
---- caller's original request on a session-scoped 404.
+--- lifecycle, including safe discovery retry and non-replay of tool calls
+--- on a session-scoped 404.
 
 --- A transport double: `request(msg, cb)` returns whatever the scripted
 --- `responder` yields for that call. `responder(msg, call_index)` returns
@@ -64,6 +64,7 @@ describe("session (id/protocol lifecycle + 404 reinitialize)", function()
 		local reinit_count = 0
 		local session = Session.new({
 			transport = original_transport,
+			session_id = "sess-1",
 			reinitialize = function(on_done)
 				reinit_count = reinit_count + 1
 				on_done(nil, { transport = retry_transport, session_id = "sess-2" })
@@ -107,6 +108,7 @@ describe("session (id/protocol lifecycle + 404 reinitialize)", function()
 
 	it("surfaces the original 404 if the reinitialize itself fails", function()
 		local session = Session.new({
+			session_id = "sess-1",
 			transport = transport_double(function()
 				return "server returned status 404", nil, { status = 404 }
 			end),
@@ -123,4 +125,51 @@ describe("session (id/protocol lifecycle + 404 reinitialize)", function()
 		assert.is_nil(got_result)
 		assert.is_not_nil(got_err)
 	end)
+	it("does not renew an unassigned session on a routing 404", function()
+		local count = 0
+		local session = Session.new({
+			transport = transport_double(function() return "status 404", nil, {status=404} end),
+			reinitialize = function() count = count + 1 end,
+		})
+		local failure
+		session:request({method="tools/list"}, function(err) failure = err end)
+		assert.are.equal(0, count)
+		assert.are.equal("status 404", failure)
+	end)
+
+	it("renews but never replays a tool call or unknown method", function()
+		for _, method in ipairs({"tools/call", "custom/mutate", "prompts/get"}) do
+			local renewed = transport_double(function() error("request was replayed") end)
+			local session = Session.new({
+				session_id = "expired",
+				transport = transport_double(function() return "status 404", nil, {status=404} end),
+				reinitialize = function(done) done(nil, {transport=renewed, session_id="new"}) end,
+			})
+			local failure
+			session:request({method=method}, function(err) failure=err end)
+			assert.are.equal("new", session.session_id)
+			assert.are.equal(0, #renewed.calls)
+			assert.matches("not replayed", failure, 1, true)
+		end
+	end)
+
+	it("replays discovery only once and adopts a stateless replacement", function()
+		local renewals = 0
+		local renewed = transport_double(function() return "status 404", nil, {status=404} end)
+		local session = Session.new({
+			session_id = "expired",
+			transport = transport_double(function() return "status 404", nil, {status=404} end),
+			reinitialize = function(done)
+				renewals=renewals+1
+				done(nil, {transport=renewed})
+			end,
+		})
+		local failure
+		session:request({method="tools/list"}, function(err) failure=err end)
+		assert.are.equal(1, renewals)
+		assert.are.equal(1, #renewed.calls)
+		assert.is_nil(session.session_id)
+		assert.are.equal("status 404", failure)
+	end)
+
 end)
