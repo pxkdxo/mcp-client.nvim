@@ -25,11 +25,10 @@ With [lazy.nvim][lazy]:
 
 ```lua
 {
-  "your-org/mcp-client", -- replace with the actual repository
+  "pxkdxo/mcp-client",
   opts = {
     -- see Configuration below
-  },
-  -- lazy.nvim calls require("mcp-client").setup(opts) for you.
+  }
 }
 ```
 
