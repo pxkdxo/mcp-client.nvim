@@ -688,6 +688,26 @@ describe("commands (MCPAuth target resolution + completion)", function()
       assert.are.same({ 'mcp-client: reconnected "a".', 'mcp-client: reconnected "b".' }, notified)
     end)
 
+    it("refuses to start a second reconnect of a server while one is dialing", function()
+      record("a")
+      local pending
+      mcp_client.connect = function(cfg, opts)
+        table.insert(connects, cfg)
+        pending = opts
+      end
+
+      commands.reconnect("a")
+      commands.reconnect("a")
+      pending.on_connect(live("a"), nil)
+
+      assert.are.equal(1, #connects)
+      assert.are.equal(1, #mcp_client.get_clients({ name = "a" }))
+      assert.are.same({
+        'mcp-client: reconnecting "a" failed: a reconnect is already in progress',
+        'mcp-client: reconnected "a".',
+      }, notified)
+    end)
+
     it("reconnects only the named server, and refuses an unknown one", function()
       record("a")
       record("b")

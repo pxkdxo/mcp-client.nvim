@@ -65,12 +65,22 @@ local function teardown(name)
   end
 end
 
+--- Names with a reconnect dialing, so overlapping reconnects of one server
+--- cannot each register a client.
+local reconnecting = {}
+
 --- Replace a configured server's live connection with a fresh one made from
---- its retained `connect_config`. `on_done(err)` reports the new connection.
+--- its retained `connect_config`. `on_done(err)` reports the new connection,
+--- or that a reconnect of this server is already in progress.
 local function reconnect_server(name, on_done)
+  if reconnecting[name] then
+    return on_done("a reconnect is already in progress")
+  end
+  reconnecting[name] = true
   teardown(name)
   mcp_client().connect(config()._connect_config(name), {
     on_connect = function(_, err)
+      reconnecting[name] = nil
       on_done(err)
     end,
   })
@@ -427,12 +437,13 @@ function M.register()
   })
 end
 
---- Clear the in-flight guard. Test-only -- lets specs isolate scenarios that
---- deliberately leave a name "in flight" (an authenticate() call whose
---- dcr.run_flow callback never fires) without leaking that state into later
---- tests reusing the same server name.
+--- Clear the authenticate and reconnect in-flight guards. Test-only -- lets
+--- specs isolate scenarios that deliberately leave a name "in flight" (a call
+--- whose callback never fires) without leaking that state into later tests
+--- reusing the same server name.
 function M._reset()
   in_flight = {}
+  reconnecting = {}
 end
 
 return M

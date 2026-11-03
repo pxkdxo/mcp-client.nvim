@@ -107,6 +107,69 @@ describe("transport.detect", function()
     end)
   end
 
+  describe("legacy SSE discovery that never completes", function()
+    --- A server that answers GET with `get`, accepts but never answers POSTs to
+    --- its message endpoint, and 404s every other POST.
+    local function sse_only(get)
+      double = HttpDouble.new({
+        on_request = function(method, path, rest)
+          if method == "GET" then
+            return get(rest)
+          end
+          if path:match("^/messages") then
+            return { status = 202, body = "" }
+          end
+          return { status = 404, body = "" }
+        end,
+      })
+      return double.url .. "/mcp"
+    end
+
+    local function connect_within(url, ms)
+      local outcome
+      detect.connect({ url = url, timeout = ms }, function(result, err)
+        outcome = { result = result, err = err }
+      end)
+      assert.is_true(wait_for(function()
+        return outcome ~= nil
+      end, ms + 2000))
+      return outcome.result, outcome.err
+    end
+
+    it("fails when the GET returns without an endpoint event", function()
+      local result, err = connect_within(
+        sse_only(function()
+          return { status = 200, body = "" }
+        end),
+        5000
+      )
+      assert.is_nil(result)
+      assert.matches("stream ended %(status 200%)", err)
+    end)
+
+    it("fails within the timeout when the stream stays open without an endpoint event", function()
+      local result, err = connect_within(
+        sse_only(function()
+          return { status = 200, sse = {} }
+        end),
+        300
+      )
+      assert.is_nil(result)
+      assert.matches("did not send an endpoint event within 300 ms", err)
+    end)
+
+    it("reports a timeout when initialize is never answered over the stream", function()
+      local result, err = connect_within(
+        sse_only(function()
+          return { status = 200, sse = { { event = "endpoint", data = "/messages" } } }
+        end),
+        300
+      )
+      assert.is_nil(result)
+      assert.matches("did not complete the handshake within 300 ms", err)
+    end)
+  end)
+
   it("reports a modern server that supports none of this client's revisions", function()
     server = FakeServer.new({ era = "modern", supported = { "2099-01-01" } })
     local result, err = connect(server.url)

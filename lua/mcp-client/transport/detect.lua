@@ -36,29 +36,6 @@ local function resolve_endpoint(stream_url, endpoint)
   return origin .. (endpoint:sub(1, 1) == "/" and endpoint or ("/" .. endpoint))
 end
 
---- Run `start(done)` and pass its result to `on_done`, or a timeout error if
---- `done` has not fired within `ms`. Late results are dropped.
-local function with_timeout(ms, start, on_done)
-  local settled = false
-  local timer = vim.defer_fn(function()
-    if not settled then
-      settled = true
-      on_done(nil, string.format("timed out after %d ms", ms))
-    end
-  end, ms)
-  start(function(...)
-    if settled then
-      return
-    end
-    settled = true
-    pcall(function()
-      timer:stop()
-      timer:close()
-    end)
-    on_done(...)
-  end)
-end
-
 --- Finish a legacy handshake on `client`: validate the InitializeResult,
 --- send `notifications/initialized`, and build the connection result.
 local function complete_legacy(client, decoded, result, on_done)
@@ -91,33 +68,60 @@ local function complete_legacy(client, decoded, result, on_done)
 end
 
 --- Legacy HTTP+SSE discovery: GET the URL and wait for the `endpoint` event
---- naming the URL to POST messages to. The GET stays open as the transport's
---- receive channel for the life of the connection.
+--- naming the URL to POST messages to, then run the handshake over it. The GET
+--- stays open as the transport's receive channel for the life of the
+--- connection. The whole exchange must finish within `opts.timeout`, and a
+--- stream that ends before it does is a failure.
 local function discover_legacy_sse(opts, on_done)
   local url, headers = opts.url, opts.headers
-  local resolved = false
+  local settled = false
   local job
   local legacy_client
+  local timer
 
-  local discovery_parser = LegacySse.SseParser.new(function(event)
-    if resolved or event.event ~= "endpoint" then
+  local function finish(result, err)
+    if settled then
       return
     end
-    resolved = true
+    settled = true
+    pcall(function()
+      timer:stop()
+      timer:close()
+    end)
+    if err then
+      if legacy_client then
+        legacy_client:close()
+      elseif job then
+        pcall(function()
+          job:shutdown()
+        end)
+      end
+    end
+    on_done(result, err)
+  end
+
+  local discovery_parser = LegacySse.SseParser.new(function(event)
+    if legacy_client or event.event ~= "endpoint" then
+      return
+    end
     local endpoint = resolve_endpoint(url, event.data)
     legacy_client = LegacySse.new({ stream_url = url, endpoint = endpoint, headers = headers, job = job })
     legacy_client:attach_parser()
-
-    with_timeout(opts.timeout, function(done)
-      legacy_client:request(protocol.initialize_request(opts.config, rpc.next_id()), done)
-    end, function(err, decoded)
-      if err and not decoded then
-        legacy_client:close()
-        return on_done(nil, "initialize over the legacy SSE transport failed: " .. err)
+    legacy_client:request(protocol.initialize_request(opts.config, rpc.next_id()), function(err, decoded)
+      if settled then
+        return
       end
-      complete_legacy(legacy_client, decoded, { transport = "legacy_sse", endpoint = endpoint }, on_done)
+      if err and not decoded then
+        return finish(nil, "initialize over the legacy SSE transport failed: " .. err)
+      end
+      complete_legacy(legacy_client, decoded, { transport = "legacy_sse", endpoint = endpoint }, finish)
     end)
   end)
+
+  timer = vim.defer_fn(function()
+    local step = legacy_client and "complete the handshake" or "send an endpoint event"
+    finish(nil, string.format("legacy SSE server did not %s within %d ms", step, opts.timeout))
+  end, opts.timeout)
 
   job = curl.get(url, {
     raw = { "-N" },
@@ -132,11 +136,14 @@ local function discover_legacy_sse(opts, on_done)
         discovery_parser:feed_line(line)
       end
     end),
+    callback = vim.schedule_wrap(function(response)
+      finish(
+        nil,
+        string.format("legacy SSE stream ended (status %d) before the connection was established", response.status)
+      )
+    end),
     on_error = vim.schedule_wrap(function(curl_err)
-      if not resolved then
-        resolved = true
-        on_done(nil, transport_util.describe_curl_error(curl_err))
-      end
+      finish(nil, transport_util.describe_curl_error(curl_err))
     end),
   })
 end
