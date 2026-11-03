@@ -15,15 +15,18 @@
 --- drives the reconnect path.
 
 local detect = require("mcp-client.transport.detect")
+local stdio = require("mcp-client.transport.stdio")
 local tls = require("mcp-client.transport.tls")
+local transport_util = require("mcp-client.transport.util")
 local token_store = require("mcp-client.auth.token_store")
 local refresh = require("mcp-client.auth.refresh")
+local handlers = require("mcp-client.handlers")
+local protocol = require("mcp-client.protocol")
+local rpc = require("mcp-client.rpc")
 local Session = require("mcp-client.session")
 local Reconnect = require("mcp-client.reconnect")
 
 local M = {}
-
-local PROTOCOL_VERSION = "2025-03-26"
 
 --- The live client registry. `get_clients(filter)` reads from it; every
 --- state transition keeps it current so an adapter polling right after
@@ -36,36 +39,22 @@ local function new_id()
   return "mcp-client-" .. next_id
 end
 
-local function build_initialize_request(config)
-  return {
-    jsonrpc = "2.0",
-    id = 1,
-    method = "initialize",
-    params = {
-      protocolVersion = PROTOCOL_VERSION,
-      -- MCP requires `capabilities` to be a JSON *object*. An empty Lua
-      -- table `{}` serializes to a JSON *array* `[]` via vim.json.encode,
-      -- which a strict server rejects with HTTP 400 "Invalid message".
-      -- vim.empty_dict() forces the empty case to serialize as `{}`.
-      capabilities = config.capabilities or vim.empty_dict(),
-      clientInfo = {
-        name = config.name or "mcp-client",
-        version = config.client_version or "0.1.0",
-      },
-    },
-  }
+--- Establish a connection: a stdio subprocess when the config names a
+--- `command`, else HTTP era/transport detection against `url`.
+local function dial(config, on_done)
+  if config.command then
+    return stdio.connect(config, on_done)
+  end
+  detect.connect({ url = config.url, headers = config.headers, timeout = config.timeout, config = config }, on_done)
 end
 
---- Fire an `MCPAttach`/`MCPDetach`/`MCPNotify` User autocmd carrying the
---- client id, scheduled onto the main loop so it is safe to call from any
---- callback context (curl callbacks are already vim.schedule_wrap'd, but
---- exit handlers and timers may not be).
-local function fire_event(pattern, client_id)
+--- Fire an `MCPAttach`/`MCPDetach`/`MCPNotify` User autocmd, scheduled onto
+--- the main loop so it is safe to call from any callback context (curl
+--- callbacks are already vim.schedule_wrap'd, but exit handlers and timers
+--- may not be).
+local function fire_event(pattern, data)
   vim.schedule(function()
-    pcall(vim.api.nvim_exec_autocmds, "User", {
-      pattern = pattern,
-      data = { client_id = client_id },
-    })
+    pcall(vim.api.nvim_exec_autocmds, "User", { pattern = pattern, data = data })
   end)
 end
 
@@ -84,6 +73,12 @@ end
 --- teardown and must not reconnect; an untagged exit is a real drop and
 --- drives `reconnect:on_drop()`.
 local function hook_stream_job(entry, transport_client)
+  -- A stdio process reports its own unexpected exit; close() suppresses it.
+  if transport_client.set_on_drop then
+    transport_client:set_on_drop(function()
+      entry.reconnect:on_drop()
+    end)
+  end
   local job = transport_client.get_stream_job and transport_client:get_stream_job()
   entry._job = job
   entry._transport_for_job = transport_client
@@ -113,16 +108,48 @@ local function hook_stream_job(entry, transport_client)
   end)
 end
 
---- Wire the transport's server-notification hook to fire an MCPNotify
---- autocmd for this client. Re-applied whenever we adopt a new transport
---- (initial connect, reconnect, reinitialize) so notifications keep flowing
---- across a transparent session change.
-local function hook_notifications(entry, transport_client)
-  if transport_client.set_on_notification then
-    transport_client:set_on_notification(function(_)
-      fire_event("MCPNotify", entry.id)
-    end)
+--- Answer a legacy server's request (`ping`, `roots/list`,
+--- `elicitation/create`, `sampling/createMessage`) over the transport that
+--- delivered it.
+local function answer_server_request(entry, transport_client, message)
+  handlers.dispatch(
+    entry.config.handlers,
+    message.method,
+    message.params,
+    { server = entry.name },
+    function(err, result)
+      local response = { jsonrpc = "2.0", id = message.id }
+      if err then
+        response.error = err
+      else
+        response.result = result
+      end
+      transport_client:respond(response)
+    end
+  )
+end
+
+--- Route every server-initiated message on `transport_client`: requests are
+--- answered, and notifications fire `MCPNotify` with the notification's
+--- method and params. Re-applied whenever a new transport is adopted.
+local function hook_messages(entry, transport_client)
+  if not transport_client.set_on_message then
+    return
   end
+  transport_client:set_on_message(function(message)
+    if message.id ~= nil then
+      return answer_server_request(entry, transport_client, message)
+    end
+    if message.method == "notifications/subscriptions/acknowledged" then
+      return
+    end
+    fire_event("MCPNotify", {
+      client_id = entry.id,
+      server = entry.name,
+      method = message.method,
+      params = message.params,
+    })
+  end)
 end
 
 --- Reject every request still in flight when the client gives up, so a
@@ -170,6 +197,8 @@ end
 --- one, so a reconnect attempt that timed out but later resolves late and gets
 --- superseded by a newer attempt does not leak its transport or leave a stale
 --- stream-exit hook that could fire on_drop against a client that has moved on.
+local start_subscription
+
 local function adopt_transport(entry, result)
   local previous = entry.transport_client
   if previous ~= nil and previous ~= result.client then
@@ -177,8 +206,20 @@ local function adopt_transport(entry, result)
   end
   entry.transport_client = result.client
   entry.transport = result.transport
+  entry.era = result.era
+  entry.protocol_version = result.protocol_version
+  entry.description = result.description or {}
+  entry._tool_headers = {}
+  if entry.session then
+    entry.session.transport = result.client
+    entry.session.session_id = result.session_id
+    entry.session.protocol_version = result.protocol_version
+  end
   hook_stream_job(entry, result.client)
-  hook_notifications(entry, result.client)
+  hook_messages(entry, result.client)
+  if entry.era == "modern" then
+    start_subscription(entry)
+  end
 end
 
 --- Coalesce concurrent transport-handshake dials against a single `entry`.
@@ -186,14 +227,14 @@ end
 --- Both handshake-dialing paths -- reconnect (attempt_reconnect, driven by an
 --- unexpected stream drop) and session-reinitialize (make_reinitializer,
 --- driven by a session-scoped 404) -- go through here rather than calling
---- detect.connect directly. A server restart can trigger both at once (it
+--- dial directly. A server restart can trigger both at once (it
 --- kills the legacy SSE stream Job and also 404s the next request), and
 --- without coordination they would race two independent handshakes against
 --- the same entry, leaking whichever transport lost.
 ---
 --- Single-flight per entry: `entry._handshake` is a list of waiter callbacks
 --- while a dial is in flight, nil when idle. The first caller dispatches the
---- one physical detect.connect; any caller that arrives while it is in flight
+--- one physical dial; any caller that arrives while it is in flight
 --- joins the queue instead of starting a second dial. When the dial resolves,
 --- the queue is captured and cleared, adopt_transport is applied exactly once,
 --- and every waiter is notified with the same `(result, err)` to run its own
@@ -224,12 +265,7 @@ local function perform_handshake(entry, on_settled)
   local my_gen = entry._handshake_gen
   entry._handshake = { on_settled }
 
-  detect.connect({
-    url = entry.config.url,
-    request = build_initialize_request(entry.config),
-    headers = entry.config.headers,
-    timeout = entry.config.timeout,
-  }, function(result, err)
+  dial(entry.config, function(result, err)
     -- Capture and clear the queue first so a follow-up trigger fired from a
     -- waiter's callback starts a fresh cycle rather than joining this one.
     local waiters = entry._handshake or {}
@@ -262,7 +298,7 @@ end
 --- either schedules the next bounded attempt or exhausts to disconnected.
 ---
 --- The attempt is bounded by a timeout: a server that accepts the connection
---- but never completes the handshake would otherwise leave detect.connect
+--- but never completes the handshake would otherwise leave the dial
 --- pending forever, wedging the machine in `reconnecting`. On timeout we
 --- count the attempt as failed AND actively abandon the wedged dial (see
 --- abandon_wedged_dial) so the single-flight slot does not stay stuck
@@ -334,13 +370,8 @@ local function attempt_reconnect(entry)
         entry.reconnect:on_drop()
         return
       end
-      -- adopt_transport already ran in perform_handshake; converge the
-      -- session onto the new transport and tell the machine we are
-      -- connected again.
-      entry.session.transport = result.client
-      if result.session_id then
-        entry.session.session_id = result.session_id
-      end
+      -- adopt_transport already ran in perform_handshake (and moved the
+      -- session onto the new transport); tell the machine we are connected.
       entry.reconnect:on_connected()
     end)
   end)
@@ -406,6 +437,7 @@ local function make_reinitializer(entry)
         on_done(nil, {
           transport = result.client,
           session_id = result.session_id,
+          protocol_version = result.protocol_version,
         })
       end)
     end)
@@ -483,6 +515,241 @@ local function ensure_fresh_token(entry, proceed, on_error)
   end)
 end
 
+local MAX_INPUT_ROUNDS = 10
+local LISTEN_RETRY_MS = 2000
+local LISTEN_MAX_RETRIES = 5
+
+--- HTTP field-name token characters (RFC 9110 `tchar`).
+local TCHAR_PATTERN = "^[%w!#$%%&'*+%-.^_`|~]+$"
+local HEADER_PARAM_TYPES = { string = true, integer = true, boolean = true }
+
+--- Count every `x-mcp-header` annotation anywhere in a schema. A table under
+--- that key is a property named "x-mcp-header", not an annotation.
+local function count_annotations(node)
+  if type(node) ~= "table" then
+    return 0
+  end
+  local annotation = node["x-mcp-header"]
+  local count = (annotation ~= nil and type(annotation) ~= "table") and 1 or 0
+  for _, child in pairs(node) do
+    count = count + count_annotations(child)
+  end
+  return count
+end
+
+--- The `Mcp-Param-*` headers a tool's `inputSchema` declares, as
+--- `{ path = string[], header = string }` entries.
+--- @return table[]|nil specs, string|nil err  err when an annotation is invalid
+local function tool_header_specs(input_schema)
+  if type(input_schema) ~= "table" then
+    return {}, nil
+  end
+  local specs, seen = {}, {}
+  local err
+
+  local function walk(schema, path)
+    for name, prop in pairs(type(schema.properties) == "table" and schema.properties or {}) do
+      if type(prop) == "table" then
+        local prop_path = vim.list_extend(vim.deepcopy(path), { name })
+        local annotation = prop["x-mcp-header"]
+        if annotation ~= nil and type(annotation) ~= "table" then
+          if type(annotation) ~= "string" or not annotation:match(TCHAR_PATTERN) then
+            err = err or string.format("parameter %q has an invalid x-mcp-header name", name)
+          elseif seen[annotation:lower()] then
+            err = err or string.format("x-mcp-header %q is declared twice", annotation)
+          elseif not HEADER_PARAM_TYPES[prop.type] then
+            err = err or string.format("parameter %q is not a string, integer, or boolean", name)
+          else
+            seen[annotation:lower()] = true
+            table.insert(specs, { path = prop_path, header = "Mcp-Param-" .. annotation })
+          end
+        end
+        walk(prop, prop_path)
+      end
+    end
+  end
+
+  walk(input_schema, {})
+  if not err and #specs ~= count_annotations(input_schema) then
+    err = "an x-mcp-header annotation is not reachable through properties alone"
+  end
+  if err then
+    return nil, err
+  end
+  return specs, nil
+end
+
+--- Drop tools whose `x-mcp-header` annotations are invalid from a modern
+--- Streamable HTTP `tools/list` result, and remember each remaining tool's
+--- header mirroring for `tools/call`.
+local function filter_tool_listing(entry, result)
+  if entry.transport ~= "streamable_http" or type(result.tools) ~= "table" then
+    return
+  end
+  local kept = {}
+  for _, tool in ipairs(result.tools) do
+    local specs, err = tool_header_specs(type(tool) == "table" and tool.inputSchema or nil)
+    if specs then
+      entry._tool_headers[tool.name] = specs
+      table.insert(kept, tool)
+    else
+      vim.schedule(function()
+        vim.notify(
+          string.format("mcp-client: server %q: ignoring tool %q: %s", entry.name, tostring(tool.name), err),
+          vim.log.levels.WARN
+        )
+      end)
+    end
+  end
+  result.tools = kept
+end
+
+local function header_value(value)
+  if type(value) == "boolean" then
+    return value and "true" or "false"
+  end
+  if type(value) == "number" then
+    return string.format("%d", value)
+  end
+  return transport_util.encode_header_value(value)
+end
+
+--- `Mcp-Param-*` headers for a modern `tools/call`, from its arguments.
+local function tool_call_headers(entry, message)
+  if message.method ~= "tools/call" or type(message.params) ~= "table" then
+    return nil
+  end
+  local specs = entry._tool_headers[message.params.name]
+  if not specs then
+    return nil
+  end
+  local headers = {}
+  for _, spec in ipairs(specs) do
+    local value = message.params.arguments
+    for _, key in ipairs(spec.path) do
+      value = type(value) == "table" and value[key] or nil
+    end
+    if value ~= nil and value ~= vim.NIL then
+      headers[spec.header] = header_value(value)
+    end
+  end
+  return headers
+end
+
+--- Send a request to a modern server: declare the protocol revision and
+--- client capabilities in `_meta`, mirror tool parameters into headers, and
+--- run the multi round-trip loop -- an `input_required` result is answered
+--- through the configured handlers and the request is retried with a new id,
+--- the `inputResponses`, and the echoed `requestState` until it completes.
+local function send_modern(entry, message, callback, round, header_retry)
+  local transport = entry.transport_client
+  local decorated = protocol.with_meta(message, entry.config, entry.protocol_version)
+  transport:request(decorated, function(err, envelope, response)
+    local rpc_error = type(envelope) == "table" and envelope.error or nil
+    if
+      type(rpc_error) == "table"
+      and rpc_error.code == protocol.ERROR.HEADER_MISMATCH
+      and message.method == "tools/call"
+      and not header_retry
+    then
+      -- The tool's header annotations may have changed: relist, then retry once.
+      return rpc.list_all(entry.object, "tools/list", "tools", function()
+        send_modern(entry, message, callback, round, true)
+      end)
+    end
+    if err then
+      return callback(err, envelope, response)
+    end
+
+    local result = type(envelope) == "table" and envelope.result or nil
+    local result_type = type(result) == "table" and result.resultType or "complete"
+    if result_type == "complete" then
+      if message.method == "tools/list" then
+        filter_tool_listing(entry, result)
+      end
+      return callback(nil, envelope, response)
+    end
+    if result_type ~= "input_required" then
+      return callback(
+        string.format("server returned unrecognized resultType %q", tostring(result_type)),
+        envelope,
+        response
+      )
+    end
+    if round >= MAX_INPUT_ROUNDS then
+      return callback(string.format("server still required input after %d rounds", round), envelope, response)
+    end
+
+    handlers.resolve_input_requests(
+      entry.config.handlers,
+      result.inputRequests,
+      { server = entry.name },
+      function(input_err, responses)
+        if input_err then
+          return callback(input_err, envelope, response)
+        end
+        local params = vim.tbl_extend("force", {}, message.params or {})
+        params.inputResponses = next(responses) ~= nil and responses or nil
+        params.requestState = result.requestState
+        local retry = vim.tbl_extend("force", {}, message, { id = rpc.next_id(), params = params })
+        send_modern(entry, retry, callback, round + 1, header_retry)
+      end
+    )
+  end, { headers = tool_call_headers(entry, message) })
+end
+
+local function send(entry, message, callback)
+  if entry.era == "modern" then
+    return send_modern(entry, message, callback, 0, false)
+  end
+  entry.session:request(message, callback)
+end
+
+--- Modern servers deliver list-change notifications only on a
+--- `subscriptions/listen` stream. Open one for every list the server says
+--- can change; reopen it (with growing delay, a bounded number of times) if
+--- the stream drops without the server ending it.
+function start_subscription(entry, attempt)
+  local capabilities = entry.description.capabilities or {}
+  local filter = {}
+  for key, capability in pairs({
+    toolsListChanged = "tools",
+    promptsListChanged = "prompts",
+    resourcesListChanged = "resources",
+  }) do
+    if type(capabilities[capability]) == "table" and capabilities[capability].listChanged then
+      filter[key] = true
+    end
+  end
+  if next(filter) == nil then
+    return
+  end
+
+  local transport = entry.transport_client
+  local message = protocol.with_meta({
+    jsonrpc = "2.0",
+    id = rpc.next_id(),
+    method = "subscriptions/listen",
+    params = { notifications = filter },
+  }, entry.config, entry.protocol_version)
+
+  transport:request(message, function(_, envelope)
+    -- A response (success or error) means the server ended the subscription.
+    if envelope ~= nil or entry._closed or entry.transport_client ~= transport then
+      return
+    end
+    attempt = (attempt or 0) + 1
+    if attempt > LISTEN_MAX_RETRIES then
+      return
+    end
+    vim.defer_fn(function()
+      if not entry._closed and entry.transport_client == transport then
+        start_subscription(entry, attempt)
+      end
+    end, LISTEN_RETRY_MS * attempt)
+  end, { long_lived = true })
+end
+
 --- Headers whose value is credential material and must never be exposed in
 --- cleartext through the public client object.
 local REDACTED_HEADER_KEYS = {
@@ -530,14 +797,36 @@ local function make_client_object(entry)
   -- see the current transport (after a transparent reconnect/reinitialize)
   -- and a freshly redacted config (after a transparent token refresh),
   -- rather than a value frozen at construction time.
+  local live_fields = {
+    transport = function()
+      return entry.transport
+    end,
+    era = function()
+      return entry.era
+    end,
+    protocol_version = function()
+      return entry.protocol_version
+    end,
+    server_info = function()
+      return entry.description.server_info
+    end,
+    server_capabilities = function()
+      return entry.description.capabilities
+    end,
+    instructions = function()
+      return entry.description.instructions
+    end,
+    pid = function()
+      return entry.transport_client and entry.transport_client.pid
+    end,
+    config = function()
+      return build_exposed_config(entry)
+    end,
+  }
   setmetatable(obj, {
     __index = function(_, key)
-      if key == "transport" then
-        return entry.transport
-      end
-      if key == "config" then
-        return build_exposed_config(entry)
-      end
+      local field = live_fields[key]
+      return field and field() or nil
     end,
   })
 
@@ -546,6 +835,17 @@ local function make_client_object(entry)
   -- self and close over `entry` for their state.
   function obj:is_stopped()
     return entry.reconnect:state() == "disconnected"
+  end
+
+  --- "connected" | "reconnecting" | "disconnected"
+  function obj:state()
+    return entry.reconnect:state()
+  end
+
+  --- The most recent stderr lines of a stdio server (empty for HTTP).
+  function obj:stderr()
+    local transport = entry.transport_client
+    return transport and transport.stderr_tail and transport:stderr_tail() or {}
   end
 
   --- Send a JSON-RPC request. Tracks it as in-flight so it can be failed
@@ -580,7 +880,7 @@ local function make_client_object(entry)
     -- Refresh an expired configured token transparently (at most once) before
     -- dispatching; with no token_store this is an immediate pass-through.
     ensure_fresh_token(entry, function()
-      entry.session:request(rpc_message, settle)
+      send(entry, rpc_message, settle)
     end, function(refresh_err)
       settle(refresh_err, nil, nil)
     end)
@@ -663,23 +963,19 @@ local function do_connect(config, opts, store)
     token_store.apply_to_headers(config.headers, store:load())
   end
 
-  -- Fail-closed gate: before opening any connection, refuse a non-localhost
-  -- server that lacks TLS (https://) or a configured credential. Must run
-  -- before detect.connect so we never emit an unauthenticated request to a
-  -- non-localhost server.
-  local allowed, refusal = tls.check_connection_allowed(config.url, {
-    has_token = config.headers ~= nil and config.headers["Authorization"] ~= nil,
-  })
-  if not allowed then
-    return opts.on_connect(nil, refusal)
+  -- Fail-closed gate: before opening any HTTP connection, refuse a
+  -- non-localhost server that lacks TLS (https://) or a configured
+  -- credential, so we never emit an unauthenticated request to one.
+  if config.url then
+    local allowed, refusal = tls.check_connection_allowed(config.url, {
+      has_token = config.headers ~= nil and config.headers["Authorization"] ~= nil,
+    })
+    if not allowed then
+      return opts.on_connect(nil, refusal)
+    end
   end
 
-  detect.connect({
-    url = config.url,
-    request = build_initialize_request(config),
-    headers = config.headers,
-    timeout = config.timeout,
-  }, function(result, err)
+  dial(config, function(result, err)
     if err then
       return opts.on_connect(nil, err)
     end
@@ -689,8 +985,8 @@ local function do_connect(config, opts, store)
       id = id,
       name = config.name or id,
       config = config,
-      transport = result.transport,
-      transport_client = result.client,
+      description = {},
+      _tool_headers = {},
       -- The optional OAuth identity: when set, obj:request consults it to
       -- transparently refresh an expired token before dispatching.
       _token_store = store,
@@ -727,41 +1023,39 @@ local function do_connect(config, opts, store)
         attempt_reconnect(entry)
       end,
       on_connected = function()
-        fire_event("MCPAttach", id)
+        fire_event("MCPAttach", { client_id = id, server = entry.name })
       end,
       on_disconnected = function()
         fail_in_flight(entry, "client disconnected: reconnect attempts exhausted")
-        fire_event("MCPDetach", id)
+        fire_event("MCPDetach", { client_id = id, server = entry.name })
       end,
     }))
 
     entry.session = Session.new({
       transport = result.client,
       session_id = result.session_id,
-      protocol_version = PROTOCOL_VERSION,
+      protocol_version = result.protocol_version,
       reinitialize = make_reinitializer(entry),
     })
 
     make_entry_methods(entry)
-    hook_stream_job(entry, result.client)
-    hook_notifications(entry, result.client)
-
     local client_object = make_client_object(entry)
     entry.object = client_object
+    adopt_transport(entry, result)
     registry[id] = entry
 
     -- Initial connect is a transition into `connected`; fire MCPAttach.
-    fire_event("MCPAttach", id)
+    fire_event("MCPAttach", { client_id = id, server = entry.name })
 
     opts.on_connect(client_object, nil)
   end)
 end
 
---- Connect to a server and register a managed client. Mirrors init.connect's
---- config/opts split, but returns the richer, reconnecting client object.
+--- Connect to a server and register a managed client.
 ---
---- @param config table  url, name, client_version, capabilities, headers,
----   timeout, an optional `reconnect` sub-table (initial_delay, max_delay,
+--- @param config table  `url` (HTTP) or `command` (+ `args`, `env`, `cwd`;
+---   stdio), name, client_version, capabilities, handlers, headers, timeout,
+---   discover_timeout (stdio), an optional `reconnect` sub-table (initial_delay, max_delay,
 ---   growth_factor, max_attempts) forwarded to the machine, and an optional
 ---   `auth` sub-table `{ token_store = <TokenStore> }`: when present, the stored
 ---   bearer token is attached to every request and refreshed transparently on
@@ -770,7 +1064,9 @@ end
 --- @param opts table  on_connect(client|nil, err|nil)
 function M.connect(config, opts)
   assert(type(config) == "table", "config table is required")
-  assert(type(config.url) == "string" and config.url ~= "", "config.url is required")
+  local has_url = type(config.url) == "string" and config.url ~= ""
+  local has_command = type(config.command) == "string" and config.command ~= ""
+  assert(has_url ~= has_command, "exactly one of config.url or config.command is required")
   opts = opts or {}
   assert(type(opts.on_connect) == "function", "opts.on_connect is required")
 

@@ -37,12 +37,10 @@ function LegacySse.new(opts)
   }, LegacySse)
 end
 
---- Register a handler for server-originated messages that do not match a
---- pending request -- i.e. server notifications (a `method`, no id we sent).
---- The client layer wires this to fire an `MCPNotify` autocmd. Optional; if
---- unset such messages are simply ignored.
-function LegacySse:set_on_notification(fn)
-  self._on_notification = fn
+--- Handler for every server message that is not a response to one of our
+--- requests: notifications and server-to-client requests.
+function LegacySse:set_on_message(fn)
+  self._on_message = fn
 end
 
 --- The most recent SSE `retry:` hint (ms) the server has sent on this
@@ -52,29 +50,20 @@ function LegacySse:get_retry_hint()
   return self._retry_hint
 end
 
---- Route an incoming SSE event to whichever pending request its JSON-RPC
---- `id` matches (if any); otherwise, if it carries a `method`, treat it as a
---- server-originated notification and hand it to the notification handler.
+--- Route an incoming message: a response (no `method`) resolves the pending
+--- request with its id; anything carrying a `method` -- even with an id that
+--- happens to equal one of ours -- is a server notification or request.
 function LegacySse:_handle_message(decoded)
-  if decoded.id ~= nil and self._pending[decoded.id] then
-    local callback = self._pending[decoded.id]
-    self._pending[decoded.id] = nil
-    if decoded.error then
-      callback(decoded.error.message or "server returned an error", nil, decoded)
-    else
-      -- Pass the full decoded JSON-RPC object as the result, matching
-      -- streamable_http's `callback(nil, decoded, response)` shape so the
-      -- session/client layer sees one transport-agnostic result form
-      -- (`result.result` is the JSON-RPC `result` field either way).
-      callback(nil, decoded, decoded)
+  if decoded.method ~= nil then
+    if self._on_message then
+      self._on_message(decoded)
     end
     return
   end
-
-  -- No matching pending request. A message with a `method` is a
-  -- server-originated notification/request; surface it to the client layer.
-  if decoded.method ~= nil and self._on_notification then
-    self._on_notification(decoded)
+  local callback = decoded.id ~= nil and self._pending[decoded.id]
+  if callback then
+    self._pending[decoded.id] = nil
+    callback(transport_util.rpc_error_message(decoded), decoded, nil)
   end
 end
 
@@ -120,7 +109,6 @@ function LegacySse:request(rpc_message, callback)
   curl.post(self.endpoint, {
     headers = vim.tbl_extend("force", { ["Content-Type"] = "application/json" }, self.headers),
     body = vim.json.encode(rpc_message),
-    timeout = 30000,
     callback = vim.schedule_wrap(function(response)
       if not response or response.status < 200 or response.status >= 300 then
         if rpc_message.id ~= nil then
@@ -146,22 +134,37 @@ function LegacySse:request(rpc_message, callback)
       if rpc_message.id ~= nil then
         self._pending[rpc_message.id] = nil
       end
-      callback(err.message or "request failed", nil, nil)
+      callback(transport_util.describe_curl_error(err), nil, nil)
     end),
   })
 end
 
-function LegacySse:notify(rpc_message)
+--- POST a message that expects no JSON-RPC reply. `on_done(err)` fires once
+--- the server has accepted it.
+function LegacySse:notify(rpc_message, on_done)
+  on_done = on_done or function() end
   if self._closed then
-    return
+    return on_done("transport is closed")
   end
   curl.post(self.endpoint, {
     headers = vim.tbl_extend("force", { ["Content-Type"] = "application/json" }, self.headers),
     body = vim.json.encode(rpc_message),
-    timeout = 30000,
-    callback = function() end,
-    on_error = function() end,
+    raw = transport_util.max_time_args(30000),
+    callback = vim.schedule_wrap(function(response)
+      if response.status < 200 or response.status >= 300 then
+        return on_done(string.format("server returned status %d posting to legacy endpoint", response.status))
+      end
+      on_done(nil)
+    end),
+    on_error = vim.schedule_wrap(function(err)
+      on_done(transport_util.describe_curl_error(err))
+    end),
   })
+end
+
+--- Answer a server-to-client request.
+function LegacySse:respond(rpc_message)
+  self:notify(rpc_message)
 end
 
 --- Expose the long-lived curl GET Job serving the SSE stream, so the

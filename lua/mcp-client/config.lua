@@ -25,20 +25,20 @@ local M = {}
 --- reporting record -- the live client roster is always re-read from
 --- `client.get_clients()`, never cached here.
 local state = {
-  servers = {}, ---@type table<string, { url: string, token_store: table|nil, connect_config: table|nil }>
+  servers = {}, ---@type table<string, { url: string|nil, command: string|nil, token_store: table|nil, connect_config: table|nil }>
   native_servers = {}, ---@type string[]
 }
 
 --- Public, read-only view of the setup record for health.lua. Per-server
---- entries expose only `{url, token_store}` -- never `connect_config`, which
+--- entries expose only `{url, command, token_store}` -- never `connect_config`, which
 --- can carry a plaintext credential in `.headers`. Returns a fresh table
 --- (never the live internal one) so a caller cannot reach the withheld field
 --- by walking the returned object's metatable/internals either.
---- @return table { servers = table<string, {url, token_store}>, native_servers = string[] }
+--- @return table { servers = table<string, {url, command, token_store}>, native_servers = string[] }
 function M.state()
   local servers = {}
   for name, record in pairs(state.servers) do
-    servers[name] = { url = record.url, token_store = record.token_store }
+    servers[name] = { url = record.url, command = record.command, token_store = record.token_store }
   end
   return { servers = servers, native_servers = state.native_servers }
 end
@@ -47,13 +47,13 @@ end
 --- Never exposes `connect_config` -- see `M._connect_config` below for the
 --- internal-only accessor that does.
 --- @param name string
---- @return table|nil { url, token_store }
+--- @return table|nil { url, command, token_store }
 function M.get_hub(name)
   local record = state.servers[name]
   if record == nil then
     return nil
   end
-  return { url = record.url, token_store = record.token_store }
+  return { url = record.url, command = record.command, token_store = record.token_store }
 end
 
 --- Internal-only accessor for the exact table `connect_server` built and
@@ -117,7 +117,7 @@ end
 
 --- Resolve the TokenStore for one server:
 ---   * a caller-supplied `config.auth.token_store` is always honored as-is;
----   * a localhost server gets none (nothing to authenticate);
+---   * a stdio or localhost server gets none (nothing to authenticate);
 ---   * a non-localhost server with no supplied store gets one auto-constructed,
 ---     keyed by server name, on the backend/data_home from `opts.token_store`
 ---     (defaults to auto-detected keychain/file).
@@ -133,7 +133,7 @@ local function resolve_token_store(name, server_config, store_opts)
   if supplied then
     return supplied
   end
-  if tls.is_localhost(server_config.url) then
+  if not server_config.url or tls.is_localhost(server_config.url) then
     return nil
   end
   store_opts = store_opts or {}
@@ -153,23 +153,31 @@ end
 --- in the state table, and surfaces a connect error through an actionable
 --- notification -- including, for the fail-closed no-token case, the
 --- concrete steps the user can take to authenticate.
-local function connect_server(name, server_config, store_opts)
+local function connect_server(name, server_config, opts)
+  local has_url = type(server_config.url) == "string" and server_config.url ~= ""
+  local has_command = type(server_config.command) == "string" and server_config.command ~= ""
   assert(
-    type(server_config.url) == "string" and server_config.url ~= "",
-    string.format("setup: server %q requires a `url`", tostring(name))
+    has_url ~= has_command,
+    string.format("setup: server %q requires exactly one of `url` or `command`", tostring(name))
   )
 
-  local store = resolve_token_store(name, server_config, store_opts)
+  local store = resolve_token_store(name, server_config, opts.token_store)
 
   -- Thread the store into `auth` without clobbering other auth fields the
-  -- caller set.
+  -- caller set; per-server handlers override the setup-wide ones key by key.
   local connect_config = vim.tbl_extend("force", {}, server_config)
   connect_config.name = server_config.name or name
+  connect_config.handlers = vim.tbl_extend("force", opts.handlers or {}, server_config.handlers or {})
   if store then
     connect_config.auth = vim.tbl_extend("force", server_config.auth or {}, { token_store = store })
   end
 
-  state.servers[name] = { url = server_config.url, token_store = store, connect_config = connect_config }
+  state.servers[name] = {
+    url = server_config.url,
+    command = server_config.command,
+    token_store = store,
+    connect_config = connect_config,
+  }
 
   mcp_client.connect(connect_config, {
     on_connect = function(_client_object, err)
@@ -177,7 +185,7 @@ local function connect_server(name, server_config, store_opts)
         local msg = string.format("mcp-client: failed to connect server %q: %s", name, tostring(err))
         -- Append a concrete next step for the two credential-related
         -- failure shapes, rather than leaving the user with a dead end.
-        if not tls.is_localhost(server_config.url) and store then
+        if store and has_url and not tls.is_localhost(server_config.url) then
           local auth_status = store:status()
           if not auth_status.has_token then
             -- Fail-closed refusal: no credential configured at all.
@@ -228,9 +236,9 @@ end
 --- `require("mcp-client").setup(opts)`.
 ---
 --- @param opts table|nil
----   server            (table|nil)  a single server config (shorthand): { url, name?,
----                  headers?, reconnect?, auth?, ... } -- same shape client.connect's
----                  `config` accepts.
+---   server            (table|nil)  a single server config (shorthand): { url | command,
+---                  args?, env?, cwd?, name?, headers?, reconnect?, auth?, handlers?, ... }
+---                  -- same shape client.connect's `config` accepts.
 ---   servers           (table|nil)  a map of `name -> server config` for one or more servers.
 ---                  `name` defaults to the map key.
 ---   native_servers (table|nil)  a map of `name -> native server config`
@@ -242,6 +250,9 @@ end
 ---                  `auth.token_store`. `key`, if set, is a shared prefix namespaced
 ---                  per-server (`"<key>:<server name>"`), never a verbatim override -- it
 ---                  cannot be used to collapse two servers onto the same stored token.
+---   handlers       (table|nil)  client-feature handlers for every server (roots,
+---                  elicitation, sampling); see `mcp-client.handlers`. A server's own
+---                  `handlers` override these key by key.
 function M.setup(opts)
   opts = opts or {}
   assert(type(opts) == "table", "setup: opts must be a table")
@@ -271,7 +282,7 @@ function M.setup(opts)
 
   -- Remote servers, each with its resolved TokenStore.
   for name, server_config in pairs(collect_servers(opts)) do
-    connect_server(name, server_config, opts.token_store)
+    connect_server(name, server_config, opts)
   end
 
   -- Register :MCPAuth once state is populated so its no-argument

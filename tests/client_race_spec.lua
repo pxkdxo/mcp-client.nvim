@@ -13,7 +13,7 @@
 
 --- A controllable transport-client double implementing the common transport
 --- interface the client layer hooks (request/notify/close/get_stream_job/
---- set_on_notification/get_retry_hint). `request` routes to a per-instance
+--- set_on_message/get_retry_hint). `request` routes to a per-instance
 --- `responder(msg)` returning (err, result, response); if no responder is set
 --- it never replies, modeling an in-flight request that outlives a reconnect
 --- exhaustion.
@@ -45,7 +45,7 @@ local function transport_double(opts)
     get_stream_job = function()
       return self._job
     end,
-    set_on_notification = function() end,
+    set_on_message = function() end,
     get_retry_hint = function()
       return nil
     end,

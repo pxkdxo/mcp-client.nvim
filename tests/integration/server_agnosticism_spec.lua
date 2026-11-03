@@ -259,7 +259,10 @@ describe("resilience: connection loss is a visible failure, never a hang", funct
     local HttpDouble = require("tests.helpers.http_double")
     local double = HttpDouble.new({
       on_request = function()
-        return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
+        return {
+          status = 200,
+          body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = { protocolVersion = "2025-11-25" } }),
+        }
       end,
     })
     local got

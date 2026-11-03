@@ -67,6 +67,68 @@ end
 
 M.SseParser = SseParser
 
+--- Every JSON-RPC message in a complete response body: the body itself when
+--- it is a JSON object, else the data of each SSE event.
+--- @param body string|nil
+--- @return table[] messages
+function M.decode_messages(body)
+  if body == nil or body == "" then
+    return {}
+  end
+  local ok, decoded = pcall(vim.json.decode, body)
+  if ok and type(decoded) == "table" then
+    return { decoded }
+  end
+  local messages = {}
+  local parser = SseParser.new(function(event)
+    local event_ok, message = pcall(vim.json.decode, event.data)
+    if event_ok and type(message) == "table" then
+      table.insert(messages, message)
+    end
+  end)
+  for line in (body .. "\n\n"):gmatch("([^\n]*)\n") do
+    parser:feed_line((line:gsub("\r$", "")))
+  end
+  return messages
+end
+
+--- The message text of a JSON-RPC error envelope, or nil.
+function M.rpc_error_message(decoded)
+  if type(decoded) == "table" and type(decoded.error) == "table" then
+    return tostring(decoded.error.message or vim.inspect(decoded.error))
+  end
+  return nil
+end
+
+--- A readable error for a curl invocation that failed outright.
+function M.describe_curl_error(curl_err)
+  local message = type(curl_err) == "table" and (curl_err.message or vim.inspect(curl_err)) or tostring(curl_err)
+  if message:find("Failed to connect", 1, true) or message:find("Connection refused", 1, true) then
+    return "could not connect to server: " .. message
+  end
+  return "request to server failed: " .. message
+end
+
+--- curl arguments bounding a whole request to `ms` milliseconds.
+--- (plenary.curl ignores its own `timeout` option for asynchronous requests.)
+function M.max_time_args(ms)
+  return { "--max-time", string.format("%.3f", ms / 1000) }
+end
+
+--- Encode a value for an `Mcp-Name` / `Mcp-Param-*` header: verbatim when it
+--- is plain visible ASCII without surrounding whitespace, else the
+--- `=?base64?...?=` sentinel form. A plain value that itself looks like the
+--- sentinel is encoded too, so the two forms can never be confused.
+function M.encode_header_value(value)
+  local text = tostring(value)
+  local plain = text:match("^[\33-\126][\32-\126]*$") ~= nil and text:match("%s$") == nil
+  local looks_encoded = text:sub(1, 9) == "=?base64?" and text:sub(-2) == "?="
+  if plain and not looks_encoded then
+    return text
+  end
+  return "=?base64?" .. vim.base64.encode(text) .. "?="
+end
+
 --- Decode a JSON-RPC message from a complete (non-streaming) SSE-framed
 --- response body -- the Streamable HTTP spec's other sanctioned response
 --- mode: a server may answer a POST with a direct `application/json` body

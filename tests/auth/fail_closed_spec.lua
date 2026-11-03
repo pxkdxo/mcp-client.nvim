@@ -16,6 +16,7 @@ local refresh = require("mcp-client.auth.refresh")
 local client = require("mcp-client.client")
 
 local HttpDouble = require("tests.helpers.http_double")
+local legacy_handshake = require("tests.helpers.legacy_handshake")
 local wait_for = require("tests.helpers.wait")
 
 describe("transport.tls fail-closed gate", function()
@@ -131,11 +132,8 @@ describe("client.connect enforces the fail-closed gate", function()
 
   it("allows a localhost server with no TLS and no auth (unaffected by the gate)", function()
     local double = HttpDouble.new({
-      on_request = function()
-        return {
-          status = 200,
-          body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = { capabilities = {} } }),
-        }
+      on_request = function(_, _, rest)
+        return legacy_handshake(vim.json.decode(rest))
       end,
     })
 
@@ -418,9 +416,8 @@ describe("client transparent token refresh (expired -> refresh -> retry)", funct
               -- The very first request must already carry the refreshed
               -- token, not the expired one from when connect() was called.
               seen_auth_on_initialize = head and head:match("[Aa]uthorization:%s*([^\r\n]+)")
-              return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
             end
-            return { status = 404, body = "" }
+            return legacy_handshake(decoded) or { status = 404, body = "" }
           end
           return { status = 404, body = "" }
         end,
@@ -469,8 +466,9 @@ describe("client transparent token refresh (expired -> refresh -> retry)", funct
         end
         if method == "POST" and path == "/mcp" then
           local ok, decoded = pcall(vim.json.decode, rest)
-          if ok and decoded.method == "initialize" then
-            return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
+          local handshake = ok and legacy_handshake(decoded)
+          if handshake then
+            return handshake
           end
           -- A ping: record the Authorization it carried so we can prove it
           -- used the refreshed token, not the expired one.
@@ -540,7 +538,10 @@ describe("client transparent token refresh (expired -> refresh -> retry)", funct
             if ok and decoded.method == "initialize" then
               initialize_attempts = initialize_attempts + 1
             end
-            return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
+            return {
+              status = 200,
+              body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = { protocolVersion = "2025-11-25" } }),
+            }
           end
           return { status = 404, body = "" }
         end,
@@ -590,8 +591,9 @@ describe("client transparent token refresh (expired -> refresh -> retry)", funct
         end
         if method == "POST" and path == "/mcp" then
           local ok, decoded = pcall(vim.json.decode, rest)
-          if ok and decoded.method == "initialize" then
-            return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
+          local handshake = ok and legacy_handshake(decoded)
+          if handshake then
+            return handshake
           end
           return {
             status = 200,
@@ -700,8 +702,9 @@ describe("client concurrent refresh coalescing (single-flight)", function()
         end
         if method == "POST" and path == "/mcp" then
           local ok, decoded = pcall(vim.json.decode, rest)
-          if ok and decoded.method == "initialize" then
-            return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
+          local handshake = ok and legacy_handshake(decoded)
+          if handshake then
+            return handshake
           end
           ping_replies = ping_replies + 1
           return {
@@ -799,7 +802,10 @@ describe("bearer attachment on the wire (happy path)", function()
       on_request = function(method, path, rest, head)
         local auth = head and head:match("[Aa]uthorization:%s*([^\r\n]+)")
         table.insert(seen_auth, auth)
-        return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
+        return {
+          status = 200,
+          body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = { protocolVersion = "2025-11-25" } }),
+        }
       end,
     })
 
@@ -832,7 +838,10 @@ describe("bearer attachment on the wire (happy path)", function()
     double = HttpDouble.new({
       on_request = function(method, path, rest, head)
         table.insert(seen_auth, head and head:match("[Aa]uthorization:%s*([^\r\n]+)"))
-        return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
+        return {
+          status = 200,
+          body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = { protocolVersion = "2025-11-25" } }),
+        }
       end,
     })
 

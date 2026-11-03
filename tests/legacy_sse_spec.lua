@@ -17,7 +17,7 @@ describe("transport.legacy_sse", function()
   it("routes a server-originated notification to the notification handler", function()
     local seen
     local c = LegacySse.new({ stream_url = "http://x/mcp", endpoint = "http://x/messages" })
-    c:set_on_notification(function(msg)
+    c:set_on_message(function(msg)
       seen = msg
     end)
     c:attach_parser()
@@ -28,6 +28,25 @@ describe("transport.legacy_sse", function()
 
     assert.is_not_nil(seen)
     assert.are.equal("notifications/message", seen.method)
+  end)
+
+  it("routes a server request whose id equals a pending request id to the message handler", function()
+    local seen, response
+    local c = LegacySse.new({ stream_url = "http://x/mcp", endpoint = "http://x/messages" })
+    c:set_on_message(function(msg)
+      seen = msg
+    end)
+    c._pending[7] = function(...)
+      response = { ... }
+    end
+    c:attach_parser()
+
+    c:feed_line('data: {"jsonrpc":"2.0","id":7,"method":"roots/list"}')
+    c:feed_line("")
+
+    assert.are.equal("roots/list", seen.method)
+    assert.is_nil(response)
+    assert.is_function(c._pending[7])
   end)
 
   it("captures the most recent SSE retry: hint as a reconnect delay", function()

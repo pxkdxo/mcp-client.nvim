@@ -23,6 +23,45 @@ function ControllableSse:sse_handler(endpoint)
   }
 end
 
+--- An HttpDouble SSE handler that opens a bare stream (no `endpoint` event),
+--- as a legacy Streamable HTTP server's GET stream.
+function ControllableSse:stream_handler()
+  return {
+    status = 200,
+    sse = {},
+    on_stream = function(socket)
+      self._socket = socket
+      self._closed = false
+    end,
+  }
+end
+
+--- Answer a POST to the legacy message endpoint: `initialize` gets an
+--- InitializeResult over the stream; another request gets `on_request(message)`'s
+--- return value (when non-nil) as its result. Always 202s the POST itself.
+function ControllableSse:legacy_post(rest, on_request)
+  local ok, message = pcall(vim.json.decode, rest)
+  if ok and type(message) == "table" then
+    if message.method == "initialize" then
+      self:push_message({
+        jsonrpc = "2.0",
+        id = message.id,
+        result = {
+          protocolVersion = "2024-11-05",
+          capabilities = {},
+          serverInfo = { name = "legacy-sse-test", version = "0.0.1" },
+        },
+      })
+    elseif message.id ~= nil and on_request then
+      local result = on_request(message)
+      if result ~= nil then
+        self:push_message({ jsonrpc = "2.0", id = message.id, result = result })
+      end
+    end
+  end
+  return { status = 202, body = "" }
+end
+
 --- Push a JSON-RPC message to the client over the open SSE stream as a
 --- `message` event.
 function ControllableSse:push_message(msg)

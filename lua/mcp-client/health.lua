@@ -48,8 +48,10 @@ end
 local function report_auth(reporter, name, record, connected)
   local store = record.token_store
   if not store then
-    -- tls.lua exempts localhost from requiring authentication.
-    if tls.is_localhost(record.url) then
+    if record.command then
+      reporter.info(string.format("server %q: stdio, credentials come from its environment", name))
+    elseif tls.is_localhost(record.url) then
+      -- tls.lua exempts localhost from requiring authentication.
       reporter.info(string.format("server %q: localhost, no authentication required", name))
     end
     return true
@@ -114,6 +116,11 @@ local function report_auth(reporter, name, record, connected)
   return true
 end
 
+--- Where a configured server lives: its URL, or its stdio command.
+local function target(record)
+  return record.url or ("stdio: " .. record.command)
+end
+
 --- Report connection + auth status for one configured server.
 local function report_hub(reporter, name, record)
   local obj = live_client(name)
@@ -124,7 +131,7 @@ local function report_hub(reporter, name, record)
         "server %q (%s): not connected -- no client registered. "
           .. "The initial connection failed (check :messages for the reason) or setup() was never called.",
         name,
-        record.url
+        target(record)
       )
     )
     -- Still report auth so the user sees the whole picture for this server.
@@ -137,13 +144,22 @@ local function report_hub(reporter, name, record)
     reporter.error(
       string.format(
         "server %q (%s): disconnected -- reconnect attempts were exhausted. "
-          .. "Check the server is reachable, then restart Neovim or re-run setup().",
+          .. "Check the server is reachable, then run :MCPReconnect.",
         name,
-        record.url
+        target(record)
       )
     )
   else
-    reporter.ok(string.format("server %q (%s): connected", name, record.url))
+    reporter.ok(
+      string.format(
+        "server %q (%s): connected over %s, %s protocol %s",
+        name,
+        target(record),
+        tostring(obj.transport),
+        tostring(obj.era),
+        tostring(obj.protocol_version)
+      )
+    )
   end
 
   report_auth(reporter, name, record, not stopped)
@@ -179,6 +195,17 @@ function M.check(reporter)
   local state = config.state()
 
   reporter.start("mcp-client")
+
+  if pcall(require, "plenary.curl") then
+    reporter.ok("plenary.nvim is installed")
+  else
+    reporter.error("plenary.nvim is not installed; the HTTP transports and OAuth flow need it")
+  end
+  if vim.fn.executable("curl") == 1 then
+    reporter.ok("curl is on PATH")
+  else
+    reporter.error("curl is not on PATH; the HTTP transports and OAuth flow need it")
+  end
 
   reporter.info(
     "Native servers run in-process with full Neovim/Lua privilege (no sandboxing). "

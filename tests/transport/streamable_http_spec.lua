@@ -146,7 +146,10 @@ describe("transport.streamable_http", function()
     double = HttpDouble.new({
       on_request = function()
         request_count = request_count + 1
-        return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
+        return {
+          status = 200,
+          body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = { protocolVersion = "2025-11-25" } }),
+        }
       end,
     })
 

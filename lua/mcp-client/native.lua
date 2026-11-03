@@ -123,10 +123,15 @@ function M.register(config)
   local obj = {
     name = entry.name,
     config = config,
+    transport = "native",
   }
 
   function obj:is_stopped()
     return entry._stopped
+  end
+
+  function obj:state()
+    return entry._stopped and "disconnected" or "connected"
   end
 
   --- `pcall` turns a Lua error raised inside a handler into an

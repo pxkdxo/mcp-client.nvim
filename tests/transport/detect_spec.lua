@@ -1,293 +1,195 @@
 local HttpDouble = require("tests.helpers.http_double")
+local FakeServer = require("tests.helpers.fake_mcp_server")
 local wait_for = require("tests.helpers.wait")
 
 local detect = require("mcp-client.transport.detect")
 
-local INITIALIZE_REQUEST = {
-  jsonrpc = "2.0",
-  id = 1,
-  method = "initialize",
-  params = {
-    protocolVersion = "2025-03-26",
-    capabilities = {},
-    clientInfo = { name = "mcp-client", version = "0.1.0" },
-  },
-}
+local function connect(url)
+  local outcome
+  detect.connect({ url = url, timeout = 2000 }, function(result, err)
+    outcome = { result = result, err = err }
+  end)
+  assert.is_true(wait_for(function()
+    return outcome ~= nil
+  end, 4000))
+  return outcome.result, outcome.err
+end
 
-local function initialize_result_body()
-  return vim.json.encode({
-    jsonrpc = "2.0",
-    id = 1,
-    result = {
-      protocolVersion = "2025-03-26",
-      capabilities = {},
-      serverInfo = { name = "test-server", version = "0.0.1" },
-    },
-  })
+local function header(head, name)
+  return head and head:match("\r\n" .. name .. ":%s*([^\r\n]+)")
 end
 
 describe("transport.detect", function()
-  local double
+  local server, double
 
   after_each(function()
+    if server then
+      server:stop()
+      server = nil
+    end
     if double then
       double:stop()
       double = nil
     end
   end)
 
-  it("uses the streamable_http transport when POST initialize succeeds", function()
-    double = HttpDouble.new({
-      on_request = function(method, path)
-        if method == "POST" and path == "/mcp" then
-          return {
-            status = 200,
-            headers = { ["Content-Type"] = "application/json", ["Mcp-Session-Id"] = "session-abc" },
-            body = initialize_result_body(),
-          }
-        end
-        return { status = 404, body = "" }
-      end,
-    })
+  it("connects to a modern server with server/discover and no handshake", function()
+    server = FakeServer.new({ era = "modern" })
+    local result, err = connect(server.url)
 
-    local result, err
-    local done = false
-    detect.connect({
-      url = double.url .. "/mcp",
-      request = INITIALIZE_REQUEST,
-      timeout = 2000,
-    }, function(r, e)
-      result, err = r, e
-      done = true
-    end)
-
-    assert.is_true(wait_for(function()
-      return done
-    end))
     assert.is_nil(err)
-    assert.is_not_nil(result)
+    assert.are.equal("modern", result.era)
     assert.are.equal("streamable_http", result.transport)
-    assert.are.equal("session-abc", result.session_id)
+    assert.are.equal("2026-07-28", result.protocol_version)
+    assert.are.equal("fake-modern", result.description.server_info.name)
+    assert.are.same({ "server/discover" }, server:methods())
 
+    local discover = server:last("server/discover")
+    assert.are.equal("2026-07-28", header(discover.head, "MCP%-Protocol%-Version"))
+    assert.are.equal("server/discover", header(discover.head, "Mcp%-Method"))
+    local meta = discover.message.params._meta
+    assert.are.equal("2026-07-28", meta["io.modelcontextprotocol/protocolVersion"])
+    assert.are.equal("mcp-client.nvim", meta["io.modelcontextprotocol/clientInfo"].name)
+    assert.is_table(meta["io.modelcontextprotocol/clientCapabilities"].elicitation)
     result.client:close()
   end)
 
-  it("regression: sends MCP-Protocol-Version on requests after a successful streamable_http handshake", function()
-    local seen_header
-    double = HttpDouble.new({
-      on_request = function(method, path, rest, head)
-        if method == "POST" and path == "/mcp" then
-          local ok, decoded = pcall(vim.json.decode, rest)
-          if ok and decoded.method == "initialize" then
-            return {
-              status = 200,
-              headers = { ["Content-Type"] = "application/json" },
-              body = initialize_result_body(),
-            }
-          end
-          -- A later request, after the handshake: capture the header
-          -- the real client actually sent.
-          seen_header = head and head:match("[Mm][Cc][Pp]%-[Pp]rotocol%-[Vv]ersion:%s*([^\r\n]+)")
-          return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 2, result = {} }) }
+  it("falls back to the legacy handshake on a legacy Streamable HTTP server", function()
+    server = FakeServer.new({ era = "legacy" })
+    local result, err = connect(server.url)
+
+    assert.is_nil(err)
+    assert.are.equal("legacy", result.era)
+    assert.are.equal("streamable_http", result.transport)
+    assert.are.equal("2025-11-25", result.protocol_version)
+    assert.are.equal("fake-session", result.session_id)
+    -- notifications/initialized is delivered before the connection is handed back.
+    assert.are.same({ "server/discover", "initialize", "notifications/initialized" }, server:methods())
+    assert.are.equal("2025-11-25", server:last("initialize").message.params.protocolVersion)
+
+    local initialized = server:last("notifications/initialized")
+    assert.are.equal("fake-session", header(initialized.head, "Mcp%-Session%-Id"))
+    assert.are.equal("2025-11-25", header(initialized.head, "MCP%-Protocol%-Version"))
+    result.client:close()
+  end)
+
+  it("refuses a legacy server that negotiates a revision this client does not speak", function()
+    server = FakeServer.new({ era = "legacy", legacy_version = "2023-01-01" })
+    local result, err = connect(server.url)
+
+    assert.is_nil(result)
+    assert.matches("unsupported protocol version", err)
+    assert.is_nil(server:last("notifications/initialized"))
+  end)
+
+  for _, status in ipairs({ 400, 404, 405 }) do
+    it("falls back to legacy HTTP+SSE and initializes over it when POST returns " .. status, function()
+      server = FakeServer.new({ era = "legacy_sse", legacy_version = "2024-11-05" })
+      local post_status = status
+      local route = server._route
+      server._route = function(self, method, path, message, head)
+        if path == "/mcp" and method == "POST" then
+          return { status = post_status, body = "" }
         end
-        return { status = 404, body = "" }
-      end,
-    })
+        return route(self, method, path, message, head)
+      end
 
-    local result
-    local done = false
-    detect.connect({
-      url = double.url .. "/mcp",
-      request = INITIALIZE_REQUEST,
-      timeout = 2000,
-    }, function(r, _e)
-      result = r
-      done = true
-    end)
+      local result, err = connect(server.url)
 
-    assert.is_true(wait_for(function()
-      return done
-    end))
-    assert.is_not_nil(result)
-
-    local reply
-    result.client:request({ jsonrpc = "2.0", id = 2, method = "ping", params = {} }, function(_err, r)
-      reply = r
-    end)
-
-    assert.is_true(wait_for(function()
-      return reply ~= nil
-    end))
-    assert.are.equal("2025-03-26", seen_header)
-
-    result.client:close()
-  end)
-
-  for _, fallback_status in ipairs({ 400, 404, 405 }) do
-    it("falls back to legacy_sse when POST returns " .. fallback_status, function()
-      double = HttpDouble.new({
-        on_request = function(method, path)
-          if method == "POST" and path == "/mcp" then
-            return { status = fallback_status, body = "" }
-          end
-          if method == "GET" and path == "/mcp" then
-            return {
-              status = 200,
-              sse = {
-                { event = "endpoint", data = "/messages?sessionId=legacy-session-1" },
-              },
-            }
-          end
-          return { status = 404, body = "" }
-        end,
-      })
-
-      local result, err
-      local done = false
-      detect.connect({
-        url = double.url .. "/mcp",
-        request = INITIALIZE_REQUEST,
-        timeout = 2000,
-      }, function(r, e)
-        result, err = r, e
-        done = true
-      end)
-
-      assert.is_true(wait_for(function()
-        return done
-      end))
       assert.is_nil(err)
-      assert.is_not_nil(result)
       assert.are.equal("legacy_sse", result.transport)
-      assert.are.equal(double.url .. "/messages?sessionId=legacy-session-1", result.endpoint)
-
+      assert.are.equal("legacy", result.era)
+      assert.are.equal("2024-11-05", result.protocol_version)
+      assert.are.equal(server.double.url .. "/messages?sessionId=fake-session", result.endpoint)
+      assert.are.same({ "server/discover", "initialize", "initialize", "notifications/initialized" }, server:methods())
+      assert.is_true(server.initialized)
       result.client:close()
     end)
   end
 
-  it("sends an Accept header naming both response shapes the spec allows", function()
-    -- Some servers reject the initial InitializeRequest with 406 Not
-    -- Acceptable if this header is missing.
-    local received_head
-    double = HttpDouble.new({
-      on_request = function(method, path, rest, head)
-        received_head = head
-        if method == "POST" and path == "/mcp" then
-          return {
-            status = 200,
-            headers = { ["Content-Type"] = "application/json", ["Mcp-Session-Id"] = "session-abc" },
-            body = initialize_result_body(),
-          }
-        end
-        return { status = 404, body = "" }
-      end,
-    })
+  it("reports a modern server that supports none of this client's revisions", function()
+    server = FakeServer.new({ era = "modern", supported = { "2099-01-01" } })
+    local result, err = connect(server.url)
 
-    local done = false
-    local result
-    detect.connect({
-      url = double.url .. "/mcp",
-      request = INITIALIZE_REQUEST,
-      timeout = 2000,
-    }, function(r)
-      result = r
-      done = true
-    end)
+    assert.is_nil(result)
+    assert.matches("2099%-01%-01", err)
+    assert.are.same({ "server/discover" }, server:methods())
+  end)
 
-    assert.is_true(wait_for(function()
-      return done
-    end))
-    assert.matches("Accept:%s*application/json,%s*text/event%-stream", received_head)
+  it("uses the legacy handshake when a modern error lists only legacy revisions", function()
+    server = FakeServer.new({ era = "modern", supported = { "2025-11-25" } })
+    local route = server._route
+    server._route = function(self, method, path, message, head)
+      if message and message.method == "initialize" then
+        return {
+          status = 200,
+          headers = { ["Content-Type"] = "application/json" },
+          body = vim.json.encode(self:_initialize_result(message)),
+        }
+      end
+      return route(self, method, path, message, head)
+    end
 
+    local result, err = connect(server.url)
+
+    assert.is_nil(err)
+    assert.are.equal("legacy", result.era)
+    assert.are.same({ "server/discover", "initialize", "notifications/initialized" }, server:methods())
     result.client:close()
   end)
 
-  it("uses the streamable_http transport when POST initialize's response is a single-event SSE stream", function()
-    -- The Streamable HTTP spec allows this as an alternative to a direct
-    -- JSON body. Uses a Content-Length-framed body (not the double's
-    -- `sse` field, which models a deliberately-left-open stream).
+  it("decodes a DiscoverResult delivered as an SSE response stream", function()
     double = HttpDouble.new({
-      on_request = function(method, path)
-        if method == "POST" and path == "/mcp" then
-          return {
-            status = 200,
-            headers = { ["Content-Type"] = "text/event-stream", ["Mcp-Session-Id"] = "sse-session-1" },
-            body = "event: message\ndata: " .. initialize_result_body() .. "\n\n",
-          }
-        end
-        return { status = 404, body = "" }
+      on_request = function(_, _, rest)
+        local message = vim.json.decode(rest)
+        local data = vim.json.encode({
+          jsonrpc = "2.0",
+          id = message.id,
+          result = { resultType = "complete", supportedVersions = { "2026-07-28" }, capabilities = {} },
+        })
+        return {
+          status = 200,
+          headers = { ["Content-Type"] = "text/event-stream" },
+          body = "event: message\ndata: " .. data .. "\n\n",
+        }
       end,
     })
 
-    local result, err
-    local done = false
-    detect.connect({
-      url = double.url .. "/mcp",
-      request = INITIALIZE_REQUEST,
-      timeout = 2000,
-    }, function(r, e)
-      result, err = r, e
-      done = true
-    end)
+    local result, err = connect(double.url .. "/mcp")
 
-    assert.is_true(wait_for(function()
-      return done
-    end))
     assert.is_nil(err)
-    assert.is_not_nil(result)
-    assert.are.equal("streamable_http", result.transport)
-    assert.are.equal("sse-session-1", result.session_id)
-    assert.are.equal("test-server", result.initialize_result.result.serverInfo.name)
+    assert.are.equal("modern", result.era)
+    result.client:close()
+  end)
 
+  it("sends an Accept header naming both response shapes the spec allows", function()
+    server = FakeServer.new({ era = "modern" })
+    local result = connect(server.url)
+    assert.matches("Accept:%s*application/json,%s*text/event%-stream", server:last("server/discover").head)
     result.client:close()
   end)
 
   it("surfaces a clear error when the server is unreachable", function()
-    -- Nothing is listening on this port: connection refused, not a hang.
-    local unreachable_url = "http://127.0.0.1:1/mcp"
+    local probe = vim.uv.new_tcp()
+    probe:bind("127.0.0.1", 0)
+    local port = probe:getsockname().port
+    probe:close()
 
-    local result, err
-    local done = false
-    detect.connect({
-      url = unreachable_url,
-      request = INITIALIZE_REQUEST,
-      timeout = 2000,
-    }, function(r, e)
-      result, err = r, e
-      done = true
-    end)
-
-    assert.is_true(wait_for(function()
-      return done
-    end, 5000))
+    local result, err = connect(string.format("http://127.0.0.1:%d/mcp", port))
     assert.is_nil(result)
-    assert.is_not_nil(err)
-    assert.matches("connect", err, 1, true)
+    assert.matches("could not connect", err)
   end)
 
-  it("surfaces an error on an unexpected status code instead of assuming legacy", function()
-    double = HttpDouble.new({
-      on_request = function(_, _)
-        return { status = 500, body = "internal error" }
-      end,
-    })
-
-    local result, err
-    local done = false
-    detect.connect({
-      url = double.url .. "/mcp",
-      request = INITIALIZE_REQUEST,
-      timeout = 2000,
-    }, function(r, e)
-      result, err = r, e
-      done = true
+  for _, status in ipairs({ 401, 500 }) do
+    it("fails on status " .. status .. " instead of guessing an era", function()
+      double = HttpDouble.new({
+        on_request = function()
+          return { status = status, body = "nope" }
+        end,
+      })
+      local result, err = connect(double.url .. "/mcp")
+      assert.is_nil(result)
+      assert.matches("status " .. status, err)
     end)
-
-    assert.is_true(wait_for(function()
-      return done
-    end))
-    assert.is_nil(result)
-    assert.is_not_nil(err)
-    assert.matches("500", err, 1, true)
-  end)
+  end
 end)

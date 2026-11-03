@@ -1,29 +1,33 @@
---- Transport detection: connects to a configured server URL and decides,
---- per the MCP spec's client-side detection algorithm, whether the server
---- speaks the modern single-endpoint Streamable HTTP transport or only
---- the legacy two-endpoint HTTP+SSE transport -- then hands back an
---- already-connected transport behind the common transport interface
---- (`request(rpc_message, callback)`, `notify(rpc_message)`, `close()`)
---- so the rest of the core never needs to know which one it is talking to.
+--- HTTP connection establishment: decides which protocol era and transport a
+--- server URL speaks and returns a ready transport behind the common
+--- interface (`request`, `notify`, `respond`, `set_on_message`, `close`).
 ---
---- Algorithm: POST the InitializeRequest to the configured URL. A 2xx
---- response means Streamable HTTP. A 400/404/405 means the server doesn't
---- recognize POST there, so fall back to legacy discovery (GET the same
---- URL, expect an `endpoint` SSE event). Any other status is a genuine
---- error.
+--- 1. Modern probe: POST `server/discover` with modern request metadata.
+---    A DiscoverResult means a modern server. A recognized modern error means
+---    a modern server too: `UnsupportedProtocolVersion` is retried once with a
+---    version from its `supported` list; any other modern error fails.
+--- 2. Legacy Streamable HTTP: when the probe gets a 2xx without a
+---    DiscoverResult, or a 400/404/405 without a modern error, POST
+---    `initialize`. A 2xx is a legacy Streamable HTTP server.
+--- 3. Legacy HTTP+SSE: when `initialize` gets 400/404/405, GET the URL and
+---    expect an `endpoint` event, then run `initialize` over that transport.
+--- Every legacy path validates the negotiated version and sends
+--- `notifications/initialized` before the connection is handed back.
 local curl = require("plenary.curl")
 
 local StreamableHttp = require("mcp-client.transport.streamable_http")
 local LegacySse = require("mcp-client.transport.legacy_sse")
 local transport_util = require("mcp-client.transport.util")
+local protocol = require("mcp-client.protocol")
+local rpc = require("mcp-client.rpc")
 
 local M = {}
 
+local DEFAULT_TIMEOUT_MS = 10000
 local FALLBACK_STATUSES = { [400] = true, [404] = true, [405] = true }
 
 --- Resolve a (possibly relative) `endpoint` SSE event's data against the
---- origin of the URL the stream was opened on, per the legacy transport's
---- discovery contract.
+--- origin of the URL the stream was opened on.
 local function resolve_endpoint(stream_url, endpoint)
   if endpoint:match("^https?://") then
     return endpoint
@@ -32,46 +36,87 @@ local function resolve_endpoint(stream_url, endpoint)
   return origin .. (endpoint:sub(1, 1) == "/" and endpoint or ("/" .. endpoint))
 end
 
-local function describe_curl_error(curl_err)
-  local message = curl_err.message or vim.inspect(curl_err)
-  if message:find("Failed to connect", 1, true) or message:find("Connection refused", 1, true) then
-    return "could not connect to server: " .. message
-  end
-  return "request to server failed: " .. message
+--- Run `start(done)` and pass its result to `on_done`, or a timeout error if
+--- `done` has not fired within `ms`. Late results are dropped.
+local function with_timeout(ms, start, on_done)
+  local settled = false
+  local timer = vim.defer_fn(function()
+    if not settled then
+      settled = true
+      on_done(nil, string.format("timed out after %d ms", ms))
+    end
+  end, ms)
+  start(function(...)
+    if settled then
+      return
+    end
+    settled = true
+    pcall(function()
+      timer:stop()
+      timer:close()
+    end)
+    on_done(...)
+  end)
 end
 
---- Legacy discovery: GET the configured URL and expect an `endpoint` SSE
---- event naming the URL to POST JSON-RPC messages against. The GET stays
---- open as a single long-lived job (raw = {"-N"} disables curl's response
---- buffering so SSE lines arrive as they're written) for the life of the
---- connection; once the endpoint is discovered, feed ownership passes to
---- the legacy client's own parser.
-local function discover_legacy(url, headers, on_done)
+--- Finish a legacy handshake on `client`: validate the InitializeResult,
+--- send `notifications/initialized`, and build the connection result.
+local function complete_legacy(client, decoded, result, on_done)
+  local version, version_err = protocol.negotiated_legacy_version(decoded)
+  if not version then
+    client:close()
+    return on_done(nil, version_err)
+  end
+  client.protocol_version = version
+  client:notify(protocol.INITIALIZED_NOTIFICATION, function(notify_err)
+    if notify_err then
+      client:close()
+      return on_done(nil, "notifications/initialized was rejected: " .. notify_err)
+    end
+    if client.start_listening then
+      client:start_listening()
+    end
+    on_done(
+      vim.tbl_extend("force", result, {
+        era = "legacy",
+        client = client,
+        protocol_version = version,
+        session_id = client.session_id,
+        initialize_result = decoded,
+        description = protocol.server_description(decoded),
+      }),
+      nil
+    )
+  end)
+end
+
+--- Legacy HTTP+SSE discovery: GET the URL and wait for the `endpoint` event
+--- naming the URL to POST messages to. The GET stays open as the transport's
+--- receive channel for the life of the connection.
+local function discover_legacy_sse(opts, on_done)
+  local url, headers = opts.url, opts.headers
   local resolved = false
-  local job -- assigned below; captured by the stream callback's closure
+  local job
   local legacy_client
 
-  local discovery_parser
-  discovery_parser = LegacySse.SseParser.new(function(event)
+  local discovery_parser = LegacySse.SseParser.new(function(event)
     if resolved or event.event ~= "endpoint" then
       return
     end
     resolved = true
-
     local endpoint = resolve_endpoint(url, event.data)
-    legacy_client = LegacySse.new({
-      stream_url = url,
-      endpoint = endpoint,
-      headers = headers,
-      job = job,
-    })
+    legacy_client = LegacySse.new({ stream_url = url, endpoint = endpoint, headers = headers, job = job })
     legacy_client:attach_parser()
 
-    on_done({
-      transport = "legacy_sse",
-      client = legacy_client,
-      endpoint = endpoint,
-    }, nil)
+    with_timeout(opts.timeout, function(done)
+      legacy_client:request(protocol.initialize_request(opts.config, rpc.next_id()), done)
+    end, function(err, decoded)
+      if err and not decoded then
+        legacy_client:close()
+        return on_done(nil, "initialize over the legacy SSE transport failed: " .. err)
+      end
+      complete_legacy(legacy_client, decoded, { transport = "legacy_sse", endpoint = endpoint }, on_done)
+    end)
   end)
 
   job = curl.get(url, {
@@ -89,111 +134,107 @@ local function discover_legacy(url, headers, on_done)
     end),
     on_error = vim.schedule_wrap(function(curl_err)
       if not resolved then
-        on_done(nil, describe_curl_error(curl_err))
+        resolved = true
+        on_done(nil, transport_util.describe_curl_error(curl_err))
       end
     end),
   })
 end
 
-local function finalize_streamable_http(response, url, headers, on_done, requested_protocol_version)
-  -- A POST response may be a direct `application/json` body, or a
-  -- single-event `text/event-stream` carrying the JSON-RPC message in
-  -- its `data:` field -- both are spec-legal, so try JSON first and
-  -- fall back to unwrapping SSE.
-  local ok, decoded = pcall(vim.json.decode, response.body)
-  if not ok then
-    local sse_decoded, sse_err = transport_util.decode_json_from_sse_body(response.body)
-    if not sse_decoded then
-      return on_done(
-        nil,
-        "failed to decode InitializeResult as JSON: "
-          .. tostring(decoded)
-          .. " (also tried SSE framing: "
-          .. tostring(sse_err)
-          .. ")"
-      )
+local function connect_legacy(opts, on_done)
+  local client = StreamableHttp.new({ url = opts.url, headers = opts.headers, era = "legacy" })
+  client:request(protocol.initialize_request(opts.config, rpc.next_id()), function(err, decoded, response)
+    if response == nil then
+      return on_done(nil, err)
     end
-    decoded = sse_decoded
-  end
+    if response.status >= 200 and response.status < 300 then
+      return complete_legacy(client, decoded, { transport = "streamable_http" }, on_done)
+    end
+    if FALLBACK_STATUSES[response.status] then
+      return discover_legacy_sse(opts, on_done)
+    end
+    on_done(nil, string.format("server returned unexpected status %d for InitializeRequest: %s", response.status, err))
+  end, { timeout = opts.timeout })
+end
 
-  local session_id = transport_util.find_header(response.headers, "Mcp-Session-Id")
-  -- The InitializeResult declares the protocol version the server will use
-  -- for this session; echo it back via MCP-Protocol-Version on every later
-  -- request (falling back to what the client itself requested if the
-  -- server's response omits it) -- servers that require the header on every
-  -- request, not just the handshake, otherwise fail every request after it.
-  local protocol_version = (decoded.result and decoded.result.protocolVersion) or requested_protocol_version
-
+local function probe_modern(opts, version, retried, on_done)
   local client = StreamableHttp.new({
-    url = url,
-    session_id = session_id,
-    headers = headers,
-    protocol_version = protocol_version,
+    url = opts.url,
+    headers = opts.headers,
+    era = "modern",
+    protocol_version = version,
   })
+  client:request(protocol.discover_request(opts.config, rpc.next_id(), version), function(err, decoded, response)
+    if protocol.is_discover_result(decoded) then
+      local supported = decoded.result.supportedVersions
+      local negotiated = protocol.pick_modern_version(supported)
+      if not negotiated then
+        return connect_legacy(opts, on_done)
+      end
+      client.protocol_version = negotiated
+      return on_done({
+        transport = "streamable_http",
+        era = "modern",
+        client = client,
+        protocol_version = negotiated,
+        description = protocol.server_description(decoded),
+      }, nil)
+    end
 
-  on_done({
-    transport = "streamable_http",
-    client = client,
-    session_id = session_id,
-    protocol_version = protocol_version,
-    initialize_result = decoded,
-  }, nil)
+    local modern_err = protocol.modern_error(decoded)
+    if modern_err then
+      if modern_err.code == protocol.ERROR.UNSUPPORTED_PROTOCOL_VERSION then
+        local supported = type(modern_err.data) == "table" and modern_err.data.supported or nil
+        local alternative = protocol.pick_modern_version(supported)
+        if alternative and not retried then
+          return probe_modern(opts, alternative, true, on_done)
+        end
+        for _, candidate in ipairs(supported or {}) do
+          if protocol.is_legacy_version(candidate) then
+            return connect_legacy(opts, on_done)
+          end
+        end
+        return on_done(
+          nil,
+          string.format(
+            "server supports protocol versions %s, none of which this client speaks",
+            table.concat(supported or {}, ", ")
+          )
+        )
+      end
+      return on_done(nil, "server rejected the discovery request: " .. tostring(modern_err.message))
+    end
+
+    if response == nil then
+      return on_done(nil, err)
+    end
+    if (response.status >= 200 and response.status < 300) or FALLBACK_STATUSES[response.status] then
+      return connect_legacy(opts, on_done)
+    end
+    on_done(nil, string.format("server returned unexpected status %d: %s", response.status, err))
+  end, { timeout = opts.timeout })
 end
 
 --- @param opts table
 ---   url     (string) the configured server URL
----   request (table) the InitializeRequest JSON-RPC message to send
----   timeout (number|nil) per-request timeout in ms (default 10000)
+---   config  (table) the server config (handlers, capabilities, client_version)
 ---   headers (table|nil) extra headers merged into every request
+---   timeout (number|nil) per-step bound in ms (default 10000)
 --- @param on_done fun(result: table|nil, err: string|nil)
----   On success, result = {
+---   result = {
 ---     transport = "streamable_http"|"legacy_sse",
----     client = <transport object implementing the common interface>,
----     session_id = string|nil,       -- streamable_http only
----     protocol_version = string|nil, -- streamable_http only
----     endpoint = string|nil,         -- legacy_sse only
----     initialize_result = table,     -- the decoded InitializeResult (streamable_http only)
+---     era = "modern"|"legacy",
+---     client = <transport>,
+---     protocol_version = string,
+---     session_id = string|nil,        -- legacy streamable_http
+---     endpoint = string|nil,          -- legacy_sse
+---     initialize_result = table|nil,  -- legacy
+---     description = { server_info, capabilities, instructions },
 ---   }
 function M.connect(opts, on_done)
-  local url = assert(opts.url, "url is required")
-  local request = assert(opts.request, "request is required")
-  local timeout = opts.timeout or 10000
-  local headers = opts.headers or {}
-
-  curl.post(url, {
-    headers = vim.tbl_extend(
-      "force",
-      { ["Content-Type"] = "application/json", ["Accept"] = "application/json, text/event-stream" },
-      headers
-    ),
-    body = vim.json.encode(request),
-    timeout = timeout,
-    callback = vim.schedule_wrap(function(response)
-      if not response then
-        return on_done(nil, "no response from server")
-      end
-
-      if response.status >= 200 and response.status < 300 then
-        return finalize_streamable_http(response, url, headers, on_done, request.params.protocolVersion)
-      end
-
-      if FALLBACK_STATUSES[response.status] then
-        return discover_legacy(url, headers, on_done)
-      end
-
-      return on_done(
-        nil,
-        string.format(
-          "server returned unexpected status %d for InitializeRequest: %s",
-          response.status,
-          response.body or ""
-        )
-      )
-    end),
-    on_error = vim.schedule_wrap(function(err)
-      on_done(nil, describe_curl_error(err))
-    end),
-  })
+  assert(opts.url, "url is required")
+  opts = vim.tbl_extend("force", { headers = {}, timeout = DEFAULT_TIMEOUT_MS, config = {} }, opts)
+  probe_modern(opts, protocol.MODERN_VERSIONS[1], false, on_done)
 end
 
 return M

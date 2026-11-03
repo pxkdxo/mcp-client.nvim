@@ -151,6 +151,24 @@ describe("config.setup (orchestration)", function()
       assert.is_nil(record.token_store)
     end)
 
+    it("passes a stdio server through without a TokenStore, merging setup-wide and per-server handlers", function()
+      local calls = stub_connect()
+      local global_roots = function() end
+      local own_elicitation = function() end
+      config.setup({
+        handlers = { roots = global_roots, sampling = false },
+        servers = {
+          tool = { command = "my-mcp-server", args = { "--stdio" }, handlers = { elicitation = own_elicitation } },
+        },
+      })
+      assert.are.equal("my-mcp-server", calls[1].command)
+      assert.are.same({ "--stdio" }, calls[1].args)
+      assert.are.same({ roots = global_roots, sampling = false, elicitation = own_elicitation }, calls[1].handlers)
+      local record = config.get_hub("tool")
+      assert.is_nil(record.token_store)
+      assert.are.equal("my-mcp-server", record.command)
+    end)
+
     it("retains the exact connect config passed to client.connect, including headers and reconnect tuning", function()
       local calls = stub_connect()
       config.setup({
@@ -319,10 +337,13 @@ describe("config.setup (orchestration)", function()
   end)
 
   describe("validation", function()
-    it("errors when a server config has no url", function()
+    it("errors when a server config has neither or both of url and command", function()
       stub_connect()
       assert.has_error(function()
         config.setup({ servers = { bad = {} } })
+      end)
+      assert.has_error(function()
+        config.setup({ servers = { bad = { url = "http://localhost:1", command = "x" } } })
       end)
     end)
 

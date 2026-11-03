@@ -158,12 +158,9 @@ describe("client (session + reconnect + event API)", function()
           return sse:sse_handler("/messages?sessionId=legacy-1")
         end
         if method == "POST" and path:match("^/messages") then
-          -- Accept the JSON-RPC request, then push the result over SSE.
-          local ok, decoded = pcall(vim.json.decode, rest)
-          if ok and decoded.id then
-            sse:push_message({ jsonrpc = "2.0", id = decoded.id, result = { pong = true } })
-          end
-          return { status = 202, body = "" }
+          return sse:legacy_post(rest, function()
+            return { pong = true }
+          end)
         end
         return { status = 404, body = "" }
       end,
@@ -198,14 +195,14 @@ describe("client (session + reconnect + event API)", function()
   it("fires MCPNotify when the server pushes an unsolicited notification", function()
     local sse = ControllableSse.new()
     double = HttpDouble.new({
-      on_request = function(method, path)
+      on_request = function(method, path, rest)
         if method == "POST" and path == "/mcp" then
           return { status = 400, body = "" }
         end
         if method == "GET" and path == "/mcp" then
           return sse:sse_handler("/messages?sessionId=legacy-1")
         end
-        return { status = 202, body = "" }
+        return sse:legacy_post(rest)
       end,
     })
 
@@ -293,14 +290,14 @@ describe("client (session + reconnect + event API)", function()
   it("an intentional disconnect fires MCPDetach and schedules no reconnect", function()
     local sse = ControllableSse.new()
     double = HttpDouble.new({
-      on_request = function(method, path)
+      on_request = function(method, path, rest)
         if method == "POST" and path == "/mcp" then
           return { status = 400, body = "" }
         end
         if method == "GET" and path == "/mcp" then
           return sse:sse_handler("/messages?sessionId=legacy-1")
         end
-        return { status = 202, body = "" }
+        return sse:legacy_post(rest)
       end,
     })
 
@@ -353,14 +350,14 @@ describe("client (session + reconnect + event API)", function()
     -- unexpected drop and reconnects.
     local sse = ControllableSse.new()
     double = HttpDouble.new({
-      on_request = function(method, path)
+      on_request = function(method, path, rest)
         if method == "POST" and path == "/mcp" then
           return { status = 400, body = "" }
         end
         if method == "GET" and path == "/mcp" then
           return sse:sse_handler("/messages?sessionId=legacy-1")
         end
-        return { status = 202, body = "" }
+        return sse:legacy_post(rest)
       end,
     })
 
@@ -402,7 +399,7 @@ describe("client (session + reconnect + event API)", function()
     local sse = ControllableSse.new()
     local get_count = 0
     double = HttpDouble.new({
-      on_request = function(method, path)
+      on_request = function(method, path, rest)
         if method == "POST" and path == "/mcp" then
           return { status = 400, body = "" }
         end
@@ -410,7 +407,7 @@ describe("client (session + reconnect + event API)", function()
           get_count = get_count + 1
           return sse:sse_handler("/messages?sessionId=legacy-1")
         end
-        return { status = 202, body = "" }
+        return sse:legacy_post(rest)
       end,
     })
 
@@ -445,7 +442,7 @@ describe("client (session + reconnect + event API)", function()
     local sse = ControllableSse.new()
     local get_count = 0
     double = HttpDouble.new({
-      on_request = function(method, path)
+      on_request = function(method, path, rest)
         if method == "POST" and path == "/mcp" then
           return { status = 400, body = "" }
         end
@@ -453,7 +450,7 @@ describe("client (session + reconnect + event API)", function()
           get_count = get_count + 1
           return sse:sse_handler("/messages?sessionId=legacy-1")
         end
-        return { status = 202, body = "" }
+        return sse:legacy_post(rest)
       end,
     })
 
@@ -497,7 +494,7 @@ describe("client (session + reconnect + event API)", function()
     local sse = ControllableSse.new()
     local allow_get = true
     double = HttpDouble.new({
-      on_request = function(method, path)
+      on_request = function(method, path, rest)
         if method == "POST" and path == "/mcp" then
           return { status = 400, body = "" }
         end
@@ -509,7 +506,7 @@ describe("client (session + reconnect + event API)", function()
           return { status = 500, body = "" }
         end
         -- Requests posted while disconnected never get an SSE reply.
-        return { status = 202, body = "" }
+        return sse:legacy_post(rest)
       end,
     })
 
@@ -607,7 +604,10 @@ describe("client (session + reconnect + event API)", function()
           if method == "POST" and path == "/mcp" then
             local ok, decoded = pcall(vim.json.decode, rest)
             if ok and decoded.method == "initialize" then
-              return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
+              return {
+                status = 200,
+                body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = { protocolVersion = "2025-11-25" } }),
+              }
             end
             seen_auth_on_wire = head and head:match("[Aa]uthorization:%s*([^\r\n]+)")
             return {
@@ -685,7 +685,10 @@ describe("client (session + reconnect + event API)", function()
         on_request = function(_, _, rest)
           local ok, decoded = pcall(vim.json.decode, rest or "")
           local id = ok and decoded.id or 1
-          return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = id, result = {} }) }
+          return {
+            status = 200,
+            body = vim.json.encode({ jsonrpc = "2.0", id = id, result = { protocolVersion = "2025-11-25" } }),
+          }
         end,
       })
 
