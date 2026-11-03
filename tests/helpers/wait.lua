@@ -2,5 +2,5 @@
 --- Returns the same boolean vim.wait would: true if condition became
 --- truthy, false if the wait timed out.
 return function(condition, timeout_ms)
-	return vim.wait(timeout_ms or 2000, condition, 10)
+  return vim.wait(timeout_ms or 2000, condition, 10)
 end

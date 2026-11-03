@@ -5,8 +5,14 @@ local M = {}
 local function wrap(item, kind)
   return function(arguments)
     local response = { content = {}, messages = {}, role = "user" }
-    function response:user() self.role = "user"; return self end
-    function response:llm() self.role = "assistant"; return self end
+    function response:user()
+      self.role = "user"
+      return self
+    end
+    function response:llm()
+      self.role = "assistant"
+      return self
+    end
     function response:text(text)
       local content = { type = "text", text = tostring(text) }
       if kind == "prompts" then
@@ -17,7 +23,9 @@ local function wrap(item, kind)
       return self
     end
     function response:send()
-      if kind == "prompts" then return { messages = self.messages } end
+      if kind == "prompts" then
+        return { messages = self.messages }
+      end
       if kind == "resources" then
         local contents = {}
         for _, content in ipairs(self.content) do
@@ -28,7 +36,9 @@ local function wrap(item, kind)
       return { content = self.content, isError = self.isError or nil }
     end
     function response:error(message)
-      if kind ~= "tools" then error(tostring(message)) end
+      if kind ~= "tools" then
+        error(tostring(message))
+      end
       self.isError = true
       return self:text(message):send()
     end

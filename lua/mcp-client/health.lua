@@ -25,16 +25,16 @@ local M = {}
 --- Find the live client object for a server by name, or nil if none is registered
 --- (i.e. it never connected, or was fully torn down).
 local function live_client(name)
-	local matches = mcp_client.get_clients({ name = name })
-	return matches[1]
+  local matches = mcp_client.get_clients({ name = name })
+  return matches[1]
 end
 
 --- Human-readable absolute time for a unix timestamp, for the expiry line.
 local function fmt_time(ts)
-	if type(ts) ~= "number" then
-		return "unknown"
-	end
-	return os.date("%Y-%m-%d %H:%M:%S", ts)
+  if type(ts) ~= "number" then
+    return "unknown"
+  end
+  return os.date("%Y-%m-%d %H:%M:%S", ts)
 end
 
 --- Report auth status for one server, reading ONLY the redacted status table.
@@ -46,162 +46,189 @@ end
 ---   refreshed transparently on the next request (`ensure_fresh_token`); with
 ---   no live client, refreshing requires retrying the connection instead.
 local function report_auth(reporter, name, record, connected)
-	local store = record.token_store
-	if not store then
-		-- tls.lua exempts localhost from requiring authentication.
-		if tls.is_localhost(record.url) then
-			reporter.info(string.format("server %q: localhost, no authentication required", name))
-		end
-		return true
-	end
+  local store = record.token_store
+  if not store then
+    if record.command then
+      reporter.info(string.format("server %q: stdio, credentials come from its environment", name))
+    elseif tls.is_localhost(record.url) then
+      -- tls.lua exempts localhost from requiring authentication.
+      reporter.info(string.format("server %q: localhost, no authentication required", name))
+    end
+    return true
+  end
 
-	local status = store:status()
-	if not status.has_token then
-		reporter.warn(
-			string.format(
-				"server %q: no stored authentication token (backend: %s). "
-					.. "Authenticate once, then re-run setup() or restart Neovim -- see the README's "
-					.. '"Authenticating a server" section.',
-				name,
-				status.backend
-			)
-		)
-		return false
-	end
+  local status = store:status()
+  if not status.has_token then
+    reporter.warn(
+      string.format(
+        "server %q: no stored authentication token (backend: %s). "
+          .. "Authenticate once, then re-run setup() or restart Neovim -- see the README's "
+          .. '"Authenticating a server" section.',
+        name,
+        status.backend
+      )
+    )
+    return false
+  end
 
-	if status.expired then
-		if not status.has_refresh_token then
-			reporter.warn(
-				string.format(
-					"server %q: stored token is expired (expired at %s) and no refresh token is "
-						.. "stored -- re-authentication is required.",
-					name,
-					fmt_time(status.expires_at)
-				)
-			)
-		elseif connected then
-			reporter.warn(
-				string.format(
-					"server %q: stored token is expired (expired at %s). "
-						.. "It will be refreshed automatically on the next request.",
-					name,
-					fmt_time(status.expires_at)
-				)
-			)
-		else
-			reporter.warn(
-				string.format(
-					"server %q: stored token is expired (expired at %s). "
-						.. "It will be refreshed automatically on the next connection attempt -- "
-						.. "re-run setup() or restart Neovim.",
-					name,
-					fmt_time(status.expires_at)
-				)
-			)
-		end
-		return false
-	end
+  if status.expired then
+    if not status.has_refresh_token then
+      reporter.warn(
+        string.format(
+          "server %q: stored token is expired (expired at %s) and no refresh token is "
+            .. "stored -- re-authentication is required.",
+          name,
+          fmt_time(status.expires_at)
+        )
+      )
+    elseif connected then
+      reporter.warn(
+        string.format(
+          "server %q: stored token is expired (expired at %s). "
+            .. "It will be refreshed automatically on the next request.",
+          name,
+          fmt_time(status.expires_at)
+        )
+      )
+    else
+      reporter.warn(
+        string.format(
+          "server %q: stored token is expired (expired at %s). "
+            .. "It will be refreshed automatically on the next connection attempt -- "
+            .. "re-run setup() or restart Neovim.",
+          name,
+          fmt_time(status.expires_at)
+        )
+      )
+    end
+    return false
+  end
 
-	reporter.ok(
-		string.format(
-			"server %q: authenticated (backend: %s, token valid until %s%s)",
-			name,
-			status.backend,
-			fmt_time(status.expires_at),
-			status.has_refresh_token and ", refreshable" or ""
-		)
-	)
-	return true
+  reporter.ok(
+    string.format(
+      "server %q: authenticated (backend: %s, token valid until %s%s)",
+      name,
+      status.backend,
+      fmt_time(status.expires_at),
+      status.has_refresh_token and ", refreshable" or ""
+    )
+  )
+  return true
+end
+
+--- Where a configured server lives: its URL, or its stdio command.
+local function target(record)
+  return record.url or ("stdio: " .. record.command)
 end
 
 --- Report connection + auth status for one configured server.
 local function report_hub(reporter, name, record)
-	local obj = live_client(name)
+  local obj = live_client(name)
 
-	if not obj then
-		reporter.error(
-			string.format(
-				"server %q (%s): not connected -- no client registered. "
-					.. "The initial connection failed (check :messages for the reason) or setup() was never called.",
-				name,
-				record.url
-			)
-		)
-		-- Still report auth so the user sees the whole picture for this server.
-		report_auth(reporter, name, record, false)
-		return
-	end
+  if not obj then
+    reporter.error(
+      string.format(
+        "server %q (%s): not connected -- no client registered. "
+          .. "The initial connection failed (check :messages for the reason) or setup() was never called.",
+        name,
+        target(record)
+      )
+    )
+    -- Still report auth so the user sees the whole picture for this server.
+    report_auth(reporter, name, record, false)
+    return
+  end
 
-	local stopped = obj:is_stopped()
-	if stopped then
-		reporter.error(
-			string.format(
-				"server %q (%s): disconnected -- reconnect attempts were exhausted. "
-					.. "Check the server is reachable, then restart Neovim or re-run setup().",
-				name,
-				record.url
-			)
-		)
-	else
-		reporter.ok(string.format("server %q (%s): connected", name, record.url))
-	end
+  local stopped = obj:is_stopped()
+  if stopped then
+    reporter.error(
+      string.format(
+        "server %q (%s): disconnected -- reconnect attempts were exhausted. "
+          .. "Check the server is reachable, then run :MCPReconnect.",
+        name,
+        target(record)
+      )
+    )
+  else
+    reporter.ok(
+      string.format(
+        "server %q (%s): connected over %s, %s protocol %s",
+        name,
+        target(record),
+        tostring(obj.transport),
+        tostring(obj.era),
+        tostring(obj.protocol_version)
+      )
+    )
+  end
 
-	report_auth(reporter, name, record, not stopped)
+  report_auth(reporter, name, record, not stopped)
 end
 
 --- Report the registered native, in-process servers. Native servers are
 --- first-party, in-process code: unlike a remote server there is no connection to
 --- be up or down, so a registered native server is simply reported as present.
 local function report_native(reporter, native_servers)
-	if #native_servers == 0 then
-		reporter.info("no native (in-process) servers registered")
-		return
-	end
-	for _, name in ipairs(native_servers) do
-		-- Correlate with the live registry so a native server that was somehow
-		-- removed is reported accurately, not just because setup listed it.
-		local obj = live_client(name)
-		if obj and not obj:is_stopped() then
-			reporter.ok(string.format("native server %q: registered (in-process)", name))
-		elseif obj then
-			reporter.warn(string.format("native server %q: registered but stopped", name))
-		else
-			reporter.warn(string.format("native server %q: recorded at setup but not in the client registry", name))
-		end
-	end
+  if #native_servers == 0 then
+    reporter.info("no native (in-process) servers registered")
+    return
+  end
+  for _, name in ipairs(native_servers) do
+    -- Correlate with the live registry so a native server that was somehow
+    -- removed is reported accurately, not just because setup listed it.
+    local obj = live_client(name)
+    if obj and not obj:is_stopped() then
+      reporter.ok(string.format("native server %q: registered (in-process)", name))
+    elseif obj then
+      reporter.warn(string.format("native server %q: registered but stopped", name))
+    else
+      reporter.warn(string.format("native server %q: recorded at setup but not in the client registry", name))
+    end
+  end
 end
 
 --- The health entrypoint invoked by `:checkhealth mcp-client`.
 --- @param reporter table|nil  { start, ok, warn, error, info } -- defaults to vim.health.
 function M.check(reporter)
-	reporter = reporter or vim.health
+  reporter = reporter or vim.health
 
-	local state = config.state()
+  local state = config.state()
 
-	reporter.start("mcp-client")
+  reporter.start("mcp-client")
 
-	reporter.info(
-		"Native servers run in-process with full Neovim/Lua privilege (no sandboxing). "
-			.. "Only register native servers you trust as first-party code."
-	)
+  if pcall(require, "plenary.curl") then
+    reporter.ok("plenary.nvim is installed")
+  else
+    reporter.error("plenary.nvim is not installed; the HTTP transports and OAuth flow need it")
+  end
+  if vim.fn.executable("curl") == 1 then
+    reporter.ok("curl is on PATH")
+  else
+    reporter.error("curl is not on PATH; the HTTP transports and OAuth flow need it")
+  end
 
-	-- Servers.
-	local server_names = {}
-	for name in pairs(state.servers) do
-		table.insert(server_names, name)
-	end
-	table.sort(server_names)
+  reporter.info(
+    "Native servers run in-process with full Neovim/Lua privilege (no sandboxing). "
+      .. "Only register native servers you trust as first-party code."
+  )
 
-	if #server_names == 0 then
-		reporter.info("no remote servers configured")
-	else
-		for _, name in ipairs(server_names) do
-			report_hub(reporter, name, state.servers[name])
-		end
-	end
+  -- Servers.
+  local server_names = {}
+  for name in pairs(state.servers) do
+    table.insert(server_names, name)
+  end
+  table.sort(server_names)
 
-	-- Native servers.
-	report_native(reporter, state.native_servers)
+  if #server_names == 0 then
+    reporter.info("no remote servers configured")
+  else
+    for _, name in ipairs(server_names) do
+      report_hub(reporter, name, state.servers[name])
+    end
+  end
+
+  -- Native servers.
+  report_native(reporter, state.native_servers)
 end
 
 return M

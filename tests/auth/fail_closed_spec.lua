@@ -16,844 +16,853 @@ local refresh = require("mcp-client.auth.refresh")
 local client = require("mcp-client.client")
 
 local HttpDouble = require("tests.helpers.http_double")
+local legacy_handshake = require("tests.helpers.legacy_handshake")
 local wait_for = require("tests.helpers.wait")
 
 describe("transport.tls fail-closed gate", function()
-	local function has_token()
-		return { has_token = true }
-	end
-	local function no_token()
-		return { has_token = false }
-	end
+  local function has_token()
+    return { has_token = true }
+  end
+  local function no_token()
+    return { has_token = false }
+  end
 
-	describe("localhost is unaffected", function()
-		it("allows http://127.0.0.1 with no token and no TLS", function()
-			local ok, reason = tls.check_connection_allowed("http://127.0.0.1:8080/mcp", no_token())
-			assert.is_true(ok, reason)
-		end)
+  describe("localhost is unaffected", function()
+    it("allows http://127.0.0.1 with no token and no TLS", function()
+      local ok, reason = tls.check_connection_allowed("http://127.0.0.1:8080/mcp", no_token())
+      assert.is_true(ok, reason)
+    end)
 
-		it("allows http://localhost with no token and no TLS", function()
-			assert.is_true(tls.check_connection_allowed("http://localhost:3000/mcp", no_token()))
-		end)
+    it("allows http://localhost with no token and no TLS", function()
+      assert.is_true(tls.check_connection_allowed("http://localhost:3000/mcp", no_token()))
+    end)
 
-		it("allows http://[::1] (IPv6 loopback) with no token and no TLS", function()
-			assert.is_true(tls.check_connection_allowed("http://[::1]:9000/mcp", no_token()))
-		end)
-	end)
+    it("allows http://[::1] (IPv6 loopback) with no token and no TLS", function()
+      assert.is_true(tls.check_connection_allowed("http://[::1]:9000/mcp", no_token()))
+    end)
+  end)
 
-	describe("non-localhost is fail-closed", function()
-		it("refuses a non-localhost http:// URL even with a token (no TLS)", function()
-			local ok, reason = tls.check_connection_allowed("http://server.example.com/mcp", has_token())
-			assert.is_false(ok)
-			assert.is_string(reason)
-			assert.matches("TLS", reason)
-		end)
+  describe("non-localhost is fail-closed", function()
+    it("refuses a non-localhost http:// URL even with a token (no TLS)", function()
+      local ok, reason = tls.check_connection_allowed("http://server.example.com/mcp", has_token())
+      assert.is_false(ok)
+      assert.is_string(reason)
+      assert.matches("TLS", reason)
+    end)
 
-		it("refuses a non-localhost https:// URL with no token (no auth)", function()
-			local ok, reason = tls.check_connection_allowed("https://server.example.com/mcp", no_token())
-			assert.is_false(ok)
-			assert.is_string(reason)
-			assert.matches("auth", reason)
-		end)
+    it("refuses a non-localhost https:// URL with no token (no auth)", function()
+      local ok, reason = tls.check_connection_allowed("https://server.example.com/mcp", no_token())
+      assert.is_false(ok)
+      assert.is_string(reason)
+      assert.matches("auth", reason)
+    end)
 
-		it("refuses a non-localhost http:// URL with no token (both missing)", function()
-			local ok, reason = tls.check_connection_allowed("http://server.example.com/mcp", no_token())
-			assert.is_false(ok)
-			assert.is_string(reason)
-		end)
+    it("refuses a non-localhost http:// URL with no token (both missing)", function()
+      local ok, reason = tls.check_connection_allowed("http://server.example.com/mcp", no_token())
+      assert.is_false(ok)
+      assert.is_string(reason)
+    end)
 
-		it("allows a non-localhost https:// URL WITH a token", function()
-			local ok, reason = tls.check_connection_allowed("https://server.example.com/mcp", has_token())
-			assert.is_true(ok, reason)
-		end)
+    it("allows a non-localhost https:// URL WITH a token", function()
+      local ok, reason = tls.check_connection_allowed("https://server.example.com/mcp", has_token())
+      assert.is_true(ok, reason)
+    end)
 
-		it("treats a bare loopback-looking hostname (127.0.0.2) as non-localhost", function()
-			-- Only the canonical loopback names/addresses are exempt; other
-			-- 127.0.0.0/8 aliases are treated as real network addresses.
-			local ok = tls.check_connection_allowed("http://127.0.0.2/mcp", no_token())
-			assert.is_false(ok)
-		end)
-	end)
+    it("treats a bare loopback-looking hostname (127.0.0.2) as non-localhost", function()
+      -- Only the canonical loopback names/addresses are exempt; other
+      -- 127.0.0.0/8 aliases are treated as real network addresses.
+      local ok = tls.check_connection_allowed("http://127.0.0.2/mcp", no_token())
+      assert.is_false(ok)
+    end)
+  end)
 
-	describe("the refusal reason never contains a secret", function()
-		it("does not echo any token material in the refusal string", function()
-			local _, reason = tls.check_connection_allowed("http://server.example.com/mcp", {
-				has_token = true,
-				access_token = "SECRET-should-never-appear",
-			})
-			assert.is_nil(reason:find("SECRET-should-never-appear", 1, true))
-		end)
-	end)
+  describe("the refusal reason never contains a secret", function()
+    it("does not echo any token material in the refusal string", function()
+      local _, reason = tls.check_connection_allowed("http://server.example.com/mcp", {
+        has_token = true,
+        access_token = "SECRET-should-never-appear",
+      })
+      assert.is_nil(reason:find("SECRET-should-never-appear", 1, true))
+    end)
+  end)
 end)
 
 describe("client.connect enforces the fail-closed gate", function()
-	after_each(function()
-		client._reset_registry()
-		vim.wait(30, function()
-			return false
-		end)
-	end)
+  after_each(function()
+    client._reset_registry()
+    vim.wait(30, function()
+      return false
+    end)
+  end)
 
-	it("refuses a non-localhost server with no TLS and no auth, before opening a connection", function()
-		local connected, err
-		client.connect({
-			url = "http://server.example.com/mcp",
-		}, {
-			on_connect = function(c, e)
-				connected, err = c, e
-			end,
-		})
+  it("refuses a non-localhost server with no TLS and no auth, before opening a connection", function()
+    local connected, err
+    client.connect({
+      url = "http://server.example.com/mcp",
+    }, {
+      on_connect = function(c, e)
+        connected, err = c, e
+      end,
+    })
 
-		assert.is_true(wait_for(function()
-			return connected ~= nil or err ~= nil
-		end))
-		assert.is_nil(connected)
-		assert.is_not_nil(err)
-		assert.matches("fail closed", err)
-	end)
+    assert.is_true(wait_for(function()
+      return connected ~= nil or err ~= nil
+    end))
+    assert.is_nil(connected)
+    assert.is_not_nil(err)
+    assert.matches("fail closed", err)
+  end)
 
-	it("refuses a non-localhost https server when no Authorization header is configured", function()
-		local connected, err
-		client.connect({
-			url = "https://server.example.com/mcp",
-		}, {
-			on_connect = function(c, e)
-				connected, err = c, e
-			end,
-		})
+  it("refuses a non-localhost https server when no Authorization header is configured", function()
+    local connected, err
+    client.connect({
+      url = "https://server.example.com/mcp",
+    }, {
+      on_connect = function(c, e)
+        connected, err = c, e
+      end,
+    })
 
-		assert.is_true(wait_for(function()
-			return connected ~= nil or err ~= nil
-		end))
-		assert.is_nil(connected)
-		assert.matches("auth", err)
-	end)
+    assert.is_true(wait_for(function()
+      return connected ~= nil or err ~= nil
+    end))
+    assert.is_nil(connected)
+    assert.matches("auth", err)
+  end)
 
-	it("allows a localhost server with no TLS and no auth (unaffected by the gate)", function()
-		local double = HttpDouble.new({
-			on_request = function()
-				return {
-					status = 200,
-					body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = { capabilities = {} } }),
-				}
-			end,
-		})
+  it("allows a localhost server with no TLS and no auth (unaffected by the gate)", function()
+    local double = HttpDouble.new({
+      on_request = function(_, _, rest)
+        return legacy_handshake(vim.json.decode(rest))
+      end,
+    })
 
-		local connected, err
-		client.connect({ url = double.url .. "/mcp" }, {
-			on_connect = function(c, e)
-				connected, err = c, e
-			end,
-		})
+    local connected, err
+    client.connect({ url = double.url .. "/mcp" }, {
+      on_connect = function(c, e)
+        connected, err = c, e
+      end,
+    })
 
-		assert.is_true(
-			wait_for(function()
-				return connected ~= nil or err ~= nil
-			end, 3000),
-			"localhost connect did not settle: " .. tostring(err)
-		)
-		assert.is_nil(err)
-		assert.is_not_nil(connected)
-		double:stop()
-	end)
+    assert.is_true(
+      wait_for(function()
+        return connected ~= nil or err ~= nil
+      end, 3000),
+      "localhost connect did not settle: " .. tostring(err)
+    )
+    assert.is_nil(err)
+    assert.is_not_nil(connected)
+    double:stop()
+  end)
 
-	it("the refusal error never contains a token value", function()
-		local connected, err
-		client.connect({
-			url = "https://server.example.com/mcp",
-			headers = { ["X-Other"] = "value" },
-		}, {
-			on_connect = function(c, e)
-				connected, err = c, e
-			end,
-		})
+  it("the refusal error never contains a token value", function()
+    local connected, err
+    client.connect({
+      url = "https://server.example.com/mcp",
+      headers = { ["X-Other"] = "value" },
+    }, {
+      on_connect = function(c, e)
+        connected, err = c, e
+      end,
+    })
 
-		assert.is_true(wait_for(function()
-			return connected ~= nil or err ~= nil
-		end))
-		assert.is_nil(connected)
-		assert.is_string(err)
-	end)
+    assert.is_true(wait_for(function()
+      return connected ~= nil or err ~= nil
+    end))
+    assert.is_nil(connected)
+    assert.is_string(err)
+  end)
 end)
 
 describe("auth.refresh (refresh-token grant)", function()
-	local double
+  local double
 
-	after_each(function()
-		if double then
-			double:stop()
-			double = nil
-		end
-	end)
+  after_each(function()
+    if double then
+      double:stop()
+      double = nil
+    end
+  end)
 
-	local function stored_token(overrides)
-		return vim.tbl_extend("force", {
-			access_token = "old-access-token",
-			refresh_token = "the-refresh-token",
-			token_type = "Bearer",
-			expires_at = os.time() - 1, -- expired
-			scope = "mcp",
-			token_endpoint = nil, -- set per test to the double's URL
-			client_id = "the-client-id",
-			resource = "https://server.example/mcp",
-		}, overrides or {})
-	end
+  local function stored_token(overrides)
+    return vim.tbl_extend("force", {
+      access_token = "old-access-token",
+      refresh_token = "the-refresh-token",
+      token_type = "Bearer",
+      expires_at = os.time() - 1, -- expired
+      scope = "mcp",
+      token_endpoint = nil, -- set per test to the double's URL
+      client_id = "the-client-id",
+      resource = "https://server.example/mcp",
+    }, overrides or {})
+  end
 
-	it("POSTs grant_type=refresh_token and returns a fresh typed token", function()
-		local received_body
-		double = HttpDouble.new({
-			on_request = function(method, path, rest)
-				if method == "POST" and path == "/token" then
-					received_body = rest
-					return {
-						status = 200,
-						body = vim.json.encode({
-							access_token = "new-access-token",
-							refresh_token = "rotated-refresh-token",
-							token_type = "Bearer",
-							expires_in = 3600,
-							scope = "mcp",
-						}),
-					}
-				end
-				return { status = 404, body = "" }
-			end,
-		})
+  it("POSTs grant_type=refresh_token and returns a fresh typed token", function()
+    local received_body
+    double = HttpDouble.new({
+      on_request = function(method, path, rest)
+        if method == "POST" and path == "/token" then
+          received_body = rest
+          return {
+            status = 200,
+            body = vim.json.encode({
+              access_token = "new-access-token",
+              refresh_token = "rotated-refresh-token",
+              token_type = "Bearer",
+              expires_in = 3600,
+              scope = "mcp",
+            }),
+          }
+        end
+        return { status = 404, body = "" }
+      end,
+    })
 
-		local result, err
-		refresh.refresh(stored_token({ token_endpoint = double.url .. "/token" }), function(res, e)
-			result, err = res, e
-		end)
+    local result, err
+    refresh.refresh(stored_token({ token_endpoint = double.url .. "/token" }), function(res, e)
+      result, err = res, e
+    end)
 
-		assert.is_true(wait_for(function()
-			return result ~= nil or err ~= nil
-		end))
-		assert.is_nil(err)
-		assert.are.equal("new-access-token", result.access_token)
-		-- Public-client refresh-token rotation: the new refresh token replaces
-		-- the old one.
-		assert.are.equal("rotated-refresh-token", result.refresh_token)
-		assert.is_number(result.expires_at)
-		-- Metadata for the *next* refresh is preserved.
-		assert.are.equal(double.url .. "/token", result.token_endpoint)
-		assert.are.equal("the-client-id", result.client_id)
-		assert.are.equal("https://server.example/mcp", result.resource)
-		-- The request used the refresh grant, not the authorization-code grant.
-		assert.matches("grant_type=refresh_token", received_body, 1, true)
-		assert.matches("refresh_token=the%-refresh%-token", received_body)
-		assert.is_nil(received_body:find("grant_type=authorization_code", 1, true))
-	end)
+    assert.is_true(wait_for(function()
+      return result ~= nil or err ~= nil
+    end))
+    assert.is_nil(err)
+    assert.are.equal("new-access-token", result.access_token)
+    -- Public-client refresh-token rotation: the new refresh token replaces
+    -- the old one.
+    assert.are.equal("rotated-refresh-token", result.refresh_token)
+    assert.is_number(result.expires_at)
+    -- Metadata for the *next* refresh is preserved.
+    assert.are.equal(double.url .. "/token", result.token_endpoint)
+    assert.are.equal("the-client-id", result.client_id)
+    assert.are.equal("https://server.example/mcp", result.resource)
+    -- The request used the refresh grant, not the authorization-code grant.
+    assert.matches("grant_type=refresh_token", received_body, 1, true)
+    assert.matches("refresh_token=the%-refresh%-token", received_body)
+    assert.is_nil(received_body:find("grant_type=authorization_code", 1, true))
+  end)
 
-	it("keeps the previous refresh token when the AS does not rotate it", function()
-		double = HttpDouble.new({
-			on_request = function(method, path)
-				if method == "POST" and path == "/token" then
-					return {
-						status = 200,
-						body = vim.json.encode({
-							access_token = "new-access-token",
-							-- No refresh_token in the response: reuse the old one.
-							token_type = "Bearer",
-							expires_in = 3600,
-						}),
-					}
-				end
-				return { status = 404, body = "" }
-			end,
-		})
+  it("keeps the previous refresh token when the AS does not rotate it", function()
+    double = HttpDouble.new({
+      on_request = function(method, path)
+        if method == "POST" and path == "/token" then
+          return {
+            status = 200,
+            body = vim.json.encode({
+              access_token = "new-access-token",
+              -- No refresh_token in the response: reuse the old one.
+              token_type = "Bearer",
+              expires_in = 3600,
+            }),
+          }
+        end
+        return { status = 404, body = "" }
+      end,
+    })
 
-		local result, err
-		refresh.refresh(stored_token({ token_endpoint = double.url .. "/token" }), function(res, e)
-			result, err = res, e
-		end)
+    local result, err
+    refresh.refresh(stored_token({ token_endpoint = double.url .. "/token" }), function(res, e)
+      result, err = res, e
+    end)
 
-		assert.is_true(wait_for(function()
-			return result ~= nil or err ~= nil
-		end))
-		assert.is_nil(err)
-		assert.are.equal("the-refresh-token", result.refresh_token)
-	end)
+    assert.is_true(wait_for(function()
+      return result ~= nil or err ~= nil
+    end))
+    assert.is_nil(err)
+    assert.are.equal("the-refresh-token", result.refresh_token)
+  end)
 
-	it("surfaces a terminal re-auth-required error on a revoked refresh token", function()
-		double = HttpDouble.new({
-			on_request = function()
-				return {
-					status = 400,
-					body = vim.json.encode({
-						error = "invalid_grant",
-						error_description = "refresh token revoked",
-					}),
-				}
-			end,
-		})
+  it("surfaces a terminal re-auth-required error on a revoked refresh token", function()
+    double = HttpDouble.new({
+      on_request = function()
+        return {
+          status = 400,
+          body = vim.json.encode({
+            error = "invalid_grant",
+            error_description = "refresh token revoked",
+          }),
+        }
+      end,
+    })
 
-		local result, err
-		refresh.refresh(stored_token({ token_endpoint = double.url .. "/token" }), function(res, e)
-			result, err = res, e
-		end)
+    local result, err
+    refresh.refresh(stored_token({ token_endpoint = double.url .. "/token" }), function(res, e)
+      result, err = res, e
+    end)
 
-		assert.is_true(wait_for(function()
-			return result ~= nil or err ~= nil
-		end))
-		assert.is_nil(result)
-		assert.is_not_nil(err)
-		-- A distinct "re-authentication required" class, not a retry-forever loop.
-		assert.matches("re%-auth", err)
-		-- Carries the AS error code for diagnosis.
-		assert.matches("invalid_grant", err)
-	end)
+    assert.is_true(wait_for(function()
+      return result ~= nil or err ~= nil
+    end))
+    assert.is_nil(result)
+    assert.is_not_nil(err)
+    -- A distinct "re-authentication required" class, not a retry-forever loop.
+    assert.matches("re%-auth", err)
+    -- Carries the AS error code for diagnosis.
+    assert.matches("invalid_grant", err)
+  end)
 
-	it("errors (without leaking the token) when no refresh token is available", function()
-		-- vim.tbl_extend drops nil values, so remove the key explicitly to model
-		-- a stored token that never carried a refresh token.
-		local tok = stored_token({ token_endpoint = "https://as.example/token" })
-		tok.refresh_token = nil
+  it("errors (without leaking the token) when no refresh token is available", function()
+    -- vim.tbl_extend drops nil values, so remove the key explicitly to model
+    -- a stored token that never carried a refresh token.
+    local tok = stored_token({ token_endpoint = "https://as.example/token" })
+    tok.refresh_token = nil
 
-		local result, err
-		refresh.refresh(tok, function(res, e)
-			result, err = res, e
-		end)
+    local result, err
+    refresh.refresh(tok, function(res, e)
+      result, err = res, e
+    end)
 
-		assert.is_true(wait_for(function()
-			return result ~= nil or err ~= nil
-		end))
-		assert.is_nil(result)
-		assert.matches("re%-auth", err)
-	end)
+    assert.is_true(wait_for(function()
+      return result ~= nil or err ~= nil
+    end))
+    assert.is_nil(result)
+    assert.matches("re%-auth", err)
+  end)
 
-	it("never leaks the refresh token into error text", function()
-		double = HttpDouble.new({
-			on_request = function()
-				return { status = 400, body = vim.json.encode({ error = "invalid_grant" }) }
-			end,
-		})
+  it("never leaks the refresh token into error text", function()
+    double = HttpDouble.new({
+      on_request = function()
+        return { status = 400, body = vim.json.encode({ error = "invalid_grant" }) }
+      end,
+    })
 
-		local result, err
-		refresh.refresh(
-			stored_token({
-				refresh_token = "SUPER-SECRET-refresh",
-				token_endpoint = double.url .. "/token",
-			}),
-			function(res, e)
-				result, err = res, e
-			end
-		)
+    local result, err
+    refresh.refresh(
+      stored_token({
+        refresh_token = "SUPER-SECRET-refresh",
+        token_endpoint = double.url .. "/token",
+      }),
+      function(res, e)
+        result, err = res, e
+      end
+    )
 
-		assert.is_true(wait_for(function()
-			return result ~= nil or err ~= nil
-		end))
-		assert.is_nil(result)
-		assert.is_nil(err:find("SUPER-SECRET-refresh", 1, true))
-	end)
+    assert.is_true(wait_for(function()
+      return result ~= nil or err ~= nil
+    end))
+    assert.is_nil(result)
+    assert.is_nil(err:find("SUPER-SECRET-refresh", 1, true))
+  end)
 end)
 
 describe("client transparent token refresh (expired -> refresh -> retry)", function()
-	-- An expired access token, configured on the client via
-	-- config.auth.token_store, is refreshed transparently through client:request
-	-- before the request is sent, and a revoked refresh token surfaces a terminal
-	-- re-auth error through that same path -- never an indefinite retry.
-	local token_store = require("mcp-client.auth.token_store")
+  -- An expired access token, configured on the client via
+  -- config.auth.token_store, is refreshed transparently through client:request
+  -- before the request is sent, and a revoked refresh token surfaces a terminal
+  -- re-auth error through that same path -- never an indefinite retry.
+  local token_store = require("mcp-client.auth.token_store")
 
-	local double
-	local tmp
+  local double
+  local tmp
 
-	after_each(function()
-		client._reset_registry()
-		vim.wait(30, function()
-			return false
-		end)
-		if double then
-			double:stop()
-			double = nil
-		end
-	end)
+  after_each(function()
+    client._reset_registry()
+    vim.wait(30, function()
+      return false
+    end)
+    if double then
+      double:stop()
+      double = nil
+    end
+  end)
 
-	local function make_tmpdir()
-		local dir = vim.fn.tempname()
-		vim.fn.mkdir(dir, "p")
-		return dir
-	end
+  local function make_tmpdir()
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, "p")
+    return dir
+  end
 
-	-- A file-backed store seeded with an *expired* access token whose refresh
-	-- metadata points at the double's /token endpoint. Using a real store (file
-	-- backend, temp data_home) exercises the real load/save/status path.
-	local function seed_expired_store(token_endpoint, overrides)
-		tmp = make_tmpdir()
-		local store = token_store.new({ key = "serverX", backend = "file", data_home = tmp })
-		store:save(vim.tbl_extend("force", {
-			access_token = "expired-access-token",
-			refresh_token = "the-refresh-token",
-			token_type = "Bearer",
-			expires_at = os.time() - 1, -- already expired
-			scope = "mcp",
-			token_endpoint = token_endpoint,
-			client_id = "the-client-id",
-			resource = "https://server.example/mcp",
-		}, overrides or {}))
-		return store
-	end
+  -- A file-backed store seeded with an *expired* access token whose refresh
+  -- metadata points at the double's /token endpoint. Using a real store (file
+  -- backend, temp data_home) exercises the real load/save/status path.
+  local function seed_expired_store(token_endpoint, overrides)
+    tmp = make_tmpdir()
+    local store = token_store.new({ key = "serverX", backend = "file", data_home = tmp })
+    store:save(vim.tbl_extend("force", {
+      access_token = "expired-access-token",
+      refresh_token = "the-refresh-token",
+      token_type = "Bearer",
+      expires_at = os.time() - 1, -- already expired
+      scope = "mcp",
+      token_endpoint = token_endpoint,
+      client_id = "the-client-id",
+      resource = "https://server.example/mcp",
+    }, overrides or {}))
+    return store
+  end
 
-	it(
-		"regression: refreshes a stored-but-expired token BEFORE dialing, so the InitializeRequest itself carries the fresh token",
-		function()
-			local seen_auth_on_initialize
-			local token_hits = 0
-			double = HttpDouble.new({
-				on_request = function(method, path, rest, head)
-					if method == "POST" and path == "/token" then
-						token_hits = token_hits + 1
-						return {
-							status = 200,
-							body = vim.json.encode({
-								access_token = "fresh-access-token",
-								refresh_token = "rotated-refresh-token",
-								token_type = "Bearer",
-								expires_in = 3600,
-							}),
-						}
-					end
-					if method == "POST" and path == "/mcp" then
-						local ok, decoded = pcall(vim.json.decode, rest)
-						if ok and decoded.method == "initialize" then
-							-- The very first request must already carry the refreshed
-							-- token, not the expired one from when connect() was called.
-							seen_auth_on_initialize = head and head:match("[Aa]uthorization:%s*([^\r\n]+)")
-							return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
-						end
-						return { status = 404, body = "" }
-					end
-					return { status = 404, body = "" }
-				end,
-			})
+  it(
+    "regression: refreshes a stored-but-expired token BEFORE dialing, so the InitializeRequest itself carries the fresh token",
+    function()
+      local seen_auth_on_initialize
+      local token_hits = 0
+      double = HttpDouble.new({
+        on_request = function(method, path, rest, head)
+          if method == "POST" and path == "/token" then
+            token_hits = token_hits + 1
+            return {
+              status = 200,
+              body = vim.json.encode({
+                access_token = "fresh-access-token",
+                refresh_token = "rotated-refresh-token",
+                token_type = "Bearer",
+                expires_in = 3600,
+              }),
+            }
+          end
+          if method == "POST" and path == "/mcp" then
+            local ok, decoded = pcall(vim.json.decode, rest)
+            if ok and decoded.method == "initialize" then
+              -- The very first request must already carry the refreshed
+              -- token, not the expired one from when connect() was called.
+              seen_auth_on_initialize = head and head:match("[Aa]uthorization:%s*([^\r\n]+)")
+            end
+            return legacy_handshake(decoded) or { status = 404, body = "" }
+          end
+          return { status = 404, body = "" }
+        end,
+      })
 
-			local store = seed_expired_store(double.url .. "/token")
+      local store = seed_expired_store(double.url .. "/token")
 
-			local got
-			client.connect({
-				url = double.url .. "/mcp",
-				auth = { token_store = store },
-			}, {
-				on_connect = function(c, e)
-					got = { client = c, err = e }
-				end,
-			})
-			assert.is_true(wait_for(function()
-				return got ~= nil
-			end, 3000))
-			assert.is_nil(got.err)
-			assert.is_not_nil(got.client)
+      local got
+      client.connect({
+        url = double.url .. "/mcp",
+        auth = { token_store = store },
+      }, {
+        on_connect = function(c, e)
+          got = { client = c, err = e }
+        end,
+      })
+      assert.is_true(wait_for(function()
+        return got ~= nil
+      end, 3000))
+      assert.is_nil(got.err)
+      assert.is_not_nil(got.client)
 
-			-- Exactly one refresh grant, spent before the dial rather than
-			-- deferred to a later request.
-			assert.are.equal(1, token_hits)
-			assert.are.equal("Bearer fresh-access-token", seen_auth_on_initialize)
+      -- Exactly one refresh grant, spent before the dial rather than
+      -- deferred to a later request.
+      assert.are.equal(1, token_hits)
+      assert.are.equal("Bearer fresh-access-token", seen_auth_on_initialize)
 
-			got.client:disconnect()
-		end
-	)
+      got.client:disconnect()
+    end
+  )
 
-	it("refreshes an expired token transparently and the request succeeds with the new token", function()
-		local seen_auth_on_ping = {}
-		double = HttpDouble.new({
-			on_request = function(method, path, rest, head)
-				if method == "POST" and path == "/token" then
-					return {
-						status = 200,
-						body = vim.json.encode({
-							access_token = "fresh-access-token",
-							refresh_token = "rotated-refresh-token",
-							token_type = "Bearer",
-							expires_in = 3600,
-						}),
-					}
-				end
-				if method == "POST" and path == "/mcp" then
-					local ok, decoded = pcall(vim.json.decode, rest)
-					if ok and decoded.method == "initialize" then
-						return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
-					end
-					-- A ping: record the Authorization it carried so we can prove it
-					-- used the refreshed token, not the expired one.
-					table.insert(seen_auth_on_ping, head and head:match("[Aa]uthorization:%s*([^\r\n]+)"))
-					return {
-						status = 200,
-						body = vim.json.encode({ jsonrpc = "2.0", id = decoded.id, result = { pong = true } }),
-					}
-				end
-				return { status = 404, body = "" }
-			end,
-		})
+  it("refreshes an expired token transparently and the request succeeds with the new token", function()
+    local seen_auth_on_ping = {}
+    double = HttpDouble.new({
+      on_request = function(method, path, rest, head)
+        if method == "POST" and path == "/token" then
+          return {
+            status = 200,
+            body = vim.json.encode({
+              access_token = "fresh-access-token",
+              refresh_token = "rotated-refresh-token",
+              token_type = "Bearer",
+              expires_in = 3600,
+            }),
+          }
+        end
+        if method == "POST" and path == "/mcp" then
+          local ok, decoded = pcall(vim.json.decode, rest)
+          local handshake = ok and legacy_handshake(decoded)
+          if handshake then
+            return handshake
+          end
+          -- A ping: record the Authorization it carried so we can prove it
+          -- used the refreshed token, not the expired one.
+          table.insert(seen_auth_on_ping, head and head:match("[Aa]uthorization:%s*([^\r\n]+)"))
+          return {
+            status = 200,
+            body = vim.json.encode({ jsonrpc = "2.0", id = decoded.id, result = { pong = true } }),
+          }
+        end
+        return { status = 404, body = "" }
+      end,
+    })
 
-		local store = seed_expired_store(double.url .. "/token")
+    local store = seed_expired_store(double.url .. "/token")
 
-		local got
-		client.connect({
-			url = double.url .. "/mcp",
-			auth = { token_store = store },
-		}, {
-			on_connect = function(c, e)
-				got = { client = c, err = e }
-			end,
-		})
-		assert.is_true(wait_for(function()
-			return got ~= nil
-		end, 3000))
-		assert.is_nil(got.err)
+    local got
+    client.connect({
+      url = double.url .. "/mcp",
+      auth = { token_store = store },
+    }, {
+      on_connect = function(c, e)
+        got = { client = c, err = e }
+      end,
+    })
+    assert.is_true(wait_for(function()
+      return got ~= nil
+    end, 3000))
+    assert.is_nil(got.err)
 
-		local reply
-		got.client:request({ jsonrpc = "2.0", id = 7, method = "ping", params = {} }, function(err, result)
-			reply = { err = err, result = result }
-		end)
+    local reply
+    got.client:request({ jsonrpc = "2.0", id = 7, method = "ping", params = {} }, function(err, result)
+      reply = { err = err, result = result }
+    end)
 
-		assert.is_true(wait_for(function()
-			return reply ~= nil
-		end, 3000))
-		-- The caller observes only the successful retry -- no error surfaced.
-		assert.is_nil(reply.err)
-		assert.are.same({ pong = true }, reply.result.result)
-		-- The ping went out carrying the refreshed token, not the expired one.
-		assert.are.equal(1, #seen_auth_on_ping)
-		assert.are.equal("Bearer fresh-access-token", seen_auth_on_ping[1])
-		-- The rotated token was persisted for next time.
-		local status = store:status()
-		assert.is_true(status.has_token)
-		assert.is_false(status.expired)
+    assert.is_true(wait_for(function()
+      return reply ~= nil
+    end, 3000))
+    -- The caller observes only the successful retry -- no error surfaced.
+    assert.is_nil(reply.err)
+    assert.are.same({ pong = true }, reply.result.result)
+    -- The ping went out carrying the refreshed token, not the expired one.
+    assert.are.equal(1, #seen_auth_on_ping)
+    assert.are.equal("Bearer fresh-access-token", seen_auth_on_ping[1])
+    -- The rotated token was persisted for next time.
+    local status = store:status()
+    assert.is_true(status.has_token)
+    assert.is_false(status.expired)
 
-		got.client:disconnect()
-	end)
+    got.client:disconnect()
+  end)
 
-	it(
-		"surfaces a terminal re-auth-required error at connect time when the refresh token is revoked (no dial attempted)",
-		function()
-			local initialize_attempts = 0
-			double = HttpDouble.new({
-				on_request = function(method, path, rest)
-					if method == "POST" and path == "/token" then
-						-- Refresh token revoked: invalid_grant is terminal.
-						return {
-							status = 400,
-							body = vim.json.encode({ error = "invalid_grant", error_description = "revoked" }),
-						}
-					end
-					if method == "POST" and path == "/mcp" then
-						local ok, decoded = pcall(vim.json.decode, rest)
-						if ok and decoded.method == "initialize" then
-							initialize_attempts = initialize_attempts + 1
-						end
-						return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
-					end
-					return { status = 404, body = "" }
-				end,
-			})
+  it(
+    "surfaces a terminal re-auth-required error at connect time when the refresh token is revoked (no dial attempted)",
+    function()
+      local initialize_attempts = 0
+      double = HttpDouble.new({
+        on_request = function(method, path, rest)
+          if method == "POST" and path == "/token" then
+            -- Refresh token revoked: invalid_grant is terminal.
+            return {
+              status = 400,
+              body = vim.json.encode({ error = "invalid_grant", error_description = "revoked" }),
+            }
+          end
+          if method == "POST" and path == "/mcp" then
+            local ok, decoded = pcall(vim.json.decode, rest)
+            if ok and decoded.method == "initialize" then
+              initialize_attempts = initialize_attempts + 1
+            end
+            return {
+              status = 200,
+              body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = { protocolVersion = "2025-11-25" } }),
+            }
+          end
+          return { status = 404, body = "" }
+        end,
+      })
 
-			local store = seed_expired_store(double.url .. "/token", { refresh_token = "SUPER-SECRET-refresh" })
+      local store = seed_expired_store(double.url .. "/token", { refresh_token = "SUPER-SECRET-refresh" })
 
-			local got
-			client.connect({
-				url = double.url .. "/mcp",
-				auth = { token_store = store },
-			}, {
-				on_connect = function(c, e)
-					got = { client = c, err = e }
-				end,
-			})
-			assert.is_true(wait_for(function()
-				return got ~= nil
-			end, 3000))
+      local got
+      client.connect({
+        url = double.url .. "/mcp",
+        auth = { token_store = store },
+      }, {
+        on_connect = function(c, e)
+          got = { client = c, err = e }
+        end,
+      })
+      assert.is_true(wait_for(function()
+        return got ~= nil
+      end, 3000))
 
-			-- The stale, unrefreshable token is caught BEFORE dialing at all: a
-			-- distinct re-auth error, not a deceptive connect success that would
-			-- only fail later on the first real request.
-			assert.is_nil(got.client)
-			assert.is_not_nil(got.err)
-			assert.matches("re%-auth", got.err)
-			-- No connection was ever attempted: refresh failed first, no dial.
-			assert.are.equal(0, initialize_attempts)
-			-- The secret refresh token never leaks into the surfaced error.
-			assert.is_nil(got.err:find("SUPER-SECRET-refresh", 1, true))
+      -- The stale, unrefreshable token is caught BEFORE dialing at all: a
+      -- distinct re-auth error, not a deceptive connect success that would
+      -- only fail later on the first real request.
+      assert.is_nil(got.client)
+      assert.is_not_nil(got.err)
+      assert.matches("re%-auth", got.err)
+      -- No connection was ever attempted: refresh failed first, no dial.
+      assert.are.equal(0, initialize_attempts)
+      -- The secret refresh token never leaks into the surfaced error.
+      assert.is_nil(got.err:find("SUPER-SECRET-refresh", 1, true))
 
-			-- Give any (erroneous) retry a chance to fire; there must be none.
-			vim.wait(150, function()
-				return false
-			end)
-			assert.are.equal(0, initialize_attempts)
-		end
-	)
+      -- Give any (erroneous) retry a chance to fire; there must be none.
+      vim.wait(150, function()
+        return false
+      end)
+      assert.are.equal(0, initialize_attempts)
+    end
+  )
 
-	it("does not refresh when the configured token is still valid (single request, no /token hit)", function()
-		local token_hits = 0
-		double = HttpDouble.new({
-			on_request = function(method, path, rest, head)
-				if method == "POST" and path == "/token" then
-					token_hits = token_hits + 1
-					return { status = 200, body = vim.json.encode({ access_token = "should-not-happen" }) }
-				end
-				if method == "POST" and path == "/mcp" then
-					local ok, decoded = pcall(vim.json.decode, rest)
-					if ok and decoded.method == "initialize" then
-						return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
-					end
-					return {
-						status = 200,
-						body = vim.json.encode({ jsonrpc = "2.0", id = decoded.id, result = { pong = true } }),
-					}
-				end
-				return { status = 404, body = "" }
-			end,
-		})
+  it("does not refresh when the configured token is still valid (single request, no /token hit)", function()
+    local token_hits = 0
+    double = HttpDouble.new({
+      on_request = function(method, path, rest, head)
+        if method == "POST" and path == "/token" then
+          token_hits = token_hits + 1
+          return { status = 200, body = vim.json.encode({ access_token = "should-not-happen" }) }
+        end
+        if method == "POST" and path == "/mcp" then
+          local ok, decoded = pcall(vim.json.decode, rest)
+          local handshake = ok and legacy_handshake(decoded)
+          if handshake then
+            return handshake
+          end
+          return {
+            status = 200,
+            body = vim.json.encode({ jsonrpc = "2.0", id = decoded.id, result = { pong = true } }),
+          }
+        end
+        return { status = 404, body = "" }
+      end,
+    })
 
-		-- A store whose token is NOT expired: no refresh should be attempted.
-		local store = seed_expired_store(double.url .. "/token", { expires_at = os.time() + 3600 })
+    -- A store whose token is NOT expired: no refresh should be attempted.
+    local store = seed_expired_store(double.url .. "/token", { expires_at = os.time() + 3600 })
 
-		local got
-		client.connect({
-			url = double.url .. "/mcp",
-			auth = { token_store = store },
-		}, {
-			on_connect = function(c, e)
-				got = { client = c, err = e }
-			end,
-		})
-		assert.is_true(wait_for(function()
-			return got ~= nil
-		end, 3000))
-		assert.is_nil(got.err)
+    local got
+    client.connect({
+      url = double.url .. "/mcp",
+      auth = { token_store = store },
+    }, {
+      on_connect = function(c, e)
+        got = { client = c, err = e }
+      end,
+    })
+    assert.is_true(wait_for(function()
+      return got ~= nil
+    end, 3000))
+    assert.is_nil(got.err)
 
-		local reply
-		got.client:request({ jsonrpc = "2.0", id = 9, method = "ping", params = {} }, function(err, result)
-			reply = { err = err, result = result }
-		end)
+    local reply
+    got.client:request({ jsonrpc = "2.0", id = 9, method = "ping", params = {} }, function(err, result)
+      reply = { err = err, result = result }
+    end)
 
-		assert.is_true(wait_for(function()
-			return reply ~= nil
-		end, 3000))
-		assert.is_nil(reply.err)
-		assert.are.same({ pong = true }, reply.result.result)
-		-- The valid token means the token endpoint was never contacted.
-		assert.are.equal(0, token_hits)
+    assert.is_true(wait_for(function()
+      return reply ~= nil
+    end, 3000))
+    assert.is_nil(reply.err)
+    assert.are.same({ pong = true }, reply.result.result)
+    -- The valid token means the token endpoint was never contacted.
+    assert.are.equal(0, token_hits)
 
-		got.client:disconnect()
-	end)
+    got.client:disconnect()
+  end)
 end)
 
 describe("client concurrent refresh coalescing (single-flight)", function()
-	-- N requests fire in a tight loop while the configured token is expired.
-	-- Refresh tokens rotate on use, so without single-flight coalescing each
-	-- call would race its own refresh grant and all but the winner would be
-	-- rejected with invalid_grant against an already-rotated token.
-	local token_store = require("mcp-client.auth.token_store")
+  -- N requests fire in a tight loop while the configured token is expired.
+  -- Refresh tokens rotate on use, so without single-flight coalescing each
+  -- call would race its own refresh grant and all but the winner would be
+  -- rejected with invalid_grant against an already-rotated token.
+  local token_store = require("mcp-client.auth.token_store")
 
-	local double
-	local tmp
+  local double
+  local tmp
 
-	after_each(function()
-		client._reset_registry()
-		vim.wait(30, function()
-			return false
-		end)
-		if double then
-			double:stop()
-			double = nil
-		end
-	end)
+  after_each(function()
+    client._reset_registry()
+    vim.wait(30, function()
+      return false
+    end)
+    if double then
+      double:stop()
+      double = nil
+    end
+  end)
 
-	local function make_tmpdir()
-		local dir = vim.fn.tempname()
-		vim.fn.mkdir(dir, "p")
-		return dir
-	end
+  local function make_tmpdir()
+    local dir = vim.fn.tempname()
+    vim.fn.mkdir(dir, "p")
+    return dir
+  end
 
-	it("coalesces N concurrent refreshes onto one grant; every request succeeds", function()
-		local token_hits = 0
-		local ping_replies = 0
-		-- A rotating token endpoint with reuse-detection: a grant presenting
-		-- anything other than the currently-valid refresh token is rejected
-		-- with invalid_grant, as a real rotating AS would.
-		local current_refresh = "rt-0"
-		local rotation = 0
-		double = HttpDouble.new({
-			on_request = function(method, path, rest, _head)
-				if method == "POST" and path == "/token" then
-					token_hits = token_hits + 1
-					local presented = rest and rest:match("refresh_token=([^&]+)")
-					if presented ~= current_refresh then
-						-- Reuse of an already-rotated refresh token: terminal.
-						return {
-							status = 400,
-							body = vim.json.encode({
-								error = "invalid_grant",
-								error_description = "refresh token already used",
-							}),
-						}
-					end
-					rotation = rotation + 1
-					current_refresh = "rt-" .. rotation
-					return {
-						status = 200,
-						body = vim.json.encode({
-							access_token = "fresh-access-" .. rotation,
-							refresh_token = current_refresh,
-							token_type = "Bearer",
-							expires_in = 3600,
-						}),
-					}
-				end
-				if method == "POST" and path == "/mcp" then
-					local ok, decoded = pcall(vim.json.decode, rest)
-					if ok and decoded.method == "initialize" then
-						return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
-					end
-					ping_replies = ping_replies + 1
-					return {
-						status = 200,
-						body = vim.json.encode({ jsonrpc = "2.0", id = decoded.id, result = { pong = true } }),
-					}
-				end
-				return { status = 404, body = "" }
-			end,
-		})
+  it("coalesces N concurrent refreshes onto one grant; every request succeeds", function()
+    local token_hits = 0
+    local ping_replies = 0
+    -- A rotating token endpoint with reuse-detection: a grant presenting
+    -- anything other than the currently-valid refresh token is rejected
+    -- with invalid_grant, as a real rotating AS would.
+    local current_refresh = "rt-0"
+    local rotation = 0
+    double = HttpDouble.new({
+      on_request = function(method, path, rest, _head)
+        if method == "POST" and path == "/token" then
+          token_hits = token_hits + 1
+          local presented = rest and rest:match("refresh_token=([^&]+)")
+          if presented ~= current_refresh then
+            -- Reuse of an already-rotated refresh token: terminal.
+            return {
+              status = 400,
+              body = vim.json.encode({
+                error = "invalid_grant",
+                error_description = "refresh token already used",
+              }),
+            }
+          end
+          rotation = rotation + 1
+          current_refresh = "rt-" .. rotation
+          return {
+            status = 200,
+            body = vim.json.encode({
+              access_token = "fresh-access-" .. rotation,
+              refresh_token = current_refresh,
+              token_type = "Bearer",
+              expires_in = 3600,
+            }),
+          }
+        end
+        if method == "POST" and path == "/mcp" then
+          local ok, decoded = pcall(vim.json.decode, rest)
+          local handshake = ok and legacy_handshake(decoded)
+          if handshake then
+            return handshake
+          end
+          ping_replies = ping_replies + 1
+          return {
+            status = 200,
+            body = vim.json.encode({ jsonrpc = "2.0", id = decoded.id, result = { pong = true } }),
+          }
+        end
+        return { status = 404, body = "" }
+      end,
+    })
 
-		tmp = make_tmpdir()
-		local store = token_store.new({ key = "serverConcurrent", backend = "file", data_home = tmp })
-		store:save({
-			access_token = "expired-access-token",
-			refresh_token = "rt-0",
-			token_type = "Bearer",
-			expires_at = os.time() - 1, -- already expired
-			scope = "mcp",
-			token_endpoint = double.url .. "/token",
-			client_id = "the-client-id",
-			resource = "https://server.example/mcp",
-		})
+    tmp = make_tmpdir()
+    local store = token_store.new({ key = "serverConcurrent", backend = "file", data_home = tmp })
+    store:save({
+      access_token = "expired-access-token",
+      refresh_token = "rt-0",
+      token_type = "Bearer",
+      expires_at = os.time() - 1, -- already expired
+      scope = "mcp",
+      token_endpoint = double.url .. "/token",
+      client_id = "the-client-id",
+      resource = "https://server.example/mcp",
+    })
 
-		local got
-		client.connect({
-			url = double.url .. "/mcp",
-			auth = { token_store = store },
-		}, {
-			on_connect = function(c, e)
-				got = { client = c, err = e }
-			end,
-		})
-		assert.is_true(wait_for(function()
-			return got ~= nil
-		end, 3000))
-		assert.is_nil(got.err)
-		-- client.connect() refreshes a stored-but-expired token before dialing,
-		-- so one grant is already spent here.
-		assert.are.equal(1, token_hits)
+    local got
+    client.connect({
+      url = double.url .. "/mcp",
+      auth = { token_store = store },
+    }, {
+      on_connect = function(c, e)
+        got = { client = c, err = e }
+      end,
+    })
+    assert.is_true(wait_for(function()
+      return got ~= nil
+    end, 3000))
+    assert.is_nil(got.err)
+    -- client.connect() refreshes a stored-but-expired token before dialing,
+    -- so one grant is already spent here.
+    assert.are.equal(1, token_hits)
 
-		-- Re-expire the store, keeping the current rotated refresh token, so
-		-- the batch below starts with an expired token again.
-		store:save(vim.tbl_extend("force", store:load(), { expires_at = os.time() - 1 }))
+    -- Re-expire the store, keeping the current rotated refresh token, so
+    -- the batch below starts with an expired token again.
+    store:save(vim.tbl_extend("force", store:load(), { expires_at = os.time() - 1 }))
 
-		-- Fire N requests in a tight loop so all of them reach
-		-- ensure_fresh_token while the token is still expired.
-		local N = 5
-		local replies = {}
-		for i = 1, N do
-			got.client:request({ jsonrpc = "2.0", id = 100 + i, method = "ping", params = {} }, function(err, result)
-				table.insert(replies, { err = err, result = result })
-			end)
-		end
+    -- Fire N requests in a tight loop so all of them reach
+    -- ensure_fresh_token while the token is still expired.
+    local N = 5
+    local replies = {}
+    for i = 1, N do
+      got.client:request({ jsonrpc = "2.0", id = 100 + i, method = "ping", params = {} }, function(err, result)
+        table.insert(replies, { err = err, result = result })
+      end)
+    end
 
-		assert.is_true(wait_for(function()
-			return #replies == N
-		end, 3000))
+    assert.is_true(wait_for(function()
+      return #replies == N
+    end, 3000))
 
-		-- The token endpoint was hit exactly once more for the whole batch:
-		-- single-flight coalescing, not N independent grants.
-		assert.are.equal(2, token_hits)
-		assert.are.equal(N, #replies)
-		for _, reply in ipairs(replies) do
-			assert.is_nil(reply.err)
-			assert.are.same({ pong = true }, reply.result.result)
-		end
-		assert.are.equal(N, ping_replies)
-		-- The rotated token was persisted for next time and is no longer expired.
-		local status = store:status()
-		assert.is_true(status.has_token)
-		assert.is_false(status.expired)
+    -- The token endpoint was hit exactly once more for the whole batch:
+    -- single-flight coalescing, not N independent grants.
+    assert.are.equal(2, token_hits)
+    assert.are.equal(N, #replies)
+    for _, reply in ipairs(replies) do
+      assert.is_nil(reply.err)
+      assert.are.same({ pong = true }, reply.result.result)
+    end
+    assert.are.equal(N, ping_replies)
+    -- The rotated token was persisted for next time and is no longer expired.
+    local status = store:status()
+    assert.is_true(status.has_token)
+    assert.is_false(status.expired)
 
-		got.client:disconnect()
-	end)
+    got.client:disconnect()
+  end)
 end)
 
 describe("bearer attachment on the wire (happy path)", function()
-	-- Exercises that a token applied to a shared headers table is actually
-	-- sent on every outbound request.
-	local token_store = require("mcp-client.auth.token_store")
-	local StreamableHttp = require("mcp-client.transport.streamable_http")
+  -- Exercises that a token applied to a shared headers table is actually
+  -- sent on every outbound request.
+  local token_store = require("mcp-client.auth.token_store")
+  local StreamableHttp = require("mcp-client.transport.streamable_http")
 
-	local double
-	after_each(function()
-		if double then
-			double:stop()
-			double = nil
-		end
-	end)
+  local double
+  after_each(function()
+    if double then
+      double:stop()
+      double = nil
+    end
+  end)
 
-	it("sends Authorization: Bearer <token> on each request", function()
-		local seen_auth = {}
-		double = HttpDouble.new({
-			on_request = function(method, path, rest, head)
-				local auth = head and head:match("[Aa]uthorization:%s*([^\r\n]+)")
-				table.insert(seen_auth, auth)
-				return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
-			end,
-		})
+  it("sends Authorization: Bearer <token> on each request", function()
+    local seen_auth = {}
+    double = HttpDouble.new({
+      on_request = function(method, path, rest, head)
+        local auth = head and head:match("[Aa]uthorization:%s*([^\r\n]+)")
+        table.insert(seen_auth, auth)
+        return {
+          status = 200,
+          body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = { protocolVersion = "2025-11-25" } }),
+        }
+      end,
+    })
 
-		-- A shared headers table, exactly as client.lua threads config.headers.
-		local headers = {}
-		token_store.apply_to_headers(headers, {
-			access_token = "wire-token",
-			token_type = "Bearer",
-		})
-		local transport = StreamableHttp.new({ url = double.url, headers = headers })
+    -- A shared headers table, exactly as client.lua threads config.headers.
+    local headers = {}
+    token_store.apply_to_headers(headers, {
+      access_token = "wire-token",
+      token_type = "Bearer",
+    })
+    local transport = StreamableHttp.new({ url = double.url, headers = headers })
 
-		local done = 0
-		transport:request({ jsonrpc = "2.0", id = 1, method = "ping" }, function()
-			done = done + 1
-		end)
-		transport:request({ jsonrpc = "2.0", id = 2, method = "ping" }, function()
-			done = done + 1
-		end)
+    local done = 0
+    transport:request({ jsonrpc = "2.0", id = 1, method = "ping" }, function()
+      done = done + 1
+    end)
+    transport:request({ jsonrpc = "2.0", id = 2, method = "ping" }, function()
+      done = done + 1
+    end)
 
-		assert.is_true(wait_for(function()
-			return done == 2
-		end, 3000))
-		assert.are.equal(2, #seen_auth)
-		assert.are.equal("Bearer wire-token", seen_auth[1])
-		assert.are.equal("Bearer wire-token", seen_auth[2])
-	end)
+    assert.is_true(wait_for(function()
+      return done == 2
+    end, 3000))
+    assert.are.equal(2, #seen_auth)
+    assert.are.equal("Bearer wire-token", seen_auth[1])
+    assert.are.equal("Bearer wire-token", seen_auth[2])
+  end)
 
-	it("reflects a rotated token on the next request through the same table", function()
-		local seen_auth = {}
-		double = HttpDouble.new({
-			on_request = function(method, path, rest, head)
-				table.insert(seen_auth, head and head:match("[Aa]uthorization:%s*([^\r\n]+)"))
-				return { status = 200, body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = {} }) }
-			end,
-		})
+  it("reflects a rotated token on the next request through the same table", function()
+    local seen_auth = {}
+    double = HttpDouble.new({
+      on_request = function(method, path, rest, head)
+        table.insert(seen_auth, head and head:match("[Aa]uthorization:%s*([^\r\n]+)"))
+        return {
+          status = 200,
+          body = vim.json.encode({ jsonrpc = "2.0", id = 1, result = { protocolVersion = "2025-11-25" } }),
+        }
+      end,
+    })
 
-		local headers = {}
-		token_store.apply_to_headers(headers, { access_token = "first", token_type = "Bearer" })
-		local transport = StreamableHttp.new({ url = double.url, headers = headers })
+    local headers = {}
+    token_store.apply_to_headers(headers, { access_token = "first", token_type = "Bearer" })
+    local transport = StreamableHttp.new({ url = double.url, headers = headers })
 
-		local done = 0
-		transport:request({ jsonrpc = "2.0", id = 1, method = "ping" }, function()
-			done = done + 1
-			-- Rotate in place; the transport reads self.headers each request.
-			token_store.apply_to_headers(headers, { access_token = "second", token_type = "Bearer" })
-			transport:request({ jsonrpc = "2.0", id = 2, method = "ping" }, function()
-				done = done + 1
-			end)
-		end)
+    local done = 0
+    transport:request({ jsonrpc = "2.0", id = 1, method = "ping" }, function()
+      done = done + 1
+      -- Rotate in place; the transport reads self.headers each request.
+      token_store.apply_to_headers(headers, { access_token = "second", token_type = "Bearer" })
+      transport:request({ jsonrpc = "2.0", id = 2, method = "ping" }, function()
+        done = done + 1
+      end)
+    end)
 
-		assert.is_true(wait_for(function()
-			return done == 2
-		end, 3000))
-		assert.are.equal("Bearer first", seen_auth[1])
-		assert.are.equal("Bearer second", seen_auth[2])
-	end)
+    assert.is_true(wait_for(function()
+      return done == 2
+    end, 3000))
+    assert.are.equal("Bearer first", seen_auth[1])
+    assert.are.equal("Bearer second", seen_auth[2])
+  end)
 end)

@@ -21,21 +21,21 @@ local PROBE_TIMEOUT_MS = 750
 --- @param url string
 --- @return boolean reachable
 local function http_answers(url)
-	if vim.env.MCP_CLIENT_LIVE ~= "1" then
-		return false
-	end
-	local ok, response = pcall(function()
-		return curl.get(url, { timeout = PROBE_TIMEOUT_MS })
-	end)
-	if not ok or not response then
-		return false
-	end
-	return type(response.status) == "number" and response.status >= 100
+  if vim.env.MCP_CLIENT_LIVE ~= "1" then
+    return false
+  end
+  local ok, response = pcall(function()
+    return curl.get(url, { timeout = PROBE_TIMEOUT_MS })
+  end)
+  if not ok or not response then
+    return false
+  end
+  return type(response.status) == "number" and response.status >= 100
 end
 
 --- @return boolean
 function M.ravitemer_reachable()
-	return http_answers(M.RAVITEMER_HEALTH_URL)
+  return http_answers(M.RAVITEMER_HEALTH_URL)
 end
 
 --- Probes the dashboard SPA root, not the MCP endpoint itself -- a reachable
@@ -43,7 +43,7 @@ end
 --- samanhappy_mcp_reachable below).
 --- @return boolean
 function M.samanhappy_reachable()
-	return http_answers(M.SAMANHAPPY_BASE_URL .. "/")
+  return http_answers(M.SAMANHAPPY_BASE_URL .. "/")
 end
 
 --- samanhappy/mcphub only mounts its MCP routes (`/mcp/:group`, `/sse/:group`,
@@ -53,25 +53,25 @@ end
 --- the route is mounted; a 404 means it isn't.
 --- @return boolean
 function M.samanhappy_mcp_reachable()
-	if not M.samanhappy_reachable() then
-		return false
-	end
-	local ok, response = pcall(function()
-		return curl.post(M.SAMANHAPPY_BASE_URL .. "/mcp/$smart", {
-			timeout = PROBE_TIMEOUT_MS,
-			headers = { ["Content-Type"] = "application/json", ["Accept"] = "application/json, text/event-stream" },
-			body = vim.json.encode({
-				jsonrpc = "2.0",
-				id = 1,
-				method = "initialize",
-				params = vim.empty_dict(),
-			}),
-		})
-	end)
-	if not ok or not response or type(response.status) ~= "number" then
-		return false
-	end
-	return response.status ~= 404
+  if not M.samanhappy_reachable() then
+    return false
+  end
+  local ok, response = pcall(function()
+    return curl.post(M.SAMANHAPPY_BASE_URL .. "/mcp/$smart", {
+      timeout = PROBE_TIMEOUT_MS,
+      headers = { ["Content-Type"] = "application/json", ["Accept"] = "application/json, text/event-stream" },
+      body = vim.json.encode({
+        jsonrpc = "2.0",
+        id = 1,
+        method = "initialize",
+        params = vim.empty_dict(),
+      }),
+    })
+  end)
+  if not ok or not response or type(response.status) ~= "number" then
+    return false
+  end
+  return response.status ~= 404
 end
 
 return M

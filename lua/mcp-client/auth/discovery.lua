@@ -26,11 +26,11 @@ local REQUEST_TIMEOUT_MS = 30000
 --- @param header string|nil
 --- @return string|nil
 function M.parse_www_authenticate(header)
-	if type(header) ~= "string" then
-		return nil
-	end
-	-- resource_metadata is a quoted-string parameter of the Bearer challenge.
-	return header:match('resource_metadata%s*=%s*"([^"]+)"')
+  if type(header) ~= "string" then
+    return nil
+  end
+  -- resource_metadata is a quoted-string parameter of the Bearer challenge.
+  return header:match('resource_metadata%s*=%s*"([^"]+)"')
 end
 
 --- Derive the default RFC 9728 well-known PRM URL from a server URL, used when
@@ -40,8 +40,8 @@ end
 --- @param server_url string
 --- @return string
 function M.default_prm_url(server_url)
-	local origin = server_url:match("^(https?://[^/]+)") or server_url
-	return origin .. "/.well-known/oauth-protected-resource"
+  local origin = server_url:match("^(https?://[^/]+)") or server_url
+  return origin .. "/.well-known/oauth-protected-resource"
 end
 
 --- Derive the RFC 8414 well-known AS metadata URL from an issuer URL. Per
@@ -51,37 +51,37 @@ end
 --- @param issuer string
 --- @return string
 local function as_metadata_url(issuer)
-	local origin, path = issuer:match("^(https?://[^/]+)(.*)$")
-	if not origin then
-		origin, path = issuer, ""
-	end
-	path = path:gsub("/$", "")
-	return origin .. "/.well-known/oauth-authorization-server" .. path
+  local origin, path = issuer:match("^(https?://[^/]+)(.*)$")
+  if not origin then
+    origin, path = issuer, ""
+  end
+  path = path:gsub("/$", "")
+  return origin .. "/.well-known/oauth-authorization-server" .. path
 end
 
 --- Shared GET-and-decode-JSON helper. `stage` labels errors so the caller
 --- knows which discovery hop failed.
 local function get_json(url, stage, callback)
-	curl.get(url, {
-		headers = { ["Accept"] = "application/json" },
-		timeout = REQUEST_TIMEOUT_MS,
-		callback = vim.schedule_wrap(function(response)
-			if not response then
-				return callback(nil, string.format("%s: no response", stage))
-			end
-			if response.status < 200 or response.status >= 300 then
-				return callback(nil, string.format("%s: fetch returned status %d", stage, response.status))
-			end
-			local ok, decoded = pcall(vim.json.decode, response.body)
-			if not ok or type(decoded) ~= "table" then
-				return callback(nil, string.format("%s: response was not valid JSON", stage))
-			end
-			return callback(decoded, nil)
-		end),
-		on_error = vim.schedule_wrap(function(err)
-			callback(nil, string.format("%s: request failed: %s", stage, err.message or "unknown error"))
-		end),
-	})
+  curl.get(url, {
+    headers = { ["Accept"] = "application/json" },
+    timeout = REQUEST_TIMEOUT_MS,
+    callback = vim.schedule_wrap(function(response)
+      if not response then
+        return callback(nil, string.format("%s: no response", stage))
+      end
+      if response.status < 200 or response.status >= 300 then
+        return callback(nil, string.format("%s: fetch returned status %d", stage, response.status))
+      end
+      local ok, decoded = pcall(vim.json.decode, response.body)
+      if not ok or type(decoded) ~= "table" then
+        return callback(nil, string.format("%s: response was not valid JSON", stage))
+      end
+      return callback(decoded, nil)
+    end),
+    on_error = vim.schedule_wrap(function(err)
+      callback(nil, string.format("%s: request failed: %s", stage, err.message or "unknown error"))
+    end),
+  })
 end
 
 --- Fetch and validate the RFC 9728 Protected Resource Metadata document.
@@ -93,22 +93,22 @@ end
 ---     raw                  = table,         -- the full decoded document
 ---   }
 function M.fetch_protected_resource_metadata(prm_url, callback)
-	get_json(prm_url, "protected resource metadata", function(doc, err)
-		if err then
-			return callback(nil, err)
-		end
+  get_json(prm_url, "protected resource metadata", function(doc, err)
+    if err then
+      return callback(nil, err)
+    end
 
-		local servers = doc.authorization_servers
-		if type(servers) ~= "table" or #servers == 0 then
-			return callback(nil, "protected resource metadata: document did not list any authorization_servers")
-		end
+    local servers = doc.authorization_servers
+    if type(servers) ~= "table" or #servers == 0 then
+      return callback(nil, "protected resource metadata: document did not list any authorization_servers")
+    end
 
-		return callback({
-			resource = doc.resource,
-			authorization_servers = servers,
-			raw = doc,
-		}, nil)
-	end)
+    return callback({
+      resource = doc.resource,
+      authorization_servers = servers,
+      raw = doc,
+    }, nil)
+  end)
 end
 
 --- Fetch and validate RFC 8414 Authorization Server Metadata for an issuer.
@@ -123,27 +123,24 @@ end
 ---     raw                    = table,       -- the full decoded document
 ---   }
 function M.fetch_authorization_server_metadata(issuer, callback)
-	get_json(as_metadata_url(issuer), "authorization server metadata", function(doc, err)
-		if err then
-			return callback(nil, err)
-		end
+  get_json(as_metadata_url(issuer), "authorization server metadata", function(doc, err)
+    if err then
+      return callback(nil, err)
+    end
 
-		if type(doc.authorization_endpoint) ~= "string" or type(doc.token_endpoint) ~= "string" then
-			return callback(
-				nil,
-				"authorization server metadata: document missing authorization_endpoint or token_endpoint"
-			)
-		end
+    if type(doc.authorization_endpoint) ~= "string" or type(doc.token_endpoint) ~= "string" then
+      return callback(nil, "authorization server metadata: document missing authorization_endpoint or token_endpoint")
+    end
 
-		return callback({
-			issuer = doc.issuer,
-			authorization_endpoint = doc.authorization_endpoint,
-			token_endpoint = doc.token_endpoint,
-			registration_endpoint = doc.registration_endpoint,
-			code_challenge_methods_supported = doc.code_challenge_methods_supported,
-			raw = doc,
-		}, nil)
-	end)
+    return callback({
+      issuer = doc.issuer,
+      authorization_endpoint = doc.authorization_endpoint,
+      token_endpoint = doc.token_endpoint,
+      registration_endpoint = doc.registration_endpoint,
+      code_challenge_methods_supported = doc.code_challenge_methods_supported,
+      raw = doc,
+    }, nil)
+  end)
 end
 
 return M
