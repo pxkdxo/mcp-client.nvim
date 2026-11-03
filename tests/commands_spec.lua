@@ -29,6 +29,9 @@ local function fake_store(status)
     table.insert(store.saved, token)
     return true, nil
   end
+  store.clear = function()
+    store.cleared = true
+  end
   return store
 end
 
@@ -525,22 +528,22 @@ describe("commands (MCPAuth target resolution + completion)", function()
   end)
 
   describe("register", function()
-    it("registers :MCPAuth with nargs = '?' and a completion function", function()
+    it("registers :MCPAuth, :MCPReconnect, :MCPLogout, and :MCPStatus", function()
       local created = {}
       local real_create = vim.api.nvim_create_user_command
       vim.api.nvim_create_user_command = function(name, callback, opts)
-        table.insert(created, { name = name, callback = callback, opts = opts })
+        created[name] = { callback = callback, opts = opts }
       end
 
       local ok, err = pcall(commands.register)
       vim.api.nvim_create_user_command = real_create
       assert.is_true(ok, err)
 
-      assert.are.equal(1, #created)
-      assert.are.equal("MCPAuth", created[1].name)
-      assert.are.equal("?", created[1].opts.nargs)
-      assert.are.equal("function", type(created[1].opts.complete))
-      assert.are.equal("function", type(created[1].callback))
+      assert.are.same({ "MCPAuth", "MCPLogout", "MCPReconnect", "MCPStatus" }, vim.fn.sort(vim.tbl_keys(created)))
+      assert.are.equal("?", created.MCPAuth.opts.nargs)
+      assert.are.equal("?", created.MCPReconnect.opts.nargs)
+      assert.are.equal(1, created.MCPLogout.opts.nargs)
+      assert.are.equal(0, created.MCPStatus.opts.nargs)
     end)
 
     it("calling register() twice does not error (idempotent re-setup)", function()
@@ -562,8 +565,10 @@ describe("commands (MCPAuth target resolution + completion)", function()
     local function captured_callback()
       local created
       local real_create = vim.api.nvim_create_user_command
-      vim.api.nvim_create_user_command = function(_name, callback, _opts)
-        created = callback
+      vim.api.nvim_create_user_command = function(name, callback, _opts)
+        if name == "MCPAuth" then
+          created = callback
+        end
       end
       commands.register()
       vim.api.nvim_create_user_command = real_create
@@ -613,5 +618,124 @@ describe("commands (MCPAuth target resolution + completion)", function()
         assert.are.equal("https://server.example.com/mcp", run_flow_calls[1].server_url)
       end
     )
+  end)
+  describe("reconnect, logout, and status", function()
+    local real_connect, real_notify
+    local notified, connects
+
+    --- A connected client double registered under `name`.
+    local function live(name, fields)
+      local stopped = false
+      local obj = vim.tbl_extend("force", { name = name }, fields or {})
+      function obj:is_stopped()
+        return stopped
+      end
+      function obj:state()
+        return stopped and "disconnected" or "connected"
+      end
+      function obj:stderr()
+        return obj.stderr_lines or {}
+      end
+      function obj:request(_, cb)
+        cb("noop")
+      end
+      function obj:notify() end
+      function obj:disconnect()
+        stopped = true
+      end
+      return mcp_client.register_native(obj)
+    end
+
+    before_each(function()
+      real_connect, real_notify = mcp_client.connect, vim.notify
+      notified, connects = {}, {}
+      vim.notify = function(msg)
+        table.insert(notified, msg)
+      end
+      mcp_client.connect = function(cfg, opts)
+        table.insert(connects, cfg)
+        opts.on_connect(live(cfg.name), nil)
+      end
+    end)
+
+    after_each(function()
+      mcp_client.connect, vim.notify = real_connect, real_notify
+      mcp_client._reset_registry()
+    end)
+
+    local function record(name, extra)
+      config._record_hub(
+        name,
+        vim.tbl_extend("force", { url = "http://localhost:1/" .. name, connect_config = { name = name } }, extra or {})
+      )
+    end
+
+    it("reconnects every configured server, replacing each live client", function()
+      record("a")
+      record("b")
+      local old = live("a")
+
+      commands.reconnect()
+
+      assert.are.same(
+        { "a", "b" },
+        vim.tbl_map(function(cfg)
+          return cfg.name
+        end, connects)
+      )
+      assert.is_true(old:is_stopped())
+      assert.are.equal(1, #mcp_client.get_clients({ name = "a" }))
+      assert.are.same({ 'mcp-client: reconnected "a".', 'mcp-client: reconnected "b".' }, notified)
+    end)
+
+    it("reconnects only the named server, and refuses an unknown one", function()
+      record("a")
+      record("b")
+      commands.reconnect("b")
+      commands.reconnect("nope")
+      assert.are.equal(1, #connects)
+      assert.are.equal("b", connects[1].name)
+      assert.matches('"nope" is not configured', notified[2])
+    end)
+
+    it("logout deletes the stored token and disconnects, but only for token-based servers", function()
+      local store = fake_store({ has_token = true, expired = false })
+      record("remote", { token_store = store })
+      record("plain")
+      local client = live("remote")
+
+      commands.logout("remote")
+      commands.logout("plain")
+
+      assert.is_true(store.cleared)
+      assert.is_true(client:is_stopped())
+      assert.are.equal(0, #mcp_client.get_clients({ name = "remote" }))
+      assert.matches("signed out", notified[1])
+      assert.matches("does not use token%-based authentication", notified[2])
+    end)
+
+    it("status lists each server's connection, protocol, process, and auth, then native servers", function()
+      record("tool", { url = false, command = "my-server" })
+      record("remote", { token_store = fake_store({ has_token = false, expired = false }) })
+      config._record_native("inproc")
+      live("tool", {
+        transport = "stdio",
+        era = "legacy",
+        protocol_version = "2025-06-18",
+        server_info = { name = "My Server", version = "2.1" },
+        pid = 4242,
+        stderr_lines = { "starting", "ready" },
+      })
+
+      assert.are.same({
+        "remote: not connected (http://localhost:1/remote)",
+        "  auth: no stored token -- run :MCPAuth remote",
+        "tool: connected over stdio, legacy protocol 2025-06-18 (stdio: my-server)",
+        "  server: My Server 2.1",
+        "  pid: 4242",
+        "  stderr: ready",
+        "inproc: native (in-process)",
+      }, commands.status_lines())
+    end)
   end)
 end)

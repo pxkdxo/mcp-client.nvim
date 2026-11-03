@@ -1,5 +1,6 @@
---- `:MCPAuth [server-name]` Ex command: registration, completion, and pure
---- target resolution.
+--- The `:MCPAuth`, `:MCPReconnect`, `:MCPLogout`, and `:MCPStatus` Ex
+--- commands: registration, completion, target resolution, and the actions
+--- they dispatch to.
 ---
 --- Target resolution turns "no argument" or "an explicit name" into either a
 --- definite target server name or a clear, `vim.notify`-reported reason why
@@ -41,6 +42,40 @@ local M = {}
 --- other's token save and registry teardown/reconnect.
 local in_flight = {}
 
+--- Whether `name` is also a registered native server's name.
+local function names_native(name)
+  return vim.tbl_contains(config().state().native_servers, name)
+end
+
+--- Disconnect and forget every live remote client for `name`, so a
+--- replacement connection never coexists with the one it replaces and
+--- `get_clients({ name = name })` cannot return the stale entry.
+---
+--- The registry is shared with native servers and a client object does not
+--- say which kind it is, so nothing is torn down when `name` also names a
+--- native server: that would destroy it with nothing to bring it back. The
+--- cost in that collision is a stale duplicate remote entry.
+local function teardown(name)
+  if names_native(name) then
+    return
+  end
+  for _, live_client in ipairs(mcp_client().get_clients({ name = name })) do
+    live_client:disconnect()
+    mcp_client()._forget(live_client.id)
+  end
+end
+
+--- Replace a configured server's live connection with a fresh one made from
+--- its retained `connect_config`. `on_done(err)` reports the new connection.
+local function reconnect_server(name, on_done)
+  teardown(name)
+  mcp_client().connect(config()._connect_config(name), {
+    on_connect = function(_, err)
+      on_done(err)
+    end,
+  })
+end
+
 --- The actual OAuth-flow-triggering + reconnect action, given a resolved
 --- server name. `register()`'s command callback calls this after
 --- `resolve_target` returns a definite name. Public (not test-only, despite
@@ -60,26 +95,8 @@ local in_flight = {}
 ---
 --- On success, saves the token directly onto this server's existing
 --- TokenStore object (`config().get_hub(name).token_store`) -- never a
---- freshly-constructed store with a reconstructed key. Then, before dialing
---- the reconnect, tears down any existing live client for this name:
---- `:disconnect()` (so no two transports for this name are live at once),
---- then `mcp_client()._forget(id)` (so the now-dead entry doesn't linger in
---- the registry -- `disconnect()` alone leaves it queryable, by design, so
---- without `_forget` a caller like `health.lua`'s `get_clients({name=...})[1]`
---- could non-deterministically pick the stale entry over the fresh one).
---- This makes re-authenticating an already-connected server replace rather
---- than duplicate the registry entry -- a no-op when there is no live client
---- yet, the common case.
----
---- The registry is shared with native, in-process servers, and a client
---- object gives no reliable way to tell the two apart (`native.lua`
---- deliberately keeps a native client indistinguishable in shape from a
---- remote one). So this skips the teardown entirely when `name` also names a
---- registered native server: tearing down "every entry matching this name"
---- would silently disconnect and forget that native server too, with no
---- reconnect step to bring it back. The rare cost is a stale duplicate
---- remote entry left behind in that specific collision; the alternative is
---- destroying an unrelated native server outright.
+--- freshly-constructed store with a reconstructed key -- then replaces the
+--- server's live connection (see `teardown` and `reconnect_server`).
 ---
 --- Finally reconnects using the exact retained `connect_config` (fetched via
 --- `config()._connect_config(name)`, the internal-only accessor -- never a
@@ -100,9 +117,8 @@ function M.authenticate(name)
   in_flight[name] = true
 
   local record = config().get_hub(name)
-  local connect_config = config()._connect_config(name)
 
-  dcr().run_flow({ server_url = connect_config.url }, function(token, err)
+  dcr().run_flow({ server_url = record.url }, function(token, err)
     if err then
       in_flight[name] = nil
       vim.notify(string.format("mcp-client: authentication for %q failed: %s", name, err), vim.log.levels.WARN)
@@ -111,38 +127,21 @@ function M.authenticate(name)
 
     record.token_store:save(token)
 
-    local names_collide = false
-    for _, native_name in ipairs(config().state().native_servers) do
-      if native_name == name then
-        names_collide = true
-        break
+    reconnect_server(name, function(connect_err)
+      in_flight[name] = nil
+      if connect_err then
+        vim.notify(
+          string.format(
+            "mcp-client: authenticated %q and saved the new token, but reconnecting failed: %s",
+            name,
+            connect_err
+          ),
+          vim.log.levels.WARN
+        )
+        return
       end
-    end
-
-    if not names_collide then
-      for _, live_client in ipairs(mcp_client().get_clients({ name = name })) do
-        live_client:disconnect()
-        mcp_client()._forget(live_client.id)
-      end
-    end
-
-    mcp_client().connect(connect_config, {
-      on_connect = function(_client_object, connect_err)
-        in_flight[name] = nil
-        if connect_err then
-          vim.notify(
-            string.format(
-              "mcp-client: authenticated %q and saved the new token, but reconnecting failed: %s",
-              name,
-              connect_err
-            ),
-            vim.log.levels.WARN
-          )
-          return
-        end
-        vim.notify(string.format("mcp-client: authenticated and reconnected %q.", name), vim.log.levels.INFO)
-      end,
-    })
+      vim.notify(string.format("mcp-client: authenticated and reconnected %q.", name), vim.log.levels.INFO)
+    end)
   end)
 end
 
@@ -265,15 +264,166 @@ local function on_mcpauth(cmd_opts)
   M.authenticate(target)
 end
 
---- Register the `:MCPAuth [server-name]` Ex command. Called once from
---- `config.lua`'s `M.setup()`. `nvim_create_user_command` overwrites an
---- already-defined command of the same name, so calling `register()` again
---- on a repeated `setup()` call is safe.
+--- Every configured remote server name, sorted.
+local function configured_servers()
+  local names = vim.tbl_keys(config().state().servers)
+  table.sort(names)
+  return names
+end
+
+--- `:MCPReconnect [server-name]`: replace one configured server's connection,
+--- or every configured server's when no name is given.
+--- @param name string|nil
+function M.reconnect(name)
+  local names
+  if name ~= nil and name ~= "" then
+    if config().get_hub(name) == nil then
+      return vim.notify(string.format("mcp-client: server %q is not configured.", name), vim.log.levels.WARN)
+    end
+    names = { name }
+  else
+    names = configured_servers()
+    if #names == 0 then
+      return vim.notify("mcp-client: no servers are configured.", vim.log.levels.WARN)
+    end
+  end
+  for _, target in ipairs(names) do
+    reconnect_server(target, function(err)
+      if err then
+        vim.notify(string.format("mcp-client: reconnecting %q failed: %s", target, err), vim.log.levels.WARN)
+      else
+        vim.notify(string.format("mcp-client: reconnected %q.", target), vim.log.levels.INFO)
+      end
+    end)
+  end
+end
+
+--- `:MCPLogout <server-name>`: delete the server's stored token and
+--- disconnect it. `:MCPAuth` signs in again.
+--- @param name string
+function M.logout(name)
+  local record = config().get_hub(name)
+  if record == nil then
+    return vim.notify(string.format("mcp-client: server %q is not configured.", name), vim.log.levels.WARN)
+  end
+  if not has_token_store(record) then
+    return vim.notify(
+      string.format("mcp-client: server %q does not use token-based authentication.", name),
+      vim.log.levels.WARN
+    )
+  end
+  record.token_store:clear()
+  teardown(name)
+  vim.notify(
+    string.format("mcp-client: signed out of %q and deleted its stored token; :MCPAuth %s signs in again.", name, name),
+    vim.log.levels.INFO
+  )
+end
+
+--- The live remote client for a configured server, if any.
+local function live_remote(name)
+  if names_native(name) then
+    return nil
+  end
+  for _, live_client in ipairs(mcp_client().get_clients({ name = name })) do
+    return live_client
+  end
+end
+
+local function auth_line(name, store)
+  local status = store:status()
+  if not status.has_token then
+    return string.format("auth: no stored token -- run :MCPAuth %s", name)
+  end
+  local expiry = type(status.expires_at) == "number" and os.date("%Y-%m-%d %H:%M", status.expires_at) or "unknown"
+  if status.expired then
+    return string.format("auth: token expired %s%s", expiry, status.has_refresh_token and " (refreshable)" or "")
+  end
+  return string.format("auth: token valid until %s", expiry)
+end
+
+--- The lines `:MCPStatus` shows: per configured server its connection state,
+--- transport, protocol era and version, server identity, process id and last
+--- stderr line (stdio), and auth status; then the native servers.
+--- @return string[]
+function M.status_lines()
+  local state = config().state()
+  local names = configured_servers()
+  if #names == 0 and #state.native_servers == 0 then
+    return { "mcp-client: no servers configured" }
+  end
+
+  local lines = {}
+  for _, name in ipairs(names) do
+    local record = state.servers[name]
+    local where = record.url or ("stdio: " .. record.command)
+    local live = live_remote(name)
+    if live == nil then
+      table.insert(lines, string.format("%s: not connected (%s)", name, where))
+    else
+      table.insert(
+        lines,
+        string.format(
+          "%s: %s over %s, %s protocol %s (%s)",
+          name,
+          live:state(),
+          tostring(live.transport),
+          tostring(live.era),
+          tostring(live.protocol_version),
+          where
+        )
+      )
+      local info = live.server_info
+      if type(info) == "table" and info.name then
+        table.insert(lines, string.format("  server: %s %s", info.name, info.version or ""))
+      end
+      if live.pid then
+        table.insert(lines, string.format("  pid: %d", live.pid))
+      end
+      local stderr = live:stderr()
+      if #stderr > 0 then
+        table.insert(lines, "  stderr: " .. stderr[#stderr])
+      end
+    end
+    if record.token_store then
+      table.insert(lines, "  " .. auth_line(name, record.token_store))
+    end
+  end
+  for _, name in ipairs(state.native_servers) do
+    table.insert(lines, string.format("%s: native (in-process)", name))
+  end
+  return lines
+end
+
+--- Register the plugin's Ex commands. Called once from `config.lua`'s
+--- `M.setup()`. `nvim_create_user_command` overwrites an already-defined
+--- command of the same name, so calling `register()` again on a repeated
+--- `setup()` call is safe.
 function M.register()
   vim.api.nvim_create_user_command("MCPAuth", on_mcpauth, {
     nargs = "?",
     complete = M.complete,
     desc = "Run the OAuth authorization flow for a configured MCP server",
+  })
+  vim.api.nvim_create_user_command("MCPReconnect", function(cmd_opts)
+    M.reconnect(cmd_opts.args)
+  end, {
+    nargs = "?",
+    complete = configured_servers,
+    desc = "Reconnect one configured MCP server, or all of them",
+  })
+  vim.api.nvim_create_user_command("MCPLogout", function(cmd_opts)
+    M.logout(cmd_opts.args)
+  end, {
+    nargs = 1,
+    complete = M.complete,
+    desc = "Delete a configured MCP server's stored token and disconnect it",
+  })
+  vim.api.nvim_create_user_command("MCPStatus", function()
+    vim.api.nvim_echo({ { table.concat(M.status_lines(), "\n") } }, false, {})
+  end, {
+    nargs = 0,
+    desc = "Show the connection, protocol, and auth status of every MCP server",
   })
 end
 

@@ -316,8 +316,8 @@ describe("config.setup (orchestration)", function()
     end)
   end)
 
-  describe("MCPAuth command registration", function()
-    it("setup() registers :MCPAuth via commands.register()", function()
+  describe("command registration", function()
+    it("setup() registers the plugin's commands via commands.register()", function()
       local created = {}
       local real_create = vim.api.nvim_create_user_command
       vim.api.nvim_create_user_command = function(name, callback, opts)
@@ -331,8 +331,11 @@ describe("config.setup (orchestration)", function()
       vim.api.nvim_create_user_command = real_create
       assert.is_true(ok, err)
 
-      assert.are.equal(1, #created)
-      assert.are.equal("MCPAuth", created[1].name)
+      local names = vim.tbl_map(function(entry)
+        return entry.name
+      end, created)
+      table.sort(names)
+      assert.are.same({ "MCPAuth", "MCPLogout", "MCPReconnect", "MCPStatus" }, names)
     end)
   end)
 
