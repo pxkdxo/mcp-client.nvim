@@ -32,28 +32,28 @@ local registry = {}
 local next_id = 0
 
 local function new_id()
-	next_id = next_id + 1
-	return "mcp-client-" .. next_id
+  next_id = next_id + 1
+  return "mcp-client-" .. next_id
 end
 
 local function build_initialize_request(config)
-	return {
-		jsonrpc = "2.0",
-		id = 1,
-		method = "initialize",
-		params = {
-			protocolVersion = PROTOCOL_VERSION,
-			-- MCP requires `capabilities` to be a JSON *object*. An empty Lua
-			-- table `{}` serializes to a JSON *array* `[]` via vim.json.encode,
-			-- which a strict server rejects with HTTP 400 "Invalid message".
-			-- vim.empty_dict() forces the empty case to serialize as `{}`.
-			capabilities = config.capabilities or vim.empty_dict(),
-			clientInfo = {
-				name = config.name or "mcp-client",
-				version = config.client_version or "0.1.0",
-			},
-		},
-	}
+  return {
+    jsonrpc = "2.0",
+    id = 1,
+    method = "initialize",
+    params = {
+      protocolVersion = PROTOCOL_VERSION,
+      -- MCP requires `capabilities` to be a JSON *object*. An empty Lua
+      -- table `{}` serializes to a JSON *array* `[]` via vim.json.encode,
+      -- which a strict server rejects with HTTP 400 "Invalid message".
+      -- vim.empty_dict() forces the empty case to serialize as `{}`.
+      capabilities = config.capabilities or vim.empty_dict(),
+      clientInfo = {
+        name = config.name or "mcp-client",
+        version = config.client_version or "0.1.0",
+      },
+    },
+  }
 end
 
 --- Fire an `MCPAttach`/`MCPDetach`/`MCPNotify` User autocmd carrying the
@@ -61,12 +61,12 @@ end
 --- callback context (curl callbacks are already vim.schedule_wrap'd, but
 --- exit handlers and timers may not be).
 local function fire_event(pattern, client_id)
-	vim.schedule(function()
-		pcall(vim.api.nvim_exec_autocmds, "User", {
-			pattern = pattern,
-			data = { client_id = client_id },
-		})
-	end)
+  vim.schedule(function()
+    pcall(vim.api.nvim_exec_autocmds, "User", {
+      pattern = pattern,
+      data = { client_id = client_id },
+    })
+  end)
 end
 
 --- @class Client
@@ -84,33 +84,33 @@ end
 --- teardown and must not reconnect; an untagged exit is a real drop and
 --- drives `reconnect:on_drop()`.
 local function hook_stream_job(entry, transport_client)
-	local job = transport_client.get_stream_job and transport_client:get_stream_job()
-	entry._job = job
-	entry._transport_for_job = transport_client
-	if not job then
-		return
-	end
-	job:add_on_exit_callback(function(exited_job)
-		-- An intentional close (our reconnect teardown or a caller disconnect)
-		-- tagged this job before killing it, so this exit is expected -- never
-		-- reconnect.
-		if exited_job.user_data and exited_job.user_data.intentional_close then
-			return
-		end
-		-- A real, unexpected stream-end: drive the reconnect machine, honoring
-		-- any SSE `retry:` hint the server sent on this stream over the
-		-- machine's computed backoff.
-		local hint
-		if transport_client.get_retry_hint then
-			local retry_ms = transport_client:get_retry_hint()
-			if retry_ms then
-				hint = { retry_ms = retry_ms }
-			end
-		end
-		vim.schedule(function()
-			entry.reconnect:on_drop(hint)
-		end)
-	end)
+  local job = transport_client.get_stream_job and transport_client:get_stream_job()
+  entry._job = job
+  entry._transport_for_job = transport_client
+  if not job then
+    return
+  end
+  job:add_on_exit_callback(function(exited_job)
+    -- An intentional close (our reconnect teardown or a caller disconnect)
+    -- tagged this job before killing it, so this exit is expected -- never
+    -- reconnect.
+    if exited_job.user_data and exited_job.user_data.intentional_close then
+      return
+    end
+    -- A real, unexpected stream-end: drive the reconnect machine, honoring
+    -- any SSE `retry:` hint the server sent on this stream over the
+    -- machine's computed backoff.
+    local hint
+    if transport_client.get_retry_hint then
+      local retry_ms = transport_client:get_retry_hint()
+      if retry_ms then
+        hint = { retry_ms = retry_ms }
+      end
+    end
+    vim.schedule(function()
+      entry.reconnect:on_drop(hint)
+    end)
+  end)
 end
 
 --- Wire the transport's server-notification hook to fire an MCPNotify
@@ -118,22 +118,22 @@ end
 --- (initial connect, reconnect, reinitialize) so notifications keep flowing
 --- across a transparent session change.
 local function hook_notifications(entry, transport_client)
-	if transport_client.set_on_notification then
-		transport_client:set_on_notification(function(_)
-			fire_event("MCPNotify", entry.id)
-		end)
-	end
+  if transport_client.set_on_notification then
+    transport_client:set_on_notification(function(_)
+      fire_event("MCPNotify", entry.id)
+    end)
+  end
 end
 
 --- Reject every request still in flight when the client gives up, so a
 --- caller waiting on a reply resolves with an error instead of hanging
 --- forever. Called on the transition into `disconnected`.
 local function fail_in_flight(entry, message)
-	local pending = entry._in_flight
-	entry._in_flight = {}
-	for _, cb in pairs(pending) do
-		pcall(cb, message, nil, nil)
-	end
+  local pending = entry._in_flight
+  entry._in_flight = {}
+  for _, cb in pairs(pending) do
+    pcall(cb, message, nil, nil)
+  end
 end
 
 --- Close a transport client intentionally: tag its stream Job with the
@@ -142,21 +142,21 @@ end
 --- and does not drive on_drop. Swallows any error; a no-op when the client is
 --- nil or exposes no close.
 local function close_transport(transport_client)
-	if not transport_client then
-		return
-	end
-	local ok, job = pcall(function()
-		return transport_client.get_stream_job and transport_client:get_stream_job()
-	end)
-	if ok and job then
-		job.user_data = job.user_data or {}
-		job.user_data.intentional_close = true
-	end
-	if transport_client.close then
-		pcall(function()
-			transport_client:close()
-		end)
-	end
+  if not transport_client then
+    return
+  end
+  local ok, job = pcall(function()
+    return transport_client.get_stream_job and transport_client:get_stream_job()
+  end)
+  if ok and job then
+    job.user_data = job.user_data or {}
+    job.user_data.intentional_close = true
+  end
+  if transport_client.close then
+    pcall(function()
+      transport_client:close()
+    end)
+  end
 end
 
 --- Adopt a freshly-handshaken transport into `entry`: the entry-state mutation
@@ -171,14 +171,14 @@ end
 --- superseded by a newer attempt does not leak its transport or leave a stale
 --- stream-exit hook that could fire on_drop against a client that has moved on.
 local function adopt_transport(entry, result)
-	local previous = entry.transport_client
-	if previous ~= nil and previous ~= result.client then
-		close_transport(previous)
-	end
-	entry.transport_client = result.client
-	entry.transport = result.transport
-	hook_stream_job(entry, result.client)
-	hook_notifications(entry, result.client)
+  local previous = entry.transport_client
+  if previous ~= nil and previous ~= result.client then
+    close_transport(previous)
+  end
+  entry.transport_client = result.client
+  entry.transport = result.transport
+  hook_stream_job(entry, result.client)
+  hook_notifications(entry, result.client)
 end
 
 --- Coalesce concurrent transport-handshake dials against a single `entry`.
@@ -212,47 +212,47 @@ end
 --- whether that dial is still current -- and thus a wedged dial it should
 --- actively abandon -- or already superseded.
 local function perform_handshake(entry, on_settled)
-	if entry._handshake then
-		table.insert(entry._handshake, on_settled)
-		return entry._handshake_gen
-	end
+  if entry._handshake then
+    table.insert(entry._handshake, on_settled)
+    return entry._handshake_gen
+  end
 
-	-- Each dispatched dial claims a fresh monotonic generation, so a result
-	-- that resolves after a newer dial has started (my_gen no longer current)
-	-- is recognized as stale and closed rather than adopted.
-	entry._handshake_gen = (entry._handshake_gen or 0) + 1
-	local my_gen = entry._handshake_gen
-	entry._handshake = { on_settled }
+  -- Each dispatched dial claims a fresh monotonic generation, so a result
+  -- that resolves after a newer dial has started (my_gen no longer current)
+  -- is recognized as stale and closed rather than adopted.
+  entry._handshake_gen = (entry._handshake_gen or 0) + 1
+  local my_gen = entry._handshake_gen
+  entry._handshake = { on_settled }
 
-	detect.connect({
-		url = entry.config.url,
-		request = build_initialize_request(entry.config),
-		headers = entry.config.headers,
-		timeout = entry.config.timeout,
-	}, function(result, err)
-		-- Capture and clear the queue first so a follow-up trigger fired from a
-		-- waiter's callback starts a fresh cycle rather than joining this one.
-		local waiters = entry._handshake or {}
-		entry._handshake = nil
+  detect.connect({
+    url = entry.config.url,
+    request = build_initialize_request(entry.config),
+    headers = entry.config.headers,
+    timeout = entry.config.timeout,
+  }, function(result, err)
+    -- Capture and clear the queue first so a follow-up trigger fired from a
+    -- waiter's callback starts a fresh cycle rather than joining this one.
+    local waiters = entry._handshake or {}
+    entry._handshake = nil
 
-		if not err and result then
-			local terminal = entry._closed or entry.reconnect:state() == "disconnected"
-			local stale = my_gen ~= entry._handshake_gen
-			if terminal or stale then
-				close_transport(result.client)
-				err = "client is closed"
-				result = nil
-			else
-				adopt_transport(entry, result)
-			end
-		end
+    if not err and result then
+      local terminal = entry._closed or entry.reconnect:state() == "disconnected"
+      local stale = my_gen ~= entry._handshake_gen
+      if terminal or stale then
+        close_transport(result.client)
+        err = "client is closed"
+        result = nil
+      else
+        adopt_transport(entry, result)
+      end
+    end
 
-		for _, waiter in ipairs(waiters) do
-			waiter(result, err)
-		end
-	end)
+    for _, waiter in ipairs(waiters) do
+      waiter(result, err)
+    end
+  end)
 
-	return my_gen
+  return my_gen
 end
 
 --- Perform one reconnection attempt: a fresh transport handshake. On
@@ -277,73 +277,73 @@ local ATTEMPT_TIMEOUT_MS = 10000
 --- the abandoned dial's result ever does arrive, perform_handshake treats it
 --- as stale and closes it instead of adopting it.
 local function abandon_wedged_dial(entry, gen)
-	-- If a newer dial has since started, this one already resolved via the
-	-- normal path before the guard fired; leave entry._handshake alone.
-	if not entry._handshake or entry._handshake_gen ~= gen then
-		return
-	end
-	local waiters = entry._handshake
-	entry._handshake = nil
-	entry._handshake_gen = (entry._handshake_gen or 0) + 1
-	for _, waiter in ipairs(waiters) do
-		waiter(nil, "handshake attempt timed out")
-	end
+  -- If a newer dial has since started, this one already resolved via the
+  -- normal path before the guard fired; leave entry._handshake alone.
+  if not entry._handshake or entry._handshake_gen ~= gen then
+    return
+  end
+  local waiters = entry._handshake
+  entry._handshake = nil
+  entry._handshake_gen = (entry._handshake_gen or 0) + 1
+  for _, waiter in ipairs(waiters) do
+    waiter(nil, "handshake attempt timed out")
+  end
 end
 
 local function attempt_reconnect(entry)
-	local settled = false
-	local function settle(fn)
-		if settled then
-			return
-		end
-		settled = true
-		fn()
-	end
+  local settled = false
+  local function settle(fn)
+    if settled then
+      return
+    end
+    settled = true
+    fn()
+  end
 
-	-- Generation of the dial this attempt started or joined, so the guard below
-	-- can tell whether a timed-out dial is still current (abandon it) or
-	-- already superseded.
-	local my_gen
+  -- Generation of the dial this attempt started or joined, so the guard below
+  -- can tell whether a timed-out dial is still current (abandon it) or
+  -- already superseded.
+  local my_gen
 
-	local guard = vim.uv.new_timer()
-	guard:start(entry.config.attempt_timeout or ATTEMPT_TIMEOUT_MS, 0, function()
-		guard:stop()
-		guard:close()
-		vim.schedule(function()
-			settle(function()
-				abandon_wedged_dial(entry, my_gen)
-				entry.reconnect:on_drop()
-			end)
-		end)
-	end)
+  local guard = vim.uv.new_timer()
+  guard:start(entry.config.attempt_timeout or ATTEMPT_TIMEOUT_MS, 0, function()
+    guard:stop()
+    guard:close()
+    vim.schedule(function()
+      settle(function()
+        abandon_wedged_dial(entry, my_gen)
+        entry.reconnect:on_drop()
+      end)
+    end)
+  end)
 
-	my_gen = perform_handshake(entry, function(result, err)
-		if not guard:is_closing() then
-			guard:stop()
-			guard:close()
-		end
-		if settled then
-			-- The guard already counted this attempt as failed and drove the
-			-- machine. perform_handshake owns the result's lifecycle either way
-			-- (adopted if non-terminal, closed if terminal/superseded), so there
-			-- is nothing left for this waiter to do.
-			return
-		end
-		settle(function()
-			if err then
-				entry.reconnect:on_drop()
-				return
-			end
-			-- adopt_transport already ran in perform_handshake; converge the
-			-- session onto the new transport and tell the machine we are
-			-- connected again.
-			entry.session.transport = result.client
-			if result.session_id then
-				entry.session.session_id = result.session_id
-			end
-			entry.reconnect:on_connected()
-		end)
-	end)
+  my_gen = perform_handshake(entry, function(result, err)
+    if not guard:is_closing() then
+      guard:stop()
+      guard:close()
+    end
+    if settled then
+      -- The guard already counted this attempt as failed and drove the
+      -- machine. perform_handshake owns the result's lifecycle either way
+      -- (adopted if non-terminal, closed if terminal/superseded), so there
+      -- is nothing left for this waiter to do.
+      return
+    end
+    settle(function()
+      if err then
+        entry.reconnect:on_drop()
+        return
+      end
+      -- adopt_transport already ran in perform_handshake; converge the
+      -- session onto the new transport and tell the machine we are
+      -- connected again.
+      entry.session.transport = result.client
+      if result.session_id then
+        entry.session.session_id = result.session_id
+      end
+      entry.reconnect:on_connected()
+    end)
+  end)
 end
 
 --- Build the reinitialize handler the session unit calls on a 404: a fresh
@@ -362,54 +362,54 @@ end
 --- connection-scoped, so it must never perturb the reconnect machine's state
 --- or attempt counter.
 local function make_reinitializer(entry)
-	return function(on_done)
-		local settled = false
-		local function settle(fn)
-			if settled then
-				return
-			end
-			settled = true
-			fn()
-		end
+  return function(on_done)
+    local settled = false
+    local function settle(fn)
+      if settled then
+        return
+      end
+      settled = true
+      fn()
+    end
 
-		local my_gen
-		local guard = vim.uv.new_timer()
-		guard:start(entry.config.reinit_timeout or ATTEMPT_TIMEOUT_MS, 0, function()
-			guard:stop()
-			guard:close()
-			vim.schedule(function()
-				settle(function()
-					abandon_wedged_dial(entry, my_gen)
-					on_done("handshake attempt timed out", nil)
-				end)
-			end)
-		end)
+    local my_gen
+    local guard = vim.uv.new_timer()
+    guard:start(entry.config.reinit_timeout or ATTEMPT_TIMEOUT_MS, 0, function()
+      guard:stop()
+      guard:close()
+      vim.schedule(function()
+        settle(function()
+          abandon_wedged_dial(entry, my_gen)
+          on_done("handshake attempt timed out", nil)
+        end)
+      end)
+    end)
 
-		my_gen = perform_handshake(entry, function(result, err)
-			if not guard:is_closing() then
-				guard:stop()
-				guard:close()
-			end
-			if settled then
-				-- The guard already timed out and resolved on_done; perform_handshake
-				-- is the single owner of the handshake result's lifecycle, so there is
-				-- nothing orphaned for this waiter to clean up here.
-				return
-			end
-			settle(function()
-				if err then
-					return on_done(err, nil)
-				end
-				-- adopt_transport already ran exactly once in perform_handshake; the
-				-- reinitialize-specific follow-up is to hand the new transport/session
-				-- id back to session.lua's _adopt.
-				on_done(nil, {
-					transport = result.client,
-					session_id = result.session_id,
-				})
-			end)
-		end)
-	end
+    my_gen = perform_handshake(entry, function(result, err)
+      if not guard:is_closing() then
+        guard:stop()
+        guard:close()
+      end
+      if settled then
+        -- The guard already timed out and resolved on_done; perform_handshake
+        -- is the single owner of the handshake result's lifecycle, so there is
+        -- nothing orphaned for this waiter to clean up here.
+        return
+      end
+      settle(function()
+        if err then
+          return on_done(err, nil)
+        end
+        -- adopt_transport already ran exactly once in perform_handshake; the
+        -- reinitialize-specific follow-up is to hand the new transport/session
+        -- id back to session.lua's _adopt.
+        on_done(nil, {
+          transport = result.client,
+          session_id = result.session_id,
+        })
+      end)
+    end)
+  end
 end
 
 --- Ensure the configured token is fresh before a request goes out, refreshing
@@ -431,62 +431,62 @@ end
 --- presenting a now-stale refresh token, which the auth server's
 --- reuse-detection rejects with `invalid_grant`.
 local function ensure_fresh_token(entry, proceed, on_error)
-	local store = entry._token_store
-	if not store then
-		return proceed()
-	end
-	local status = store:status()
-	if not status.has_token or not status.expired then
-		-- No stored token, or it is still valid: nothing to refresh.
-		return proceed()
-	end
+  local store = entry._token_store
+  if not store then
+    return proceed()
+  end
+  local status = store:status()
+  if not status.has_token or not status.expired then
+    -- No stored token, or it is still valid: nothing to refresh.
+    return proceed()
+  end
 
-	-- A refresh is already in flight for this entry: join the queue and let the
-	-- single in-flight grant resolve us. Do NOT start a second grant.
-	if entry._refreshing then
-		table.insert(entry._refresh_waiters, { proceed = proceed, on_error = on_error })
-		return
-	end
+  -- A refresh is already in flight for this entry: join the queue and let the
+  -- single in-flight grant resolve us. Do NOT start a second grant.
+  if entry._refreshing then
+    table.insert(entry._refresh_waiters, { proceed = proceed, on_error = on_error })
+    return
+  end
 
-	-- We are the first: mark in flight and seed the queue with our own pair.
-	entry._refreshing = true
-	entry._refresh_waiters = { { proceed = proceed, on_error = on_error } }
+  -- We are the first: mark in flight and seed the queue with our own pair.
+  entry._refreshing = true
+  entry._refresh_waiters = { { proceed = proceed, on_error = on_error } }
 
-	refresh.refresh(store:load(), function(new_token, err)
-		-- Drain the ENTIRE queue (every joined caller, including the originator)
-		-- with this single outcome, then clear the in-flight state so a *later*
-		-- expiry can trigger a fresh single-flight cycle.
-		local waiters = entry._refresh_waiters
-		entry._refresh_waiters = {}
-		entry._refreshing = false
+  refresh.refresh(store:load(), function(new_token, err)
+    -- Drain the ENTIRE queue (every joined caller, including the originator)
+    -- with this single outcome, then clear the in-flight state so a *later*
+    -- expiry can trigger a fresh single-flight cycle.
+    local waiters = entry._refresh_waiters
+    entry._refresh_waiters = {}
+    entry._refreshing = false
 
-		if err then
-			-- Terminal for this batch: refresh failed (revoked token, network
-			-- failure, or no refresh token). Surface it to every caller; never
-			-- retry in a loop.
-			for _, waiter in ipairs(waiters) do
-				waiter.on_error(err)
-			end
-			return
-		end
+    if err then
+      -- Terminal for this batch: refresh failed (revoked token, network
+      -- failure, or no refresh token). Surface it to every caller; never
+      -- retry in a loop.
+      for _, waiter in ipairs(waiters) do
+        waiter.on_error(err)
+      end
+      return
+    end
 
-		-- Persist and reapply headers exactly once (the mutation is idempotent on
-		-- the shared table, but there is no reason to repeat it per caller), then
-		-- release every queued caller.
-		store:save(new_token)
-		-- Mutate the shared headers table in place so this request -- and every
-		-- subsequent one, across reconnects -- carries the refreshed bearer.
-		token_store.apply_to_headers(entry.config.headers, new_token)
-		for _, waiter in ipairs(waiters) do
-			waiter.proceed()
-		end
-	end)
+    -- Persist and reapply headers exactly once (the mutation is idempotent on
+    -- the shared table, but there is no reason to repeat it per caller), then
+    -- release every queued caller.
+    store:save(new_token)
+    -- Mutate the shared headers table in place so this request -- and every
+    -- subsequent one, across reconnects -- carries the refreshed bearer.
+    token_store.apply_to_headers(entry.config.headers, new_token)
+    for _, waiter in ipairs(waiters) do
+      waiter.proceed()
+    end
+  end)
 end
 
 --- Headers whose value is credential material and must never be exposed in
 --- cleartext through the public client object.
 local REDACTED_HEADER_KEYS = {
-	["Authorization"] = true,
+  ["Authorization"] = true,
 }
 
 local REDACTED_PLACEHOLDER = "[redacted]"
@@ -496,14 +496,14 @@ local REDACTED_PLACEHOLDER = "[redacted]"
 --- header is preserved verbatim so introspection/debugging still shows what
 --- headers exist. Returns nil when given nil (no headers configured).
 local function redact_headers(headers)
-	if not headers then
-		return nil
-	end
-	local out = {}
-	for k, v in pairs(headers) do
-		out[k] = REDACTED_HEADER_KEYS[k] and REDACTED_PLACEHOLDER or v
-	end
-	return out
+  if not headers then
+    return nil
+  end
+  local out = {}
+  for k, v in pairs(headers) do
+    out[k] = REDACTED_HEADER_KEYS[k] and REDACTED_PLACEHOLDER or v
+  end
+  return out
 end
 
 --- Build the exposed `.config` snapshot for the public client object: a
@@ -514,133 +514,133 @@ end
 --- place on every token refresh -- a cached snapshot would either go stale
 --- or, if it captured the live table by reference, leak a token added later.
 local function build_exposed_config(entry)
-	local exposed = vim.tbl_extend("force", {}, entry.config)
-	exposed.headers = redact_headers(entry.config.headers)
-	return exposed
+  local exposed = vim.tbl_extend("force", {}, entry.config)
+  exposed.headers = redact_headers(entry.config.headers)
+  return exposed
 end
 
 --- Construct the public client object exposed to callers, backed by a
 --- registry `entry`.
 local function make_client_object(entry)
-	local obj = {
-		id = entry.id,
-		name = entry.name,
-	}
-	-- `transport` and `config` are read through a metatable so callers always
-	-- see the current transport (after a transparent reconnect/reinitialize)
-	-- and a freshly redacted config (after a transparent token refresh),
-	-- rather than a value frozen at construction time.
-	setmetatable(obj, {
-		__index = function(_, key)
-			if key == "transport" then
-				return entry.transport
-			end
-			if key == "config" then
-				return build_exposed_config(entry)
-			end
-		end,
-	})
+  local obj = {
+    id = entry.id,
+    name = entry.name,
+  }
+  -- `transport` and `config` are read through a metatable so callers always
+  -- see the current transport (after a transparent reconnect/reinitialize)
+  -- and a freshly redacted config (after a transparent token refresh),
+  -- rather than a value frozen at construction time.
+  setmetatable(obj, {
+    __index = function(_, key)
+      if key == "transport" then
+        return entry.transport
+      end
+      if key == "config" then
+        return build_exposed_config(entry)
+      end
+    end,
+  })
 
-	-- Methods are defined with `:` so callers use `client:request(...)`,
-	-- matching the transport layer's convention. They ignore the implicit
-	-- self and close over `entry` for their state.
-	function obj:is_stopped()
-		return entry.reconnect:state() == "disconnected"
-	end
+  -- Methods are defined with `:` so callers use `client:request(...)`,
+  -- matching the transport layer's convention. They ignore the implicit
+  -- self and close over `entry` for their state.
+  function obj:is_stopped()
+    return entry.reconnect:state() == "disconnected"
+  end
 
-	--- Send a JSON-RPC request. Tracks it as in-flight so it can be failed
-	--- (rather than hung) if the client transitions to disconnected before a
-	--- reply arrives. Routes through the session layer for transparent 404
-	--- reinitialize.
-	function obj:request(rpc_message, callback)
-		if entry.reconnect:state() == "disconnected" then
-			return callback("client is disconnected", nil, nil)
-		end
-		local key = rpc_message.id
-		-- The caller's callback must fire at most once. fail_in_flight can settle
-		-- this request with a disconnect error while a concurrently-pending
-		-- reinitialize retry for the same request later resolves too; guarding on
-		-- _in_flight alone is not enough since fail_in_flight already cleared it.
-		local resolved = false
-		local function settle(err, result, response)
-			if resolved then
-				return
-			end
-			resolved = true
-			if key ~= nil then
-				entry._in_flight[key] = nil
-			end
-			callback(err, result, response)
-		end
-		-- Register the guarded settle (not the raw callback) so fail_in_flight
-		-- also resolves through the same once-only guard.
-		if key ~= nil then
-			entry._in_flight[key] = settle
-		end
-		-- Refresh an expired configured token transparently (at most once) before
-		-- dispatching; with no token_store this is an immediate pass-through.
-		ensure_fresh_token(entry, function()
-			entry.session:request(rpc_message, settle)
-		end, function(refresh_err)
-			settle(refresh_err, nil, nil)
-		end)
-	end
+  --- Send a JSON-RPC request. Tracks it as in-flight so it can be failed
+  --- (rather than hung) if the client transitions to disconnected before a
+  --- reply arrives. Routes through the session layer for transparent 404
+  --- reinitialize.
+  function obj:request(rpc_message, callback)
+    if entry.reconnect:state() == "disconnected" then
+      return callback("client is disconnected", nil, nil)
+    end
+    local key = rpc_message.id
+    -- The caller's callback must fire at most once. fail_in_flight can settle
+    -- this request with a disconnect error while a concurrently-pending
+    -- reinitialize retry for the same request later resolves too; guarding on
+    -- _in_flight alone is not enough since fail_in_flight already cleared it.
+    local resolved = false
+    local function settle(err, result, response)
+      if resolved then
+        return
+      end
+      resolved = true
+      if key ~= nil then
+        entry._in_flight[key] = nil
+      end
+      callback(err, result, response)
+    end
+    -- Register the guarded settle (not the raw callback) so fail_in_flight
+    -- also resolves through the same once-only guard.
+    if key ~= nil then
+      entry._in_flight[key] = settle
+    end
+    -- Refresh an expired configured token transparently (at most once) before
+    -- dispatching; with no token_store this is an immediate pass-through.
+    ensure_fresh_token(entry, function()
+      entry.session:request(rpc_message, settle)
+    end, function(refresh_err)
+      settle(refresh_err, nil, nil)
+    end)
+  end
 
-	function obj:notify(rpc_message)
-		return entry.session:notify(rpc_message)
-	end
+  function obj:notify(rpc_message)
+    return entry.session:notify(rpc_message)
+  end
 
-	--- Explicit caller-initiated disconnect: an intentional close. Drives
-	--- the reconnect machine straight to `disconnected` (terminal), which
-	--- fires MCPDetach, then tears down the transport with the
-	--- intentional-close flag set so the resulting stream-end never
-	--- reconnects.
-	function obj:disconnect()
-		entry:intentional_close()
-	end
+  --- Explicit caller-initiated disconnect: an intentional close. Drives
+  --- the reconnect machine straight to `disconnected` (terminal), which
+  --- fires MCPDetach, then tears down the transport with the
+  --- intentional-close flag set so the resulting stream-end never
+  --- reconnects.
+  function obj:disconnect()
+    entry:intentional_close()
+  end
 
-	return obj
+  return obj
 end
 
 --- Tear down the transport intentionally. Sets the intentional-close flag on
 --- the stream Job *before* killing it so the exit handler recognises this as
 --- our own teardown, then signals the process. Idempotent.
 local function make_entry_methods(entry)
-	function entry:intentional_close()
-		if self._closed then
-			return
-		end
-		self._closed = true
-		-- Terminal transition first: fires MCPDetach, cancels any pending
-		-- reconnect, and makes is_stopped() true immediately.
-		self.reconnect:on_intentional_close()
+  function entry:intentional_close()
+    if self._closed then
+      return
+    end
+    self._closed = true
+    -- Terminal transition first: fires MCPDetach, cancels any pending
+    -- reconnect, and makes is_stopped() true immediately.
+    self.reconnect:on_intentional_close()
 
-		local job = self._job
-		if job then
-			job.user_data = job.user_data or {}
-			job.user_data.intentional_close = true
-			-- plenary.job sets `self.pid` to the numeric pid once started, which
-			-- shadows the `Job:pid()` method of the same name (calling `job:pid()`
-			-- then errors). Read the field directly, falling back to the method
-			-- only if it is not yet a number (e.g. before start / a test double).
-			local pid = job.pid
-			if type(pid) ~= "number" then
-				local ok, resolved = pcall(function()
-					return job:pid()
-				end)
-				pid = ok and resolved or nil
-			end
-			if type(pid) == "number" then
-				pcall(vim.uv.kill, pid, "sigterm")
-			end
-		end
-		-- Also close the transport object (idempotent; no-op if already down).
-		if self.transport_client and self.transport_client.close then
-			pcall(function()
-				self.transport_client:close()
-			end)
-		end
-	end
+    local job = self._job
+    if job then
+      job.user_data = job.user_data or {}
+      job.user_data.intentional_close = true
+      -- plenary.job sets `self.pid` to the numeric pid once started, which
+      -- shadows the `Job:pid()` method of the same name (calling `job:pid()`
+      -- then errors). Read the field directly, falling back to the method
+      -- only if it is not yet a number (e.g. before start / a test double).
+      local pid = job.pid
+      if type(pid) ~= "number" then
+        local ok, resolved = pcall(function()
+          return job:pid()
+        end)
+        pid = ok and resolved or nil
+      end
+      if type(pid) == "number" then
+        pcall(vim.uv.kill, pid, "sigterm")
+      end
+    end
+    -- Also close the transport object (idempotent; no-op if already down).
+    if self.transport_client and self.transport_client.close then
+      pcall(function()
+        self.transport_client:close()
+      end)
+    end
+  end
 end
 
 --- Dial the server and, on success, build and register the managed client entry.
@@ -655,106 +655,106 @@ end
 ---   the refresh-then-dial sequencing in `M.connect` has exactly one place
 ---   that decides which store applies.
 local function do_connect(config, opts, store)
-	-- Seed the shared config.headers table with the currently-stored bearer so
-	-- the initialize handshake, the TLS gate below, and every request see it.
-	-- Mutating it in place keeps auth current across reconnects.
-	if store then
-		config.headers = config.headers or {}
-		token_store.apply_to_headers(config.headers, store:load())
-	end
+  -- Seed the shared config.headers table with the currently-stored bearer so
+  -- the initialize handshake, the TLS gate below, and every request see it.
+  -- Mutating it in place keeps auth current across reconnects.
+  if store then
+    config.headers = config.headers or {}
+    token_store.apply_to_headers(config.headers, store:load())
+  end
 
-	-- Fail-closed gate: before opening any connection, refuse a non-localhost
-	-- server that lacks TLS (https://) or a configured credential. Must run
-	-- before detect.connect so we never emit an unauthenticated request to a
-	-- non-localhost server.
-	local allowed, refusal = tls.check_connection_allowed(config.url, {
-		has_token = config.headers ~= nil and config.headers["Authorization"] ~= nil,
-	})
-	if not allowed then
-		return opts.on_connect(nil, refusal)
-	end
+  -- Fail-closed gate: before opening any connection, refuse a non-localhost
+  -- server that lacks TLS (https://) or a configured credential. Must run
+  -- before detect.connect so we never emit an unauthenticated request to a
+  -- non-localhost server.
+  local allowed, refusal = tls.check_connection_allowed(config.url, {
+    has_token = config.headers ~= nil and config.headers["Authorization"] ~= nil,
+  })
+  if not allowed then
+    return opts.on_connect(nil, refusal)
+  end
 
-	detect.connect({
-		url = config.url,
-		request = build_initialize_request(config),
-		headers = config.headers,
-		timeout = config.timeout,
-	}, function(result, err)
-		if err then
-			return opts.on_connect(nil, err)
-		end
+  detect.connect({
+    url = config.url,
+    request = build_initialize_request(config),
+    headers = config.headers,
+    timeout = config.timeout,
+  }, function(result, err)
+    if err then
+      return opts.on_connect(nil, err)
+    end
 
-		local id = new_id()
-		local entry = {
-			id = id,
-			name = config.name or id,
-			config = config,
-			transport = result.transport,
-			transport_client = result.client,
-			-- The optional OAuth identity: when set, obj:request consults it to
-			-- transparently refresh an expired token before dispatching.
-			_token_store = store,
-			-- Single-flight refresh coalescing state (see ensure_fresh_token):
-			-- `_refreshing` is the in-flight flag; `_refresh_waiters` is the queue of
-			-- `{ proceed, on_error }` pairs resolved together when that grant settles.
-			_refreshing = false,
-			_refresh_waiters = {},
-			_in_flight = {},
-			_closed = false,
-		}
+    local id = new_id()
+    local entry = {
+      id = id,
+      name = config.name or id,
+      config = config,
+      transport = result.transport,
+      transport_client = result.client,
+      -- The optional OAuth identity: when set, obj:request consults it to
+      -- transparently refresh an expired token before dispatching.
+      _token_store = store,
+      -- Single-flight refresh coalescing state (see ensure_fresh_token):
+      -- `_refreshing` is the in-flight flag; `_refresh_waiters` is the queue of
+      -- `{ proceed, on_error }` pairs resolved together when that grant settles.
+      _refreshing = false,
+      _refresh_waiters = {},
+      _in_flight = {},
+      _closed = false,
+    }
 
-		-- Caller-supplied tuning (initial_delay/max_delay/growth_factor/
-		-- max_attempts) is merged *under* the internal wiring, so a caller can
-		-- never accidentally clobber the schedule/attempt/event callbacks by
-		-- putting same-named keys in their `reconnect` table.
-		entry.reconnect = Reconnect.new(vim.tbl_extend("force", config.reconnect or {}, {
-			schedule = function(delay_ms, fn)
-				local timer = vim.uv.new_timer()
-				timer:start(delay_ms, 0, function()
-					timer:stop()
-					timer:close()
-					vim.schedule(fn)
-				end)
-				return timer
-			end,
-			cancel = function(timer)
-				if timer and not timer:is_closing() then
-					timer:stop()
-					timer:close()
-				end
-			end,
-			attempt = function()
-				attempt_reconnect(entry)
-			end,
-			on_connected = function()
-				fire_event("MCPAttach", id)
-			end,
-			on_disconnected = function()
-				fail_in_flight(entry, "client disconnected: reconnect attempts exhausted")
-				fire_event("MCPDetach", id)
-			end,
-		}))
+    -- Caller-supplied tuning (initial_delay/max_delay/growth_factor/
+    -- max_attempts) is merged *under* the internal wiring, so a caller can
+    -- never accidentally clobber the schedule/attempt/event callbacks by
+    -- putting same-named keys in their `reconnect` table.
+    entry.reconnect = Reconnect.new(vim.tbl_extend("force", config.reconnect or {}, {
+      schedule = function(delay_ms, fn)
+        local timer = vim.uv.new_timer()
+        timer:start(delay_ms, 0, function()
+          timer:stop()
+          timer:close()
+          vim.schedule(fn)
+        end)
+        return timer
+      end,
+      cancel = function(timer)
+        if timer and not timer:is_closing() then
+          timer:stop()
+          timer:close()
+        end
+      end,
+      attempt = function()
+        attempt_reconnect(entry)
+      end,
+      on_connected = function()
+        fire_event("MCPAttach", id)
+      end,
+      on_disconnected = function()
+        fail_in_flight(entry, "client disconnected: reconnect attempts exhausted")
+        fire_event("MCPDetach", id)
+      end,
+    }))
 
-		entry.session = Session.new({
-			transport = result.client,
-			session_id = result.session_id,
-			protocol_version = PROTOCOL_VERSION,
-			reinitialize = make_reinitializer(entry),
-		})
+    entry.session = Session.new({
+      transport = result.client,
+      session_id = result.session_id,
+      protocol_version = PROTOCOL_VERSION,
+      reinitialize = make_reinitializer(entry),
+    })
 
-		make_entry_methods(entry)
-		hook_stream_job(entry, result.client)
-		hook_notifications(entry, result.client)
+    make_entry_methods(entry)
+    hook_stream_job(entry, result.client)
+    hook_notifications(entry, result.client)
 
-		local client_object = make_client_object(entry)
-		entry.object = client_object
-		registry[id] = entry
+    local client_object = make_client_object(entry)
+    entry.object = client_object
+    registry[id] = entry
 
-		-- Initial connect is a transition into `connected`; fire MCPAttach.
-		fire_event("MCPAttach", id)
+    -- Initial connect is a transition into `connected`; fire MCPAttach.
+    fire_event("MCPAttach", id)
 
-		opts.on_connect(client_object, nil)
-	end)
+    opts.on_connect(client_object, nil)
+  end)
 end
 
 --- Connect to a server and register a managed client. Mirrors init.connect's
@@ -769,33 +769,30 @@ end
 ---   are optional sub-tables; absent it is the zero-overhead non-OAuth path.
 --- @param opts table  on_connect(client|nil, err|nil)
 function M.connect(config, opts)
-	assert(type(config) == "table", "config table is required")
-	assert(type(config.url) == "string" and config.url ~= "", "config.url is required")
-	opts = opts or {}
-	assert(type(opts.on_connect) == "function", "opts.on_connect is required")
+  assert(type(config) == "table", "config table is required")
+  assert(type(config.url) == "string" and config.url ~= "", "config.url is required")
+  opts = opts or {}
+  assert(type(opts.on_connect) == "function", "opts.on_connect is required")
 
-	local store = config.auth and config.auth.token_store or nil
+  local store = config.auth and config.auth.token_store or nil
 
-	-- Refresh a stored-but-expired token before dialing: dialing with an
-	-- expired token as-is gets a 401 that surfaces as a bare, unrecoverable
-	-- connect failure, even though the refresh token here would likely work.
-	if store then
-		local status = store:status()
-		if status.has_token and status.expired then
-			return refresh.refresh(store:load(), function(new_token, err)
-				if err then
-					return opts.on_connect(
-						nil,
-						string.format("stored token is expired and refresh failed: %s", tostring(err))
-					)
-				end
-				store:save(new_token)
-				do_connect(config, opts, store)
-			end)
-		end
-	end
+  -- Refresh a stored-but-expired token before dialing: dialing with an
+  -- expired token as-is gets a 401 that surfaces as a bare, unrecoverable
+  -- connect failure, even though the refresh token here would likely work.
+  if store then
+    local status = store:status()
+    if status.has_token and status.expired then
+      return refresh.refresh(store:load(), function(new_token, err)
+        if err then
+          return opts.on_connect(nil, string.format("stored token is expired and refresh failed: %s", tostring(err)))
+        end
+        store:save(new_token)
+        do_connect(config, opts, store)
+      end)
+    end
+  end
 
-	do_connect(config, opts, store)
+  do_connect(config, opts, store)
 end
 
 --- Register a non-remote (e.g. native, in-process) client object into the
@@ -809,47 +806,47 @@ end
 ---   assigned and set on the object.
 --- @return table the same `client_object`, registered.
 function M.register_native(client_object)
-	assert(type(client_object) == "table", "client_object table is required")
-	if client_object.id == nil then
-		client_object.id = new_id()
-	end
-	registry[client_object.id] = {
-		id = client_object.id,
-		name = client_object.name,
-		object = client_object,
-		-- `_reset_registry` calls `entry:intentional_close()` unconditionally
-		-- on every registered entry; a native entry has no transport/job to
-		-- tear down, so route it through the object's own `disconnect()` (a
-		-- no-op-safe method every client object -- native or remote -- must
-		-- expose) instead of assuming remote-only teardown internals.
-		intentional_close = function(self)
-			if client_object.disconnect then
-				client_object:disconnect()
-			end
-		end,
-	}
-	return client_object
+  assert(type(client_object) == "table", "client_object table is required")
+  if client_object.id == nil then
+    client_object.id = new_id()
+  end
+  registry[client_object.id] = {
+    id = client_object.id,
+    name = client_object.name,
+    object = client_object,
+    -- `_reset_registry` calls `entry:intentional_close()` unconditionally
+    -- on every registered entry; a native entry has no transport/job to
+    -- tear down, so route it through the object's own `disconnect()` (a
+    -- no-op-safe method every client object -- native or remote -- must
+    -- expose) instead of assuming remote-only teardown internals.
+    intentional_close = function(self)
+      if client_object.disconnect then
+        client_object:disconnect()
+      end
+    end,
+  }
+  return client_object
 end
 
 --- Return the currently-registered client objects, optionally filtered.
 --- @param filter table|nil  { id = string } and/or { name = string }
 --- @return Client[] list of matching client objects
 function M.get_clients(filter)
-	filter = filter or {}
-	local out = {}
-	for _, entry in pairs(registry) do
-		local ok = true
-		if filter.id ~= nil and entry.id ~= filter.id then
-			ok = false
-		end
-		if filter.name ~= nil and entry.name ~= filter.name then
-			ok = false
-		end
-		if ok then
-			table.insert(out, entry.object)
-		end
-	end
-	return out
+  filter = filter or {}
+  local out = {}
+  for _, entry in pairs(registry) do
+    local ok = true
+    if filter.id ~= nil and entry.id ~= filter.id then
+      ok = false
+    end
+    if filter.name ~= nil and entry.name ~= filter.name then
+      ok = false
+    end
+    if ok then
+      table.insert(out, entry.object)
+    end
+  end
+  return out
 end
 
 --- Disconnect and clear every registered client. Used by tests between specs
@@ -859,12 +856,12 @@ end
 --- monotonic so a deferred autocmd from a torn-down client can never collide
 --- with a freshly-registered one afterward.
 function M._reset_registry()
-	for id, entry in pairs(registry) do
-		pcall(function()
-			entry:intentional_close()
-		end)
-		registry[id] = nil
-	end
+  for id, entry in pairs(registry) do
+    pcall(function()
+      entry:intentional_close()
+    end)
+    registry[id] = nil
+  end
 end
 
 --- Fully remove one already-disconnected entry from the registry by id, so
@@ -880,7 +877,7 @@ end
 --- undefined to a caller like `health.lua`'s `matches[1]`.
 --- @param id string  a client id already disconnected via `:disconnect()`
 function M._forget(id)
-	registry[id] = nil
+  registry[id] = nil
 end
 
 return M

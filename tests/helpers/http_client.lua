@@ -13,33 +13,33 @@ local uv = vim.uv or vim.loop
 --- @param port number the loopback port to connect to
 --- @param path string request target, e.g. "/callback?code=x&state=y"
 return function(port, path)
-	local client = uv.new_tcp()
-	local connected = false
+  local client = uv.new_tcp()
+  local connected = false
 
-	client:connect("127.0.0.1", port, function(err)
-		if err then
-			if not client:is_closing() then
-				client:close()
-			end
-			return
-		end
-		connected = true
-		local request = string.format("GET %s HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n", path)
-		client:write(request, function()
-			-- Drain the response so the listener finishes writing before
-			-- the connection is torn down.
-			client:read_start(function(read_err, chunk)
-				if read_err or not chunk then
-					if not client:is_closing() then
-						client:close()
-					end
-				end
-			end)
-		end)
-	end)
+  client:connect("127.0.0.1", port, function(err)
+    if err then
+      if not client:is_closing() then
+        client:close()
+      end
+      return
+    end
+    connected = true
+    local request = string.format("GET %s HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n", path)
+    client:write(request, function()
+      -- Drain the response so the listener finishes writing before
+      -- the connection is torn down.
+      client:read_start(function(read_err, chunk)
+        if read_err or not chunk then
+          if not client:is_closing() then
+            client:close()
+          end
+        end
+      end)
+    end)
+  end)
 
-	-- Block until connect + write complete; loopback resolves near-instantly.
-	vim.wait(1000, function()
-		return connected
-	end)
+  -- Block until connect + write complete; loopback resolves near-instantly.
+  vim.wait(1000, function()
+    return connected
+  end)
 end

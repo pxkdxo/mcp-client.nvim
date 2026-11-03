@@ -28,36 +28,36 @@ local M = {}
 --- on Linux; the 127.10.x / 127.50.x entries cover common macOS `lo0 alias`
 --- setups for developers who have configured one.
 local CANDIDATE_HOSTS = {
-	"127.0.0.2",
-	"127.0.0.3",
-	"127.10.0.1",
-	"127.10.0.2",
-	"127.50.100.1",
+  "127.0.0.2",
+  "127.0.0.3",
+  "127.10.0.1",
+  "127.10.0.2",
+  "127.50.100.1",
 }
 
 --- Whether `host` can be bound on an ephemeral port right now.
 --- @param host string
 --- @return boolean
 local function can_bind(host)
-	local server = uv.new_tcp()
-	local ok = pcall(function()
-		assert(server:bind(host, 0))
-	end)
-	pcall(function()
-		server:close()
-	end)
-	return ok
+  local server = uv.new_tcp()
+  local ok = pcall(function()
+    assert(server:bind(host, 0))
+  end)
+  pcall(function()
+    server:close()
+  end)
+  return ok
 end
 
 --- Find the first candidate loopback alias that binds on this machine, or nil.
 --- @return string|nil
 local function pick_bindable_host()
-	for _, host in ipairs(CANDIDATE_HOSTS) do
-		if can_bind(host) then
-			return host
-		end
-	end
-	return nil
+  for _, host in ipairs(CANDIDATE_HOSTS) do
+    if can_bind(host) then
+      return host
+    end
+  end
+  return nil
 end
 
 --- Reserve a free ephemeral port on `host` (bind :0, read the assigned port,
@@ -66,41 +66,41 @@ end
 --- @param host string
 --- @return number
 local function reserve_port(host)
-	local server = uv.new_tcp()
-	assert(server:bind(host, 0))
-	local port = server:getsockname().port
-	server:close()
-	return port
+  local server = uv.new_tcp()
+  assert(server:bind(host, 0))
+  local port = server:getsockname().port
+  server:close()
+  return port
 end
 
 --- Generate a self-signed cert (+key) for `host` into `dir` via the system
 --- openssl. Returns cert_path, key_path on success or nil, err.
 local function generate_self_signed(dir, host)
-	local cert = dir .. "/cert.pem"
-	local key = dir .. "/key.pem"
-	local cmd = {
-		"openssl",
-		"req",
-		"-x509",
-		"-newkey",
-		"rsa:2048",
-		"-keyout",
-		key,
-		"-out",
-		cert,
-		"-days",
-		"1",
-		"-nodes",
-		"-subj",
-		"/CN=" .. host,
-		"-addext",
-		"subjectAltName=IP:" .. host,
-	}
-	local result = vim.system(cmd, { text = true }):wait()
-	if result.code ~= 0 then
-		return nil, nil, "openssl failed: " .. (result.stderr or "")
-	end
-	return cert, key
+  local cert = dir .. "/cert.pem"
+  local key = dir .. "/key.pem"
+  local cmd = {
+    "openssl",
+    "req",
+    "-x509",
+    "-newkey",
+    "rsa:2048",
+    "-keyout",
+    key,
+    "-out",
+    cert,
+    "-days",
+    "1",
+    "-nodes",
+    "-subj",
+    "/CN=" .. host,
+    "-addext",
+    "subjectAltName=IP:" .. host,
+  }
+  local result = vim.system(cmd, { text = true }):wait()
+  if result.code ~= 0 then
+    return nil, nil, "openssl failed: " .. (result.stderr or "")
+  end
+  return cert, key
 end
 
 --- Node HTTPS server source, written to a temp file at start so the fixture is
@@ -147,101 +147,101 @@ server.listen(port, host, () => fs.writeFileSync(capture + '.ready', '1'));
 ---   requests  (fun(): table[])  parsed capture entries seen so far
 ---   stop      (fun())     tear down the server and remove temp files
 function M.start()
-	local unavailable = function(reason)
-		return {
-			available = false,
-			reason = reason,
-			requests = function()
-				return {}
-			end,
-			stop = function() end,
-		}
-	end
+  local unavailable = function(reason)
+    return {
+      available = false,
+      reason = reason,
+      requests = function()
+        return {}
+      end,
+      stop = function() end,
+    }
+  end
 
-	local host = pick_bindable_host()
-	if not host then
-		return unavailable("no non-localhost loopback alias is bindable on this machine")
-	end
-	if vim.fn.executable("node") ~= 1 then
-		return unavailable("node is not available to terminate TLS")
-	end
-	if vim.fn.executable("openssl") ~= 1 then
-		return unavailable("openssl is not available to generate a self-signed cert")
-	end
+  local host = pick_bindable_host()
+  if not host then
+    return unavailable("no non-localhost loopback alias is bindable on this machine")
+  end
+  if vim.fn.executable("node") ~= 1 then
+    return unavailable("node is not available to terminate TLS")
+  end
+  if vim.fn.executable("openssl") ~= 1 then
+    return unavailable("openssl is not available to generate a self-signed cert")
+  end
 
-	local dir = vim.fn.tempname()
-	vim.fn.mkdir(dir, "p")
-	local cert, key, cert_err = generate_self_signed(dir, host)
-	if not cert then
-		return unavailable(cert_err or "self-signed cert generation failed")
-	end
+  local dir = vim.fn.tempname()
+  vim.fn.mkdir(dir, "p")
+  local cert, key, cert_err = generate_self_signed(dir, host)
+  if not cert then
+    return unavailable(cert_err or "self-signed cert generation failed")
+  end
 
-	local capture = dir .. "/capture.log"
-	-- Ensure the capture file exists so reads before the first request don't error.
-	local fh = io.open(capture, "w")
-	if fh then
-		fh:close()
-	end
+  local capture = dir .. "/capture.log"
+  -- Ensure the capture file exists so reads before the first request don't error.
+  local fh = io.open(capture, "w")
+  if fh then
+    fh:close()
+  end
 
-	local server_js = dir .. "/server.js"
-	local sfh = assert(io.open(server_js, "w"))
-	sfh:write(NODE_SERVER)
-	sfh:close()
+  local server_js = dir .. "/server.js"
+  local sfh = assert(io.open(server_js, "w"))
+  sfh:write(NODE_SERVER)
+  sfh:close()
 
-	local port = reserve_port(host)
+  local port = reserve_port(host)
 
-	local proc = vim.system({ "node", server_js, host, tostring(port), cert, key, capture }, { text = true })
+  local proc = vim.system({ "node", server_js, host, tostring(port), cert, key, capture }, { text = true })
 
-	-- Wait for the server to signal readiness (writes capture .ready).
-	local ready_flag = capture .. ".ready"
-	local ready = vim.wait(5000, function()
-		return vim.fn.filereadable(ready_flag) == 1
-	end, 25)
+  -- Wait for the server to signal readiness (writes capture .ready).
+  local ready_flag = capture .. ".ready"
+  local ready = vim.wait(5000, function()
+    return vim.fn.filereadable(ready_flag) == 1
+  end, 25)
 
-	if not ready then
-		pcall(function()
-			proc:kill(15)
-		end)
-		pcall(vim.fn.delete, dir, "rf")
-		return unavailable("the TLS server did not become ready in time")
-	end
+  if not ready then
+    pcall(function()
+      proc:kill(15)
+    end)
+    pcall(vim.fn.delete, dir, "rf")
+    return unavailable("the TLS server did not become ready in time")
+  end
 
-	local double = {
-		available = true,
-		host = host,
-		port = port,
-		url = string.format("https://%s:%d/mcp", host, port),
-		http_url = string.format("http://%s:%d/mcp", host, port),
-		cafile = cert,
-	}
+  local double = {
+    available = true,
+    host = host,
+    port = port,
+    url = string.format("https://%s:%d/mcp", host, port),
+    http_url = string.format("http://%s:%d/mcp", host, port),
+    cafile = cert,
+  }
 
-	--- Parsed capture entries (one per received request) seen so far.
-	function double.requests()
-		local out = {}
-		local rfh = io.open(capture, "r")
-		if not rfh then
-			return out
-		end
-		for line in rfh:lines() do
-			if line ~= "" then
-				local ok, decoded = pcall(vim.json.decode, line)
-				if ok then
-					table.insert(out, decoded)
-				end
-			end
-		end
-		rfh:close()
-		return out
-	end
+  --- Parsed capture entries (one per received request) seen so far.
+  function double.requests()
+    local out = {}
+    local rfh = io.open(capture, "r")
+    if not rfh then
+      return out
+    end
+    for line in rfh:lines() do
+      if line ~= "" then
+        local ok, decoded = pcall(vim.json.decode, line)
+        if ok then
+          table.insert(out, decoded)
+        end
+      end
+    end
+    rfh:close()
+    return out
+  end
 
-	function double.stop()
-		pcall(function()
-			proc:kill(15)
-		end)
-		pcall(vim.fn.delete, dir, "rf")
-	end
+  function double.stop()
+    pcall(function()
+      proc:kill(15)
+    end)
+    pcall(vim.fn.delete, dir, "rf")
+  end
 
-	return double
+  return double
 end
 
 return M

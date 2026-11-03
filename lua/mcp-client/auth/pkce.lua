@@ -32,37 +32,37 @@ local STATE_BYTES = 32
 --- back to a seeded math.random if that read fails, so generation never
 --- hard-errors.
 local function random_bytes(n)
-	local uv = vim.uv or vim.loop
-	local fd = uv.fs_open("/dev/urandom", "r", tonumber("400", 8))
-	if fd then
-		local data = uv.fs_read(fd, n, 0)
-		uv.fs_close(fd)
-		if data and #data == n then
-			return data
-		end
-	end
+  local uv = vim.uv or vim.loop
+  local fd = uv.fs_open("/dev/urandom", "r", tonumber("400", 8))
+  if fd then
+    local data = uv.fs_read(fd, n, 0)
+    uv.fs_close(fd)
+    if data and #data == n then
+      return data
+    end
+  end
 
-	-- Seed from high-resolution time so repeated calls in the same process
-	-- still diverge.
-	math.randomseed(uv.hrtime() % 2147483647)
-	local bytes = {}
-	for i = 1, n do
-		bytes[i] = string.char(math.random(0, 255))
-	end
-	return table.concat(bytes)
+  -- Seed from high-resolution time so repeated calls in the same process
+  -- still diverge.
+  math.randomseed(uv.hrtime() % 2147483647)
+  local bytes = {}
+  for i = 1, n do
+    bytes[i] = string.char(math.random(0, 255))
+  end
+  return table.concat(bytes)
 end
 
 --- Encode a raw byte string as unpadded base64url (RFC 4648 §5).
 local function base64url_encode(raw)
-	local b64 = vim.base64.encode(raw)
-	return (b64:gsub("+", "-"):gsub("/", "_"):gsub("=", ""))
+  local b64 = vim.base64.encode(raw)
+  return (b64:gsub("+", "-"):gsub("/", "_"):gsub("=", ""))
 end
 
 --- Convert a lowercase hex digest string into its raw bytes.
 local function hex_to_bytes(hex)
-	return (hex:gsub("..", function(pair)
-		return string.char(tonumber(pair, 16))
-	end))
+  return (hex:gsub("..", function(pair)
+    return string.char(tonumber(pair, 16))
+  end))
 end
 
 --- Compute the S256 code challenge for a given verifier:
@@ -70,8 +70,8 @@ end
 --- @param code_verifier string
 --- @return string code_challenge
 function M.s256_challenge(code_verifier)
-	local digest_hex = vim.fn.sha256(code_verifier)
-	return base64url_encode(hex_to_bytes(digest_hex))
+  local digest_hex = vim.fn.sha256(code_verifier)
+  return base64url_encode(hex_to_bytes(digest_hex))
 end
 
 --- Generate a fresh code_verifier / code_challenge / state bundle for one
@@ -83,21 +83,21 @@ end
 ---   state                 (string) per-flow CSRF token
 --- }
 function M.generate()
-	local alphabet_size = #VERIFIER_ALPHABET
-	local raw = random_bytes(VERIFIER_LENGTH)
-	local chars = {}
-	for i = 1, VERIFIER_LENGTH do
-		local index = (raw:byte(i) % alphabet_size) + 1
-		chars[i] = VERIFIER_ALPHABET:sub(index, index)
-	end
-	local code_verifier = table.concat(chars)
+  local alphabet_size = #VERIFIER_ALPHABET
+  local raw = random_bytes(VERIFIER_LENGTH)
+  local chars = {}
+  for i = 1, VERIFIER_LENGTH do
+    local index = (raw:byte(i) % alphabet_size) + 1
+    chars[i] = VERIFIER_ALPHABET:sub(index, index)
+  end
+  local code_verifier = table.concat(chars)
 
-	return {
-		code_verifier = code_verifier,
-		code_challenge = M.s256_challenge(code_verifier),
-		code_challenge_method = "S256",
-		state = base64url_encode(random_bytes(STATE_BYTES)),
-	}
+  return {
+    code_verifier = code_verifier,
+    code_challenge = M.s256_challenge(code_verifier),
+    code_challenge_method = "S256",
+    state = base64url_encode(random_bytes(STATE_BYTES)),
+  }
 end
 
 return M

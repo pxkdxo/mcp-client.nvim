@@ -10,3 +10,11 @@ test: $(PLENARY_DIR)
 
 $(PLENARY_DIR):
 	git clone --depth 1 $(PLENARY_URL) $(PLENARY_DIR)
+
+.PHONY: format lint
+
+format:
+	stylua lua tests
+
+lint:
+	stylua --check lua tests

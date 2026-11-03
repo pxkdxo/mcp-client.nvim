@@ -22,15 +22,15 @@
 --- time -- that would be a load-order cycle. `config` is required lazily,
 --- inside each function that needs it, instead.
 local function config()
-	return require("mcp-client.config")
+  return require("mcp-client.config")
 end
 
 local function dcr()
-	return require("mcp-client.auth.dcr")
+  return require("mcp-client.auth.dcr")
 end
 
 local function mcp_client()
-	return require("mcp-client.client")
+  return require("mcp-client.client")
 end
 
 local M = {}
@@ -93,60 +93,57 @@ local in_flight = {}
 --- only the server name and error strings.
 --- @param name string  a server name already validated by resolve_target
 function M.authenticate(name)
-	if in_flight[name] then
-		vim.notify(
-			string.format("mcp-client: authentication for %q is already in progress.", name),
-			vim.log.levels.WARN
-		)
-		return
-	end
-	in_flight[name] = true
+  if in_flight[name] then
+    vim.notify(string.format("mcp-client: authentication for %q is already in progress.", name), vim.log.levels.WARN)
+    return
+  end
+  in_flight[name] = true
 
-	local record = config().get_hub(name)
-	local connect_config = config()._connect_config(name)
+  local record = config().get_hub(name)
+  local connect_config = config()._connect_config(name)
 
-	dcr().run_flow({ server_url = connect_config.url }, function(token, err)
-		if err then
-			in_flight[name] = nil
-			vim.notify(string.format("mcp-client: authentication for %q failed: %s", name, err), vim.log.levels.WARN)
-			return
-		end
+  dcr().run_flow({ server_url = connect_config.url }, function(token, err)
+    if err then
+      in_flight[name] = nil
+      vim.notify(string.format("mcp-client: authentication for %q failed: %s", name, err), vim.log.levels.WARN)
+      return
+    end
 
-		record.token_store:save(token)
+    record.token_store:save(token)
 
-		local names_collide = false
-		for _, native_name in ipairs(config().state().native_servers) do
-			if native_name == name then
-				names_collide = true
-				break
-			end
-		end
+    local names_collide = false
+    for _, native_name in ipairs(config().state().native_servers) do
+      if native_name == name then
+        names_collide = true
+        break
+      end
+    end
 
-		if not names_collide then
-			for _, live_client in ipairs(mcp_client().get_clients({ name = name })) do
-				live_client:disconnect()
-				mcp_client()._forget(live_client.id)
-			end
-		end
+    if not names_collide then
+      for _, live_client in ipairs(mcp_client().get_clients({ name = name })) do
+        live_client:disconnect()
+        mcp_client()._forget(live_client.id)
+      end
+    end
 
-		mcp_client().connect(connect_config, {
-			on_connect = function(_client_object, connect_err)
-				in_flight[name] = nil
-				if connect_err then
-					vim.notify(
-						string.format(
-							"mcp-client: authenticated %q and saved the new token, but reconnecting failed: %s",
-							name,
-							connect_err
-						),
-						vim.log.levels.WARN
-					)
-					return
-				end
-				vim.notify(string.format("mcp-client: authenticated and reconnected %q.", name), vim.log.levels.INFO)
-			end,
-		})
-	end)
+    mcp_client().connect(connect_config, {
+      on_connect = function(_client_object, connect_err)
+        in_flight[name] = nil
+        if connect_err then
+          vim.notify(
+            string.format(
+              "mcp-client: authenticated %q and saved the new token, but reconnecting failed: %s",
+              name,
+              connect_err
+            ),
+            vim.log.levels.WARN
+          )
+          return
+        end
+        vim.notify(string.format("mcp-client: authenticated and reconnected %q.", name), vim.log.levels.INFO)
+      end,
+    })
+  end)
 end
 
 --- Whether a server record has a token_store at all. Does not consider
@@ -154,7 +151,7 @@ end
 --- @param record table  a `config.state().servers` entry
 --- @return boolean
 local function has_token_store(record)
-	return record ~= nil and record.token_store ~= nil
+  return record ~= nil and record.token_store ~= nil
 end
 
 --- Whether a server record needs authentication: has a token_store AND (no
@@ -162,39 +159,39 @@ end
 --- @param record table  a `config.state().servers` entry
 --- @return boolean
 local function needs_auth(record)
-	if not has_token_store(record) then
-		return false
-	end
-	local status = record.token_store:status()
-	return not status.has_token or status.expired
+  if not has_token_store(record) then
+    return false
+  end
+  local status = record.token_store:status()
+  return not status.has_token or status.expired
 end
 
 --- Every configured server name with a non-nil `token_store`, sorted for
 --- deterministic output (candidate lists, completion).
 --- @return string[]
 local function servers_with_token_store()
-	local names = {}
-	for name, record in pairs(config().state().servers) do
-		if has_token_store(record) then
-			table.insert(names, name)
-		end
-	end
-	table.sort(names)
-	return names
+  local names = {}
+  for name, record in pairs(config().state().servers) do
+    if has_token_store(record) then
+      table.insert(names, name)
+    end
+  end
+  table.sort(names)
+  return names
 end
 
 --- Every configured server name that currently needs authentication, sorted
 --- for deterministic output.
 --- @return string[]
 local function servers_needing_auth()
-	local names = {}
-	for name, record in pairs(config().state().servers) do
-		if needs_auth(record) then
-			table.insert(names, name)
-		end
-	end
-	table.sort(names)
-	return names
+  local names = {}
+  for name, record in pairs(config().state().servers) do
+    if needs_auth(record) then
+      table.insert(names, name)
+    end
+  end
+  table.sort(names)
+  return names
 end
 
 --- Resolve `:MCPAuth [server-name]`'s target.
@@ -215,29 +212,29 @@ end
 --- @param name string|nil
 --- @return string|nil target, string|nil err
 function M.resolve_target(name)
-	if name ~= nil and name ~= "" then
-		local record = config().get_hub(name)
-		if record == nil then
-			return nil, string.format("mcp-client: server %q is not configured.", name)
-		end
-		if not has_token_store(record) then
-			return nil, string.format("mcp-client: server %q does not use token-based authentication.", name)
-		end
-		return name, nil
-	end
+  if name ~= nil and name ~= "" then
+    local record = config().get_hub(name)
+    if record == nil then
+      return nil, string.format("mcp-client: server %q is not configured.", name)
+    end
+    if not has_token_store(record) then
+      return nil, string.format("mcp-client: server %q does not use token-based authentication.", name)
+    end
+    return name, nil
+  end
 
-	local candidates = servers_needing_auth()
-	if #candidates == 0 then
-		return nil, "mcp-client: nothing to authenticate -- no configured server currently needs authentication."
-	end
-	if #candidates == 1 then
-		return candidates[1], nil
-	end
-	return nil,
-		string.format(
-			"mcp-client: multiple servers need authentication (%s) -- run :MCPAuth <server-name> to pick one.",
-			table.concat(candidates, ", ")
-		)
+  local candidates = servers_needing_auth()
+  if #candidates == 0 then
+    return nil, "mcp-client: nothing to authenticate -- no configured server currently needs authentication."
+  end
+  if #candidates == 1 then
+    return candidates[1], nil
+  end
+  return nil,
+    string.format(
+      "mcp-client: multiple servers need authentication (%s) -- run :MCPAuth <server-name> to pick one.",
+      table.concat(candidates, ", ")
+    )
 end
 
 --- `:MCPAuth <Tab>` completion candidates: every configured server name that
@@ -247,7 +244,7 @@ end
 --- `fun(arg_lead, cmd_line, cursor_pos): string[]`.
 --- @return string[]
 function M.complete(_arg_lead, _cmd_line, _cursor_pos)
-	return servers_with_token_store()
+  return servers_with_token_store()
 end
 
 --- `:MCPAuth [server-name]` callback: resolves the target and, on a definite
@@ -256,16 +253,16 @@ end
 --- errors (`vim.notify`, no interactive picker).
 --- @param cmd_opts table  the table `nvim_create_user_command`'s callback receives
 local function on_mcpauth(cmd_opts)
-	local name = cmd_opts.args
-	if name == "" then
-		name = nil
-	end
-	local target, err = M.resolve_target(name)
-	if not target then
-		vim.notify(err, vim.log.levels.WARN)
-		return
-	end
-	M.authenticate(target)
+  local name = cmd_opts.args
+  if name == "" then
+    name = nil
+  end
+  local target, err = M.resolve_target(name)
+  if not target then
+    vim.notify(err, vim.log.levels.WARN)
+    return
+  end
+  M.authenticate(target)
 end
 
 --- Register the `:MCPAuth [server-name]` Ex command. Called once from
@@ -273,11 +270,11 @@ end
 --- already-defined command of the same name, so calling `register()` again
 --- on a repeated `setup()` call is safe.
 function M.register()
-	vim.api.nvim_create_user_command("MCPAuth", on_mcpauth, {
-		nargs = "?",
-		complete = M.complete,
-		desc = "Run the OAuth authorization flow for a configured MCP server",
-	})
+  vim.api.nvim_create_user_command("MCPAuth", on_mcpauth, {
+    nargs = "?",
+    complete = M.complete,
+    desc = "Run the OAuth authorization flow for a configured MCP server",
+  })
 end
 
 --- Clear the in-flight guard. Test-only -- lets specs isolate scenarios that
@@ -285,7 +282,7 @@ end
 --- dcr.run_flow callback never fires) without leaking that state into later
 --- tests reusing the same server name.
 function M._reset()
-	in_flight = {}
+  in_flight = {}
 end
 
 return M

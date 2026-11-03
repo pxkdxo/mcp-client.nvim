@@ -14,22 +14,22 @@ local M = {}
 local PROTOCOL_VERSION = "2025-03-26"
 
 local function build_initialize_request(config)
-	return {
-		jsonrpc = "2.0",
-		id = 1,
-		method = "initialize",
-		params = {
-			protocolVersion = PROTOCOL_VERSION,
-			-- vim.empty_dict(), not {}: an empty Lua table serializes to a JSON
-			-- array `[]`, which a strict server rejects -- MCP requires
-			-- `capabilities` to be an object.
-			capabilities = config.capabilities or vim.empty_dict(),
-			clientInfo = {
-				name = config.name or "mcp-client",
-				version = config.client_version or "0.1.0",
-			},
-		},
-	}
+  return {
+    jsonrpc = "2.0",
+    id = 1,
+    method = "initialize",
+    params = {
+      protocolVersion = PROTOCOL_VERSION,
+      -- vim.empty_dict(), not {}: an empty Lua table serializes to a JSON
+      -- array `[]`, which a strict server rejects -- MCP requires
+      -- `capabilities` to be an object.
+      capabilities = config.capabilities or vim.empty_dict(),
+      clientInfo = {
+        name = config.name or "mcp-client",
+        version = config.client_version or "0.1.0",
+      },
+    },
+  }
 end
 
 --- Connect to a remote MCP server, detecting whether it speaks the modern
@@ -53,38 +53,38 @@ end
 ---     methods) or with a descriptive error and no client.
 ---   timeout    (number|nil) InitializeRequest timeout in ms (default 10000)
 function M.connect(config, opts)
-	assert(type(config) == "table", "config table is required")
-	assert(type(config.url) == "string" and config.url ~= "", "config.url is required")
-	opts = opts or {}
-	assert(type(opts.on_connect) == "function", "opts.on_connect is required")
+  assert(type(config) == "table", "config table is required")
+  assert(type(config.url) == "string" and config.url ~= "", "config.url is required")
+  opts = opts or {}
+  assert(type(opts.on_connect) == "function", "opts.on_connect is required")
 
-	detect.connect({
-		url = config.url,
-		request = build_initialize_request(config),
-		headers = config.headers,
-		timeout = opts.timeout,
-	}, function(result, err)
-		if err then
-			return opts.on_connect(nil, err)
-		end
+  detect.connect({
+    url = config.url,
+    request = build_initialize_request(config),
+    headers = config.headers,
+    timeout = opts.timeout,
+  }, function(result, err)
+    if err then
+      return opts.on_connect(nil, err)
+    end
 
-		local transport_client = result.client
-		opts.on_connect({
-			transport = result.transport,
-			session_id = result.session_id,
-			endpoint = result.endpoint,
-			initialize_result = result.initialize_result,
-			request = function(rpc_message, callback)
-				return transport_client:request(rpc_message, callback)
-			end,
-			notify = function(rpc_message)
-				return transport_client:notify(rpc_message)
-			end,
-			close = function()
-				return transport_client:close()
-			end,
-		}, nil)
-	end)
+    local transport_client = result.client
+    opts.on_connect({
+      transport = result.transport,
+      session_id = result.session_id,
+      endpoint = result.endpoint,
+      initialize_result = result.initialize_result,
+      request = function(rpc_message, callback)
+        return transport_client:request(rpc_message, callback)
+      end,
+      notify = function(rpc_message)
+        return transport_client:notify(rpc_message)
+      end,
+      close = function()
+        return transport_client:close()
+      end,
+    }, nil)
+  end)
 end
 
 --- The user-facing setup entrypoint: `require("mcp-client").setup(opts)`.
@@ -97,7 +97,7 @@ end
 ---
 --- @param opts table|nil  see `mcp-client.config.setup` for the full shape.
 function M.setup(opts)
-	return require("mcp-client.config").setup(opts)
+  return require("mcp-client.config").setup(opts)
 end
 
 return M
