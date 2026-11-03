@@ -10,8 +10,9 @@ Any spec-compliant server works; [mcphub][mcphub] is a maintained example of a
 multi-server hub if you want one.
 
 - **Module name:** `require("mcp-client")` (deliberately *not* `require("mcphub")`).
-- **Requirements:** Neovim 0.10+ and [`curl`][curl] on `PATH` (the transports and
-  the OAuth flow shell out to `curl` rather than hand-rolling TLS).
+- **Requirements:** Neovim 0.10+, [plenary.nvim][plenary], and [`curl`][curl] on
+  `PATH` (the transports and the OAuth flow shell out to `curl` through
+  `plenary.curl` rather than hand-rolling TLS).
 
 > **Security note up front:** native servers run **in-process, with full
 > Neovim/Lua privilege — there is no sandboxing.** Only register native servers
@@ -25,14 +26,17 @@ With [lazy.nvim][lazy]:
 
 ```lua
 {
-  "pxkdxo/mcp-client",
+  "pxkdxo/mcp-client.nvim",
+  dependencies = { "nvim-lua/plenary.nvim" },
   opts = {
     -- see Configuration below
-  }
+  },
 }
 ```
 
-Or configure it manually from anywhere in your config:
+lazy.nvim calls `require("mcp-client").setup(opts)` for you. With any other
+plugin manager, install `nvim-lua/plenary.nvim` alongside this plugin and call
+`setup()` yourself from anywhere in your config:
 
 ```lua
 require("mcp-client").setup({
@@ -331,4 +335,5 @@ Each client object exposes `id`, `name`, `config`, `is_stopped()`,
 [codecompanion]: https://github.com/olimorris/codecompanion.nvim
 [lazy]: https://github.com/folke/lazy.nvim
 [curl]: https://curl.se/
+[plenary]: https://github.com/nvim-lua/plenary.nvim
 [mcphub]: https://github.com/samanhappy/mcphub
