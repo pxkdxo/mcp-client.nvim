@@ -61,19 +61,9 @@
 --- prompt's purpose is to seed real conversational context.
 
 local client = require("mcp-client.client")
+local rpc = require("mcp-client.rpc")
 
 local M = {}
-
---- Monotonic JSON-RPC id generator. Requests are correlated by
---- `rpc_message.id` (client.lua's `entry._in_flight`, legacy_sse.lua's
---- `_pending`), so two concurrent calls sharing an id would silently deliver
---- a response to the wrong callback -- e.g. an overlapping `tools/list`
---- refresh and `tools/call`. Never reused for the life of the session.
-local next_request_id = 0
-local function new_request_id()
-  next_request_id = next_request_id + 1
-  return next_request_id
-end
 
 --- Namespace CodeCompanion tool/editor-context entries with this prefix so
 --- multiple clients' entries can never collide with each other or with a
@@ -112,87 +102,29 @@ local function publish_discovered()
   end)
 end
 
---- Normalize a client `request()` result to the bare MCP payload, regardless
---- of which kind of client produced it. Native clients deliver the handler's
---- return value directly (e.g. `{ tools = {...} }`); remote clients deliver
---- the full JSON-RPC envelope (`{ jsonrpc, id, result = { tools = {...} } }`).
---- A nested `result` table alone is not a reliable envelope signal: a native
---- tool is an arbitrary, MCP-unaware Lua function, and its own payload can
---- legitimately use `result` as an ordinary field name (e.g. a calc/lookup
---- tool returning `{ result = { value = 42 } }`) -- unwrapping that would
---- silently corrupt the tool's own data. Require the two fields that only a
---- genuine JSON-RPC response carries (`jsonrpc`, `id`) alongside the nested
---- `result` table before unwrapping.
-local function unwrap_result(result)
-  if type(result) == "table" and type(result.result) == "table" and result.jsonrpc == "2.0" and result.id ~= nil then
-    return result.result
-  end
-  return result
+--- Refresh one client's cached listing for a paginated `*/list` method. A
+--- failure leaves the previous cache entry in place, so one misbehaving
+--- client cannot take down the whole tool/resource listing.
+local function refresh_listing(cache, mcp_client, method, field)
+  rpc.list_all(mcp_client, method, field, function(err, items)
+    if err then
+      return
+    end
+    cache[mcp_client.id] = items
+    publish_discovered()
+  end)
 end
 
---- Ask one client for its current tool listing via the standard MCP
---- `tools/list` method. A failure (thrown or callback-reported) simply
---- leaves the previous cache entry in place rather than raising, so one
---- misbehaving client can never take down the whole tool/resource listing.
 local function refresh_client_tools(mcp_client)
-  pcall(function()
-    mcp_client:request({
-      jsonrpc = "2.0",
-      id = new_request_id(),
-      method = "tools/list",
-      -- vim.empty_dict(), not {}: an empty Lua table serializes to a JSON
-      -- array `[]`, which a strict real server rejects (HTTP 400) -- MCP
-      -- requires `params` to be an object.
-      params = vim.empty_dict(),
-    }, function(err, result, _response)
-      local payload = unwrap_result(result)
-      if err or type(payload) ~= "table" or type(payload.tools) ~= "table" then
-        return
-      end
-      tools_cache[mcp_client.id] = payload.tools
-      publish_discovered()
-    end)
-  end)
+  refresh_listing(tools_cache, mcp_client, "tools/list", "tools")
 end
 
---- Ask one client for its current prompt listing via the standard MCP
---- `prompts/list` method. Same shape as `refresh_client_tools` above.
 local function refresh_client_prompts(mcp_client)
-  pcall(function()
-    mcp_client:request({
-      jsonrpc = "2.0",
-      id = new_request_id(),
-      method = "prompts/list",
-      params = vim.empty_dict(),
-    }, function(err, result, _response)
-      local payload = unwrap_result(result)
-      if err or type(payload) ~= "table" or type(payload.prompts) ~= "table" then
-        return
-      end
-      prompts_cache[mcp_client.id] = payload.prompts
-      publish_discovered()
-    end)
-  end)
+  refresh_listing(prompts_cache, mcp_client, "prompts/list", "prompts")
 end
 
---- Ask one client for its current resource listing via the standard MCP
---- `resources/list` method. Same shape as `refresh_client_tools` above.
 local function refresh_client_resources(mcp_client)
-  pcall(function()
-    mcp_client:request({
-      jsonrpc = "2.0",
-      id = new_request_id(),
-      method = "resources/list",
-      params = vim.empty_dict(),
-    }, function(err, result, _response)
-      local payload = unwrap_result(result)
-      if err or type(payload) ~= "table" or type(payload.resources) ~= "table" then
-        return
-      end
-      resources_cache[mcp_client.id] = payload.resources
-      publish_discovered()
-    end)
-  end)
+  refresh_listing(resources_cache, mcp_client, "resources/list", "resources")
 end
 
 --- MCP's `inputSchema` is already standard JSON Schema, and CodeCompanion's
@@ -249,7 +181,7 @@ local function build_tool_spec(mcp_client, tool_info)
         local ok, call_err = pcall(function()
           mcp_client:request({
             jsonrpc = "2.0",
-            id = new_request_id(),
+            id = rpc.next_id(),
             method = "tools/call",
             -- arguments defaults to vim.empty_dict() (not {}) so a
             -- zero-argument tool call serializes `arguments` as a JSON
@@ -265,7 +197,7 @@ local function build_tool_spec(mcp_client, tool_info)
             -- Unwrap the JSON-RPC envelope for a remote client so the
             -- tool's own CallToolResult (content/isError) is read, not
             -- the wrapper (a native client returns it directly).
-            local payload = unwrap_result(result)
+            local payload = rpc.unwrap_result(result)
             if type(payload) == "table" and payload.isError then
               return output_cb({ status = "error", data = render_result(payload) })
             end
@@ -344,14 +276,14 @@ local function build_editor_context_entry(mcp_client)
         pcall(function()
           mcp_client:request({
             jsonrpc = "2.0",
-            id = new_request_id(),
+            id = rpc.next_id(),
             method = "resources/read",
             params = { uri = resource_info.uri },
           }, function(err, result, _response)
             if not err then
               -- Unwrap the JSON-RPC envelope for a remote client so
               -- the resource's own ReadResourceResult is rendered.
-              content = render_result(unwrap_result(result))
+              content = render_result(rpc.unwrap_result(result))
             end
           end)
         end)
@@ -407,14 +339,14 @@ local function build_prompt_slash_command_entry(mcp_client, prompt_info)
           pcall(function()
             mcp_client:request({
               jsonrpc = "2.0",
-              id = new_request_id(),
+              id = rpc.next_id(),
               method = "prompts/get",
               params = { name = prompt_info.name, arguments = arguments },
             }, function(err, result, _response)
               if err then
                 return
               end
-              local payload = unwrap_result(result)
+              local payload = rpc.unwrap_result(result)
               if type(payload) ~= "table" or type(payload.messages) ~= "table" then
                 return
               end

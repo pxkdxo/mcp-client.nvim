@@ -42,33 +42,9 @@
 --- response even on the synchronous native path.
 
 local client = require("mcp-client.client")
+local rpc = require("mcp-client.rpc")
 
 local M = {}
-
---- Monotonic JSON-RPC id generator. Requests are correlated by
---- `rpc_message.id` (client.lua's `entry._in_flight`, legacy_sse.lua's
---- `_pending`), so two concurrent calls sharing an id would silently deliver
---- a response to the wrong callback -- e.g. an overlapping `tools/list`
---- refresh and `tools/call`. Never reused for the life of the session.
-local next_request_id = 0
-local function new_request_id()
-  next_request_id = next_request_id + 1
-  return next_request_id
-end
-
---- Normalize a client `request()` result to the bare MCP payload. A native
---- client returns the handler's value directly (e.g. `{ tools = {...} }`); a
---- remote client returns the full JSON-RPC envelope (`{ jsonrpc, id, result
---- = { tools = {...} } }`). A nested `result` table alone isn't a reliable
---- envelope signal -- a native tool's own payload can legitimately use
---- `result` as an ordinary field name (e.g. `{ result = { value = 42 } }`) --
---- so unwrapping requires `jsonrpc`/`id` alongside the nested `result` table.
-local function unwrap_result(result)
-  if type(result) == "table" and type(result.result) == "table" and result.jsonrpc == "2.0" and result.id ~= nil then
-    return result.result
-  end
-  return result
-end
 
 --- Avante's `custom_tools` contract is synchronous: `Config.custom_tools` is
 --- called with no callback and its return value used immediately. A remote
@@ -90,29 +66,12 @@ local function refresh_client_tools(mcp_client)
     return
   end
   tools_inflight[mcp_client.id] = true
-  local ok, err = pcall(function()
-    mcp_client:request({
-      jsonrpc = "2.0",
-      id = new_request_id(),
-      method = "tools/list",
-      -- vim.empty_dict(), not {}: an empty Lua table serializes to a JSON
-      -- array `[]`, which a strict real server rejects -- MCP requires
-      -- `params` to be an object.
-      params = vim.empty_dict(),
-    }, function(cb_err, result, _response)
-      tools_inflight[mcp_client.id] = nil
-      local payload = unwrap_result(result)
-      if cb_err or type(payload) ~= "table" or type(payload.tools) ~= "table" then
-        return
-      end
-      tools_cache[mcp_client.id] = payload.tools
-    end)
-  end)
-  if not ok then
+  rpc.list_all(mcp_client, "tools/list", "tools", function(err, tools)
     tools_inflight[mcp_client.id] = nil
-    -- Same handling as a callback-reported error: leave the cache as-is.
-    return err
-  end
+    if not err then
+      tools_cache[mcp_client.id] = tools
+    end
+  end)
 end
 
 --- MCP's `inputSchema` (JSON Schema-ish) doesn't line up 1:1 with Avante's
@@ -173,7 +132,7 @@ local function build_tool_spec(mcp_client, tool_info)
       local ok, call_err = pcall(function()
         mcp_client:request({
           jsonrpc = "2.0",
-          id = new_request_id(),
+          id = rpc.next_id(),
           method = "tools/call",
           -- arguments defaults to vim.empty_dict() (not {}) so a
           -- zero-argument tool call serializes `arguments` as a JSON
@@ -189,7 +148,7 @@ local function build_tool_spec(mcp_client, tool_info)
           -- Unwrap the JSON-RPC envelope for a remote client so the
           -- tool's own output is surfaced, not the wrapper (a native
           -- client already returns the bare payload).
-          local payload = unwrap_result(result)
+          local payload = rpc.unwrap_result(result)
           local result_str
           if type(payload) == "string" then
             result_str = payload
@@ -283,26 +242,11 @@ local prompts_cache = {} ---@type table<string, table[]>
 --- Ask one client for its current prompt listing via `prompts/list`.
 --- Mirrors `refresh_client_tools`.
 local function refresh_client_prompts(mcp_client)
-  local ok, err = pcall(function()
-    mcp_client:request({
-      jsonrpc = "2.0",
-      id = new_request_id(),
-      method = "prompts/list",
-      -- vim.empty_dict(), not {}, for the same reason as tools/list above:
-      -- MCP requires `params` to be a JSON object, and a strict real server
-      -- rejects an empty Lua table's `[]` serialization.
-      params = vim.empty_dict(),
-    }, function(cb_err, result, _response)
-      local payload = unwrap_result(result)
-      if cb_err or type(payload) ~= "table" or type(payload.prompts) ~= "table" then
-        return
-      end
-      prompts_cache[mcp_client.id] = payload.prompts
-    end)
+  rpc.list_all(mcp_client, "prompts/list", "prompts", function(err, prompts)
+    if not err then
+      prompts_cache[mcp_client.id] = prompts
+    end
   end)
-  if not ok then
-    return err
-  end
 end
 
 --- Render a `prompts/get` result as chat message tables suitable for
@@ -373,7 +317,7 @@ local function build_prompt_command(mcp_client, prompt_info)
       local ok, call_err = pcall(function()
         mcp_client:request({
           jsonrpc = "2.0",
-          id = new_request_id(),
+          id = rpc.next_id(),
           method = "prompts/get",
           params = { name = prompt_info.name, arguments = arguments },
         }, function(err, result, _response)
@@ -381,7 +325,7 @@ local function build_prompt_command(mcp_client, prompt_info)
             vim.notify("mcp-client: prompt failed: " .. tostring(err), vim.log.levels.ERROR)
             return
           end
-          local payload = unwrap_result(result)
+          local payload = rpc.unwrap_result(result)
           local messages = render_prompt_result(payload)
           if sidebar and sidebar.add_chat_history then
             sidebar:add_chat_history(messages, { visible = true })

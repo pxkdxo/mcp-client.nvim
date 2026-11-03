@@ -42,6 +42,7 @@ function HttpDouble.new(opts)
     table.insert(self._clients, client)
 
     local buf = ""
+    local handled = false
     client:read_start(function(read_err, chunk)
       if read_err then
         client:close()
@@ -50,12 +51,20 @@ function HttpDouble.new(opts)
       if not chunk then
         return
       end
+      if handled then
+        return
+      end
       buf = buf .. chunk
 
       local method, path, rest, head = parse_request_head(buf)
       if not method then
         return -- keep buffering until we see the header terminator
       end
+      local content_length = tonumber(head:match("\r\n[Cc]ontent%-[Ll]ength:%s*(%d+)") or "0")
+      if #rest < content_length then
+        return -- keep buffering until the whole body has arrived
+      end
+      handled = true
 
       local handler = self._on_request(method, path, rest, head)
       handler = handler or { status = 404, body = "" }

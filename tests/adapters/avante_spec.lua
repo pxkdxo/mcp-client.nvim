@@ -284,6 +284,29 @@ describe("adapters.avante (custom_tools translation)", function()
     assert.are.equal(0, #tools)
   end)
 
+  it("exposes tools from every page of a paginated tools/list", function()
+    make_async_client({
+      name = "paged",
+      handle = function(rpc_message, callback)
+        local result = rpc_message.params.cursor == "page-2" and { tools = { { name = "second" } } }
+          or { tools = { { name = "first" } }, nextCursor = "page-2" }
+        callback(nil, { jsonrpc = "2.0", id = rpc_message.id, result = result }, nil)
+      end,
+    })
+
+    avante.custom_tools()
+    local names
+    assert.is_true(vim.wait(1000, function()
+      names = {}
+      for _, tool in ipairs(avante.custom_tools()) do
+        table.insert(names, tool.name)
+      end
+      return #names == 2
+    end, 10))
+    table.sort(names)
+    assert.are.same({ "mcp_paged__first", "mcp_paged__second" }, names)
+  end)
+
   it("integration: a client transitioning to disconnected is reflected on next access, not stale", function()
     local example = require("tests.fixtures.example_native_server")
     local server = native.register(example)
