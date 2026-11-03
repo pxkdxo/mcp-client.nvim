@@ -1,0 +1,299 @@
+*mcp-client.txt*  Model Context Protocol client for Neovim
+
+==============================================================================
+CONTENTS                                                 *mcp-client-contents*
+
+  1. Introduction ................................ |mcp-client-intro|
+  2. Installation ................................ |mcp-client-install|
+  3. Configuration ............................... |mcp-client-config|
+  4. Protocol support ............................ |mcp-client-protocol|
+  5. Client features ............................. |mcp-client-handlers|
+  6. Native servers .............................. |mcp-client-native|
+  7. Authentication .............................. |mcp-client-auth|
+  8. Adapters .................................... |mcp-client-adapters|
+  9. Commands .................................... |mcp-client-commands|
+ 10. Events ...................................... |mcp-client-events|
+ 11. Health check ................................ |mcp-client-health|
+ 12. Lua API ..................................... |mcp-client-api|
+
+==============================================================================
+1. Introduction                                             *mcp-client-intro*
+
+mcp-client connects Neovim to Model Context Protocol servers over stdio or
+Streamable HTTP (with a legacy HTTP+SSE fallback), hosts native in-process
+servers, and exposes their tools, resources, and prompts to Avante and
+CodeCompanion. It speaks MCP 2026-07-28 and falls back to the handshake-based
+revisions, 2025-11-25 back to 2024-11-05, for servers that need them.
+
+The module is `require("mcp-client")`.
+
+Native servers run inside Neovim with full Lua privilege and no sandboxing.
+Register only native servers whose code you trust. See |mcp-client-native|.
+
+==============================================================================
+2. Installation                                           *mcp-client-install*
+
+Requirements: Neovim 0.10+, plenary.nvim, and `curl` on `PATH`.
+
+With lazy.nvim, which calls `setup(opts)` for you: >lua
+    {
+      "pxkdxo/mcp-client.nvim",
+      dependencies = { "nvim-lua/plenary.nvim" },
+      opts = {},
+    }
+<
+With any other plugin manager, install plenary.nvim alongside this plugin and
+call `require("mcp-client").setup({...})` from your config.
+
+`setup()` may be called again: it disconnects every client and applies the
+new configuration. It never opens a browser login (see |:MCPAuth|).
+
+==============================================================================
+3. Configuration                                           *mcp-client-config*
+                                                          *mcp-client.setup()*
+>lua
+    require("mcp-client").setup({
+      -- One server; its name defaults to "default".
+      server = { url = "http://localhost:PORT" },
+
+      -- Or any number of named servers.
+      servers = {
+        local_server  = { url = "http://localhost:PORT" },
+        remote_server = { url = "https://your-server.example.com/mcp" },
+        stdio_server  = { command = "npx", args = { "-y", "your-server" } },
+      },
+
+      -- Native, in-process servers (|mcp-client-native|).
+      native_servers = { my_server = require("my.native.server") },
+
+      -- Client-feature handlers for every server (|mcp-client-handlers|).
+      handlers = {},
+
+      -- Defaults for the token stores built for non-localhost servers.
+      token_store = {
+        backend   = nil, -- "keychain" | "file" | nil (auto-detect)
+        data_home = nil, -- overrides $XDG_DATA_HOME for the file backend
+        key       = nil, -- prefix, namespaced per server as "<key>:<name>"
+      },
+    })
+<
+                                                    *mcp-client-server-config*
+Server config fields:
+
+  url               The server's MCP endpoint (HTTP). Exactly one of `url`
+                    or `command` is required.
+  command           Executable to launch as a stdio server.
+  args              Arguments for `command`.
+  env               Environment variables added to the stdio server's
+                    inherited environment.
+  cwd               Working directory for the stdio server.
+  name              Defaults to the map key.
+  headers           Extra headers sent with every HTTP request.
+  handlers          Per-server |mcp-client-handlers|, overriding the
+                    setup-wide ones key by key.
+  timeout           Milliseconds allowed per connection step (10000).
+  discover_timeout  stdio only: milliseconds to wait for a reply to the
+                    modern discovery probe before treating the server as
+                    legacy (3000).
+  reconnect         Backoff tuning: `initial_delay`, `max_delay`,
+                    `growth_factor`, `max_attempts`.
+  auth              `{ token_store = <TokenStore> }` to supply your own
+                    store (|mcp-client-auth|).
+
+A stdio server that exits unexpectedly fails its pending requests with its
+last stderr lines and is restarted within the `reconnect` limits.
+
+==============================================================================
+4. Protocol support                                      *mcp-client-protocol*
+
+Each connection works out which protocol era its server speaks.
+
+Modern (2026-07-28)~
+  Every request carries its protocol version and the client's capabilities in
+  `_meta`. Over HTTP the client also sends `Mcp-Method`, `Mcp-Name`, and the
+  `Mcp-Param-*` headers declared by a tool's `x-mcp-header` annotations; a
+  tool with invalid annotations is left out of `tools/list`. List-change
+  notifications arrive on a `subscriptions/listen` stream. A result of type
+  `input_required` is answered through |mcp-client-handlers| and the request
+  is retried with the answers, so callers only see the final result.
+
+Legacy (2025-11-25 and earlier)~
+  The `initialize` and `notifications/initialized` handshake, Streamable HTTP
+  sessions with the GET notification stream, and the 2024-11-05 HTTP+SSE
+  transport. Server-to-client requests are answered through
+  |mcp-client-handlers|.
+
+Over HTTP the client first sends a modern `server/discover` and falls back to
+the legacy handshake when the server does not answer it as a modern server
+would. Over stdio it sends the same probe and treats a server that rejects it,
+or does not reply within `discover_timeout`, as legacy. |:MCPStatus| shows
+what each connection negotiated.
+
+==============================================================================
+5. Client features                                       *mcp-client-handlers*
+
+Servers can ask the client for information while handling a request. The
+client answers through `handlers`, set in `setup()` or in a server's config:
+
+  roots        `fun(ctx): Root[]`
+               Default: the current working directory.
+  elicitation  `fun(params, ctx, respond)`
+               Default: prompts with |vim.ui.select()| and |vim.ui.input()|.
+  sampling     `fun(params, ctx, respond)`
+               Default: none; sampling is not offered without a handler.
+
+`ctx` is `{ server = <server name> }`. Call `respond(err, result)` once with
+an `ElicitResult` or `CreateMessageResult`, or with an error. Setting a
+handler to `false` turns the feature off and stops the client from declaring
+it.
+
+The default elicitation handler names the requesting server, asks for each
+form field (enums and booleans in a picker, strings and numbers validated
+against the schema), and shows a review step before sending. For a URL
+request it shows the full URL and its host and opens it with |vim.ui.open()|
+only after you choose to. Escaping any prompt cancels the request.
+
+==============================================================================
+6. Native servers                                          *mcp-client-native*
+
+A native server is a Lua table whose `tools`, `resources`, and `prompts`
+sub-tables map names (resource URIs) to functions. Optional `tool_meta`,
+`resource_meta`, and `prompt_meta` tables add descriptions and schemas to the
+listings. >lua
+    return {
+      name = "my_server",
+      tools = { add = function(args) return { total = args.a + args.b } end },
+      tool_meta = {
+        add = {
+          description = "Add two numbers",
+          inputSchema = {
+            type = "object",
+            properties = { a = { type = "number" }, b = { type = "number" } },
+            required = { "a", "b" },
+          },
+        },
+      },
+    }
+<
+Native functions run in your Neovim process with full privilege. A model can
+invoke a native tool, but the tool's code is yours.
+
+==============================================================================
+7. Authentication                                            *mcp-client-auth*
+
+A localhost HTTP server may use plain `http://` with no credential. Any other
+HTTP server must use `https://` and have a bearer token; the client refuses to
+connect otherwise. stdio servers take credentials from their environment.
+
+For each non-localhost server, `setup()` builds a token store keyed by the
+server name: the macOS keychain when available, else a 0600 JSON file under
+`$XDG_DATA_HOME/mcp-client/`. Expired tokens are refreshed automatically.
+Use |:MCPAuth| to sign in and |:MCPLogout| to remove a stored token.
+
+==============================================================================
+8. Adapters                                              *mcp-client-adapters*
+
+Avante: >lua
+    require("avante").setup({
+      custom_tools = require("mcp-client.adapters.avante").custom_tools,
+    })
+    require("mcp-client.adapters.avante").refresh()
+<
+CodeCompanion: >lua
+    require("codecompanion").setup({
+      extensions = {
+        ["mcp-client"] = {
+          callback = require("mcp-client.adapters.codecompanion"),
+        },
+      },
+    })
+<
+Refresh the adapters from the autocmd in |mcp-client-events| to keep their
+tool and prompt lists current.
+
+==============================================================================
+9. Commands                                              *mcp-client-commands*
+
+                                                                  *:MCPStatus*
+:MCPStatus
+    Show each server's connection state, transport, protocol era and
+    version, server identity, stdio process id and last stderr line, and
+    auth status, then the native servers.
+
+                                                               *:MCPReconnect*
+:MCPReconnect [server]
+    Replace the named server's connection, or every configured server's.
+
+                                                                    *:MCPAuth*
+:MCPAuth [server]
+    Run the OAuth flow (dynamic client registration with PKCE) for a server,
+    save the token, and reconnect it. Without an argument, authenticates the
+    one server that needs it, or lists the candidates when several do.
+
+                                                                  *:MCPLogout*
+:MCPLogout {server}
+    Delete the server's stored token and disconnect it.
+
+==============================================================================
+10. Events                                                 *mcp-client-events*
+
+The client fires |User| autocmds:
+
+  *MCPAttach*   a client connected or reconnected.
+              data: `{ client_id, server }`
+  *MCPDetach*   a client gave up reconnecting.
+              data: `{ client_id, server }`
+  *MCPNotify*   a server sent a notification.
+              data: `{ client_id, server, method, params }`
+
+Refresh an adapter when tools, prompts, or resources change: >lua
+    vim.api.nvim_create_autocmd("User", {
+      pattern = { "MCPAttach", "MCPDetach", "MCPNotify" },
+      callback = function(ev)
+        local changed = (ev.data.method or ""):match("list_changed$")
+        if ev.match == "MCPNotify" and not changed then
+          return
+        end
+        pcall(function()
+          require("codecompanion").extensions["mcp-client"].refresh()
+        end)
+      end,
+    })
+<
+==============================================================================
+11. Health check                                           *mcp-client-health*
+
+`:checkhealth mcp-client` checks for plenary.nvim and `curl`, then reports
+each server's connection (with transport and negotiated protocol), its auth
+status from redacted fields only, and the registered native servers.
+
+==============================================================================
+12. Lua API                                                   *mcp-client-api*
+
+`require("mcp-client.client").get_clients({filter})`
+    Live client objects. {filter} may contain `id` and `name`.
+
+`require("mcp-client.native").register({config})`
+    Register one native server.
+
+`require("mcp-client.rpc").list_all({client}, {method}, {field}, {callback})`
+    Fetch every page of a `*/list` method, e.g. `"tools/list"`, `"tools"`.
+    {callback} receives `(err, items)`.
+
+`require("mcp-client.rpc").next_id()`
+    A request id that never collides with the plugin's own.
+
+`require("mcp-client.commands").authenticate({name})`
+    The action behind |:MCPAuth|, for scripts.
+
+Client object fields: `id`, `name`, `config` (credentials redacted),
+`transport` ("stdio", "streamable_http", "legacy_sse", or "native"), and for
+remote servers `era` ("modern" or "legacy"), `protocol_version`,
+`server_info`, `server_capabilities`, `instructions`, and `pid` (stdio).
+
+Client object methods: `request(rpc, callback)`, `notify(rpc)`,
+`is_stopped()`, `state()` ("connected", "reconnecting", or "disconnected"),
+`stderr()` (stdio), and `disconnect()`. `request` applies the protocol era
+for you, so callers send plain JSON-RPC.
+
+ vim:tw=78:ts=8:sw=4:sts=4:et:ft=help:norl:

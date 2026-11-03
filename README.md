@@ -2,10 +2,12 @@
 
 A from-scratch [Model Context Protocol (MCP)][mcp] client for Neovim, with an
 LSP-inspired core and thin adapters for [Avante][avante] and
-[CodeCompanion][codecompanion]. It connects to standards-compliant MCP servers over
+[CodeCompanion][codecompanion]. It connects to standards-compliant MCP servers over stdio or
 Streamable HTTP (with a legacy HTTP+SSE fallback), hosts native in-process
 servers, and exposes their tools/resources/prompts to your AI plugins — all
-through the standard MCP endpoint, with no server-proprietary management API.
+through the standard MCP protocol, with no server-proprietary management API.
+It speaks MCP 2026-07-28 and falls back to the handshake-based revisions
+(2025-11-25 back to 2024-11-05) for servers that have not moved yet.
 Any spec-compliant server works; [mcphub][mcphub] is a maintained example of a
 multi-server hub if you want one.
 
@@ -66,6 +68,15 @@ require("mcp-client").setup({
   servers = {
     local_server  = { url = "http://localhost:PORT" },
     remote_server = { url = "https://your-server.example.com/mcp" },
+    -- A stdio server: launched as a subprocess, restarted if it exits.
+    stdio_server  = { command = "npx", args = { "-y", "your-mcp-server" }, env = { API_KEY = "..." } },
+  },
+
+  -- How this client answers servers that ask it for input (see "Client
+  -- features" below). Applies to every server; a server's own `handlers`
+  -- override these key by key.
+  handlers = {
+    roots = function(ctx) return { { uri = vim.uri_from_fname(vim.fn.getcwd()) } } end,
   },
 
   -- Native, in-process servers (a name -> server-config map). Each server is a
@@ -92,13 +103,78 @@ require("mcp-client").setup({
 Each server config is passed through to the client's `connect()`; the fields it
 understands:
 
-| Field       | Type     | Description                                                                 |
-| ----------- | -------- | --------------------------------------------------------------------------- |
-| `url`       | string   | **Required.** The server's MCP endpoint URL.                                   |
-| `name`      | string   | Optional. Defaults to the map key (or `"default"` for the `server` shorthand). |
-| `headers`   | table    | Optional. Extra headers merged into every request.                          |
-| `reconnect` | table    | Optional. Backoff tuning: `initial_delay`, `max_delay`, `growth_factor`, `max_attempts`. |
-| `auth`      | table    | Optional. `{ token_store = <TokenStore> }` to supply your own store (see below). |
+| Field              | Type     | Description |
+| ------------------ | -------- | ----------- |
+| `url`              | string   | The server's MCP endpoint URL (HTTP). Exactly one of `url` or `command` is required. |
+| `command`          | string   | The executable to launch for a stdio server. |
+| `args`             | string[] | Optional. Arguments for `command`. |
+| `env`              | table    | Optional. Environment variables added to the stdio server's inherited environment. |
+| `cwd`              | string   | Optional. Working directory for the stdio server. |
+| `name`             | string   | Optional. Defaults to the map key (or `"default"` for the `server` shorthand). |
+| `headers`          | table    | Optional. Extra headers merged into every HTTP request. |
+| `handlers`         | table    | Optional. Per-server client-feature handlers; see [Client features](#client-features-roots-elicitation-sampling). |
+| `timeout`          | number   | Optional. Milliseconds allowed for each connection step (default 10000). |
+| `discover_timeout` | number   | Optional. stdio only: milliseconds to wait for a reply to the modern discovery probe before treating the server as legacy (default 3000). |
+| `reconnect`        | table    | Optional. Backoff tuning: `initial_delay`, `max_delay`, `growth_factor`, `max_attempts`. |
+| `auth`             | table    | Optional. `{ token_store = <TokenStore> }` to supply your own store (see below). |
+
+### Protocol support
+
+Each connection works out which protocol era the server speaks:
+
+- **Modern (2026-07-28).** Stateless: every request carries its protocol
+  version and the client's capabilities in `_meta`. Over HTTP the client also
+  sends `Mcp-Method`, `Mcp-Name`, and the `Mcp-Param-*` headers a tool's
+  `x-mcp-header` annotations ask for (a tool with invalid annotations is left
+  out of `tools/list`). List-change notifications arrive on a
+  `subscriptions/listen` stream, and requests that need your input
+  (`input_required`) are answered and retried automatically.
+- **Legacy (2025-11-25 and earlier).** The `initialize` /
+  `notifications/initialized` handshake, Streamable HTTP sessions and the GET
+  notification stream, and the 2024-11-05 HTTP+SSE transport.
+
+Over HTTP the client first sends a modern `server/discover` and falls back to
+the legacy handshake when the server does not answer it as a modern server
+would. Over stdio it sends the same probe and treats a server that rejects it,
+or does not reply within `discover_timeout`, as legacy. `:MCPStatus` shows what
+each connection negotiated.
+
+---
+
+## Client features (roots, elicitation, sampling)
+
+Servers can ask the client for information while handling a request — legacy
+servers by sending a request, modern servers by returning `input_required`.
+The client answers through `handlers`, set in `setup()` for every server or in
+a server's own config:
+
+| Handler       | Signature                      | Default |
+| ------------- | ------------------------------ | ------- |
+| `roots`       | `fun(ctx): Root[]`             | The current working directory. |
+| `elicitation` | `fun(params, ctx, respond)`    | Prompts with `vim.ui.select` / `vim.ui.input`. |
+| `sampling`    | `fun(params, ctx, respond)`    | None — sampling is not offered unless you provide one. |
+
+`ctx` is `{ server = <server name> }`. `respond(err, result)` completes the
+request with an `ElicitResult` or `CreateMessageResult` (or an error). Set a
+handler to `false` to turn the feature off; the client then stops declaring
+the matching capability.
+
+The default elicitation handler names the server asking, collects each form
+field (enums and booleans as a picker, numbers and strings validated against
+the schema), and shows a review step before anything is sent. For a URL
+request it shows the full URL and its host and opens it with `vim.ui.open`
+only after you choose to. Escaping any prompt cancels.
+
+```lua
+require("mcp-client").setup({
+  handlers = {
+    sampling = function(params, ctx, respond)
+      -- Call your model of choice with params.messages, then:
+      respond(nil, { role = "assistant", content = { type = "text", text = "..." }, model = "my-model" })
+    end,
+  },
+})
+```
 
 ---
 
@@ -250,9 +326,8 @@ require("avante").setup({
   -- ones are wired separately below, not through this opt.
 })
 
--- MCP-derived slash commands: call this once after setup(), and again from an
--- MCPAttach/MCPDetach autocmd to keep the list current as clients
--- connect/disconnect. (A table handed through setup()'s `slash_commands` opt
+-- MCP-derived slash commands: call this once after setup(), and again from the
+-- autocmd under "Events" below to keep the list current. (A table handed through setup()'s `slash_commands` opt
 -- does NOT stay in sync automatically -- avante.nvim deep-copies opts during
 -- setup(), so this adapter instead writes directly into the live
 -- `require("avante.config").slash_commands` array on every refresh.)
@@ -269,9 +344,8 @@ require("codecompanion").setup({
     },
   },
 })
--- Call require("codecompanion").extensions["mcp-client"].refresh() from an
--- MCPAttach/MCPDetach autocmd to keep the tool list current as servers connect and
--- disconnect.
+-- Call require("codecompanion").extensions["mcp-client"].refresh() from the
+-- autocmd under "Events" below to keep the tool list current.
 ```
 
 Both adapters read tool/resource listings from the live client registry, so a
@@ -280,11 +354,24 @@ resolution.
 
 ---
 
+## Commands
+
+| Command                  | Action |
+| ------------------------ | ------ |
+| `:MCPStatus`             | Show each server's connection state, transport, protocol era and version, server identity, stdio pid and last stderr line, and auth status. |
+| `:MCPReconnect [server]` | Reconnect one configured server, or all of them. |
+| `:MCPAuth [server]`      | Run the OAuth flow for a server (see [Authenticating a server](#authenticating-a-server)). |
+| `:MCPLogout <server>`    | Delete a server's stored token and disconnect it. |
+
+---
+
 ## Health check
 
-Run `:checkhealth mcp-client` to see, per configured server:
+Run `:checkhealth mcp-client` to check that plenary.nvim and `curl` are
+available and to see, per configured server:
 
-- **connection status** — connected / disconnected / never-connected;
+- **connection status** — connected (with transport and negotiated protocol)
+  / disconnected / never-connected;
 - **auth status** — authenticated / token expired / no token — reported from
   redacted status fields only (the token itself is **never** printed);
 - **registered native servers**, with the trust-model reminder alongside.
@@ -298,16 +385,23 @@ A disconnected server or a missing/expired token is reported as a `warning` or
 
 The client fires `User` autocmds you can hook:
 
-| Pattern      | When                                              | `data`                    |
-| ------------ | ------------------------------------------------- | ------------------------- |
-| `MCPAttach`  | a client connects (initial connect or reconnect). | `{ client_id = <string> }` |
-| `MCPDetach`  | a client disconnects (reconnect exhausted).       | `{ client_id = <string> }` |
-| `MCPNotify`  | the server sends a notification.                  | `{ client_id = <string> }` |
+| Pattern      | When                                              | `data` |
+| ------------ | ------------------------------------------------- | ------ |
+| `MCPAttach`  | a client connects (initial connect or reconnect). | `{ client_id, server }` |
+| `MCPDetach`  | a client disconnects (reconnect exhausted).       | `{ client_id, server }` |
+| `MCPNotify`  | the server sends a notification.                  | `{ client_id, server, method, params }` |
+
+Refresh an adapter whenever a server connects, disconnects, or reports that
+its tools, prompts, or resources changed:
 
 ```lua
 vim.api.nvim_create_autocmd("User", {
-  pattern = { "MCPAttach", "MCPDetach" },
-  callback = function()
+  pattern = { "MCPAttach", "MCPDetach", "MCPNotify" },
+  callback = function(ev)
+    local changed = (ev.data.method or ""):match("list_changed$")
+    if ev.match == "MCPNotify" and not changed then
+      return
+    end
     pcall(function()
       require("codecompanion").extensions["mcp-client"].refresh()
     end)
@@ -326,9 +420,17 @@ vim.api.nvim_create_autocmd("User", {
 | `require("mcp-client.native").register(config)`           | Register one native server directly.             |
 | `require("mcp-client.auth.token_store").new(opts)`        | Construct a `TokenStore`.                         |
 | `require("mcp-client.auth.dcr").run_flow(opts, cb)`       | Run the interactive OAuth flow (manual auth).    |
+| `require("mcp-client.rpc").list_all(client, method, field, cb)` | Fetch every page of a `*/list` method, e.g. `("tools/list", "tools")`. |
+| `require("mcp-client.rpc").next_id()`                     | A JSON-RPC request id that never collides with the plugin's own. |
 
-Each client object exposes `id`, `name`, `config`, `is_stopped()`,
-`request(rpc, cb)`, `notify(rpc)`, and `disconnect()`.
+Each client object exposes `id`, `name`, `config`, `transport`
+(`"stdio"`, `"streamable_http"`, `"legacy_sse"`, or `"native"`), and for
+remote servers `era` (`"modern"` or `"legacy"`), `protocol_version`,
+`server_info`, `server_capabilities`, `instructions`, and `pid` (stdio).
+Methods: `is_stopped()`, `state()`, `request(rpc, cb)`, `notify(rpc)`,
+`stderr()` (stdio), and `disconnect()`. `request` handles the protocol era for
+you — request metadata, header mirroring, and `input_required` retries — so
+callers send plain JSON-RPC.
 
 [mcp]: https://modelcontextprotocol.io/
 [avante]: https://github.com/yetone/avante.nvim
